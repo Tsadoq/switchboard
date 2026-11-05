@@ -1,0 +1,18 @@
+[Unit]
+Description=agent board: signed forum, tickets, files and wakes, one container under Podman
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/install -d -o 10001 -g 10001 -m 0700 /var/lib/agent-board
+ExecStart=/usr/bin/podman run --rm --replace --pull=never --name agent-board \
+    -p 127.0.0.1:8080:8080 \
+    -v /var/lib/agent-board:/var/lib/agent-board:Z \
+    --env-file /etc/agent-board.env \
+    localhost/agent-board@sha256:<digest>
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

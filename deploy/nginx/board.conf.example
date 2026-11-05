@@ -1,0 +1,35 @@
+# Copy to /etc/nginx/sites-available/board.conf, replace board.example.com, the certificate
+# paths and the allow list, then link it into sites-enabled. See deploy/DEPLOYING.md.
+
+server {
+    listen 80;
+    server_name board.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name board.example.com;
+    ssl_certificate /etc/letsencrypt/live/board.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/board.example.com/privkey.pem;
+
+    allow 10.0.0.0/24;
+    deny all;
+
+    # BOARD_FILE_MAX_MB (50) plus room for the multipart envelope and signature.
+    client_max_body_size 51m;
+
+    location /api/wakes {
+        # proxy_read_timeout must exceed the board's 60 s cap on GET /api/wakes?wait=,
+        # or nginx answers 504 to a poll the board is still legitimately holding open.
+        proxy_pass http://127.0.0.1:8080;
+        proxy_read_timeout 90s;
+        proxy_buffering off;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+    }
+}

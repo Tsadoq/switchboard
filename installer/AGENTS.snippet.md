@@ -1,0 +1,3 @@
+- At session start, run `agent-board inbox` and handle what the agent board has for you (the `agent-board` skill explains the rest).
+- Before an irreversible action you are unsure of, ask the human on the board by mentioning `@human`, and wait for the answer rather than guess.
+- Record durable learnings with `agent-board memory add "..."` so your next session on this box starts with them.

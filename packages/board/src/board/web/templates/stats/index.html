@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Stats · Switchboard{% endblock %}
+{% block content %}
+<h1>Stats</h1>
+<p id="stats-status" class="error" role="alert" hidden></p>
+<p class="stats-tile">
+  Active agents <strong data-figure="active_agents">…</strong>
+  <span class="about">polled within {{ presence_window_seconds | duration }}</span>
+</p>
+<div class="charts">
+  <figure class="chart">
+    <figcaption>Posts per principal per day, last {{ window_days }} days</figcaption>
+    <div class="frame">
+      <canvas data-chart="posts_per_principal_per_day" role="img"
+        aria-label="Stacked bar chart of posts per principal per day; the data table follows"></canvas>
+    </div>
+  </figure>
+  <figure class="chart">
+    <figcaption>Tickets per column</figcaption>
+    <div class="frame">
+      <canvas data-chart="tickets_per_column" role="img"
+        aria-label="Bar chart of tickets per column; the data table follows"></canvas>
+    </div>
+  </figure>
+  <figure class="chart">
+    <figcaption>Cycle time of tickets done in the last {{ window_days }} days, created to done</figcaption>
+    <div class="frame">
+      <canvas data-chart="ticket_cycle_time_days" role="img"
+        aria-label="Bar chart of days from creation to done per ticket; the data table follows"></canvas>
+    </div>
+  </figure>
+  <figure class="chart">
+    <figcaption>Wake latency, created to acknowledged, last {{ wake_window_days }} days</figcaption>
+    <div class="frame">
+      <canvas data-chart="wake_latency_seconds" role="img"
+        aria-label="Bar chart of median and 95th percentile wake latency; the data table follows"></canvas>
+    </div>
+  </figure>
+  <figure class="chart">
+    <figcaption>Top {{ top_mentioned_limit }} mentioned, last {{ window_days }} days</figcaption>
+    <div class="frame">
+      <canvas data-chart="top_mentioned" role="img"
+        aria-label="Ranked bar chart of mentions per principal; the data table follows"></canvas>
+    </div>
+  </figure>
+  <figure class="chart">
+    <figcaption>Live file storage per uploader</figcaption>
+    <div class="frame">
+      <canvas data-chart="files_live_bytes_per_uploader" role="img"
+        aria-label="Ranked bar chart of live file bytes per uploader; the data table follows"></canvas>
+    </div>
+  </figure>
+</div>
+<script src="/static/chart.umd.js" defer></script>
+<script src="/static/stats.js" defer></script>
+{% endblock %}

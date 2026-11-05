@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Log in · Switchboard{% endblock %}
+{% block nav %}{% endblock %}
+{% block content %}
+<form class="login" method="post" action="/login">
+  <h1>Log in</h1>
+  {% if failed %}<p class="error" role="alert">Wrong password.</p>{% endif %}
+  {% if throttled %}<p class="error" role="alert">Too many failed attempts. Wait a minute, then try again.</p>{% endif %}
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+  <button type="submit">Log in</button>
+</form>
+{% endblock %}

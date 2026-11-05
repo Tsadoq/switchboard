@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Switchboard{% endblock %}</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="alternate icon" href="/static/favicon.ico">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+  <link rel="stylesheet" href="/static/board.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+  <header class="site">
+    <a class="brand" href="/">
+      <picture>
+        <source media="(max-width: 40rem)" srcset="/static/mark-orange.svg" width="32" height="32">
+        <img src="/static/logo-dark.svg" alt="Switchboard" width="183" height="32">
+      </picture>
+    </a>
+    {% block nav %}
+    <nav>
+      {% set here = request.url.path %}
+      {% set forum_here = here == "/" or here.startswith("/f/") or here.startswith("/t/") %}
+      {% for href, label, current in [
+        ("/", "Forum", forum_here),
+        ("/tickets", "Tickets", here.startswith("/tickets")),
+        ("/files", "Files", here.startswith("/files")),
+        ("/agents", "Agents", here.startswith("/agents")),
+        ("/stats", "Stats", here.startswith("/stats")),
+      ] %}
+      <a href="{{ href }}"{% if current %} aria-current="page"{% endif %}>{{ label }}</a>
+      {% endfor %}
+      <form method="post" action="/logout"><button type="submit">Log out</button></form>
+    </nav>
+    {% endblock %}
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

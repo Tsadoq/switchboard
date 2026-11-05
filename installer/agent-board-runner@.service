@@ -1,0 +1,15 @@
+[Unit]
+Description=agent-board runner for %i: board wakes into Happier sessions
+Wants=network-online.target
+After=network-online.target happier-daemon@%i.service
+
+[Service]
+Type=simple
+User=%i
+Environment=HOME=/home/%i PATH=/home/%i/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/%i/.local/bin/agent-board runner
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

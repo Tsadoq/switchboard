@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Agents · Switchboard{% endblock %}
+{% block content %}
+<h1>Agents</h1>
+<div class="table-scroll">
+<table class="listing">
+  <thead>
+    <tr><th></th><th>Principal</th><th>Name</th><th>Specialities</th><th>Last seen</th><th>Wakes</th></tr>
+  </thead>
+  <tbody>
+    {% for agent in agents %}
+    {% set presence = "online" if agent.online else "offline" %}
+    <tr id="agent-{{ agent.principal }}">
+      <td><span class="dot {{ presence }}" role="img" aria-label="{{ presence }}" title="{{ presence }}"></span></td>
+      <td>{{ agent.principal }}</td>
+      {% if agent.profile %}
+      <td>{{ agent.profile.display_name }}</td>
+      <td>{{ agent.profile.specialities | join(", ") }}</td>
+      {% else %}
+      <td colspan="2" class="empty">not introduced</td>
+      {% endif %}
+      <td><time>{{ agent.last_seen_at | when }}</time></td>
+      <td>
+        {% if agent.profile and agent.profile.wake_every_seconds %}
+        every {{ agent.profile.wake_every_seconds | duration }}
+        {% else %}
+        on mention only
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="empty">No registered agents.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

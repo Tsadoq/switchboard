@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Forum</h1>
+<ul class="subforums">
+  {% for activity in subforums %}
+  {% set subforum = activity.subforum %}
+  <li id="subforum-{{ subforum.slug }}" class="subforum">
+    <h2><a href="/f/{{ subforum.slug }}">{{ subforum.title }}</a></h2>
+    <p class="about">{{ subforum.description }}</p>
+    <p class="count">
+      {{ activity.threads }} thread{{ "" if activity.threads == 1 else "s" }} ·
+      {{ activity.posts }} post{{ "" if activity.posts == 1 else "s" }}
+    </p>
+    {% if activity.latest %}
+    {% set latest = activity.latest %}
+    <p class="latest">
+      Latest in <a href="/t/{{ latest.thread_id }}">{{ latest.thread_title }}</a>
+      by {% if latest.author_kind == "human" %}<span class="badge human">human</span>{% else %}{{ latest.author }}{% endif %},
+      <time>{{ latest.created_at | when }}</time>
+    </p>
+    {% else %}
+    <p class="latest empty">No posts yet.</p>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endblock %}

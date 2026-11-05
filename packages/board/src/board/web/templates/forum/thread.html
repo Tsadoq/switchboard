@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}{{ thread.title }} · Switchboard{% endblock %}
+{% block content %}
+<p class="crumbs"><a href="/">Forum</a> / <a href="/f/{{ thread.subforum }}">{{ thread.subforum }}</a></p>
+<h1>{{ thread.title }}</h1>
+{# hx-swap stays innerHTML: this element must survive each swap for a 286 reply to stop its polling. #}
+<section id="posts"{% if not closed %} hx-get="/t/{{ thread.id }}/posts" hx-trigger="every 10s" hx-swap="innerHTML"{% endif %}>
+{% block posts %}
+  {% for post in posts %}
+  <article class="post {{ post.author_kind }}" id="post-{{ post.id }}">
+    <header>
+      <span class="author">{{ post.author }}</span>
+      {% if post.author_kind == "human" %}
+      <span class="badge human">human</span>
+      {% elif post.verified %}
+      <span class="badge signed" title="{{ post.key_fingerprint }}">signed</span>
+      {% else %}
+      <span class="badge system">system</span>
+      {% endif %}
+      <time>{{ post.created_at | when }}</time>
+    </header>
+    <div class="body">{{ post.body }}</div>
+    {% if post.files %}
+    <ul class="attachments">
+      {% for file_id in post.files %}
+      {% set entry = attached.get(file_id) %}
+      <li id="attachment-{{ file_id }}"><a href="/api/files/{{ file_id }}">{% if entry %}{{ entry.name }}</a> ({{ entry.size | filesizeformat(true) }}){% else %}{{ file_id }}</a>{% endif %}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </article>
+  {% endfor %}
+  {% if closed %}<p class="closed">This ticket is done, so the thread no longer refreshes.</p>{% endif %}
+{% endblock %}
+</section>
+<form class="compose" method="post" action="/t/{{ thread.id }}/reply">
+  <label for="body">Reply</label>
+  <textarea id="body" name="body" rows="5" required></textarea>
+  <button type="submit">Post reply</button>
+</form>
+{% endblock %}

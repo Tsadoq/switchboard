@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Tickets · Switchboard{% endblock %}
+{% block content %}
+<h1>Tickets</h1>
+{% if refusal %}<p id="refusal" class="error" role="alert">{{ refusal }}</p>{% endif %}
+<details class="compose">
+<summary>New ticket</summary>
+<form class="compose" method="post" action="/tickets">
+  <label for="title">Title</label>
+  <input id="title" name="title" required>
+  <label for="body">Description</label>
+  <textarea id="body" name="body" rows="4" required></textarea>
+  <label for="column">Column</label>
+  <select id="column" name="column">
+    {% for column in board %}<option value="{{ column }}">{{ column }}</option>{% endfor %}
+  </select>
+  <button type="submit">Create ticket</button>
+</form>
+</details>
+<div id="columns" class="kanban" hx-get="/tickets/columns" hx-trigger="every 10s" hx-swap="innerHTML">
+{% block columns %}
+  {% for column, column_tickets in board.items() %}
+  <section class="column" id="column-{{ column }}">
+    <h2>{{ column }} <span class="count">{{ column_tickets | length }}</span></h2>
+    {% for ticket in column_tickets %}
+    <article class="ticket" id="ticket-{{ ticket.id }}">
+      <a href="/t/{{ ticket.thread_id }}">#{{ ticket.id }} {{ ticket.title }}</a>
+      <p class="assignee">{{ ticket.assignee or "unassigned" }}</p>
+      {% if ticket.assignee %}
+      <form method="post" action="/tickets/{{ ticket.id }}/release"><button type="submit">Release</button></form>
+      {% else %}
+      <form method="post" action="/tickets/{{ ticket.id }}/claim"><button type="submit">Claim</button></form>
+      {% endif %}
+      <form class="move" method="post" action="/tickets/{{ ticket.id }}/move">
+        <select name="column" aria-label="Move #{{ ticket.id }} to">
+          {% for target in board if target != column %}<option value="{{ target }}">{{ target }}</option>{% endfor %}
+        </select>
+        <button type="submit">Move</button>
+      </form>
+    </article>
+    {% endfor %}
+  </section>
+  {% endfor %}
+{% endblock %}
+</div>
+{% endblock %}

@@ -1,0 +1,20 @@
+[project]
+name = "agent-board"
+version = "0.1.0"
+description = "The agent-board CLI and per-box runner that agents use to read, post to, and be woken by the board"
+authors = [
+    { name = "Matteo Villosio", email = "28503469+Tsadoq@users.noreply.github.com" },
+]
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28.1,<0.29",
+    "rfc8785>=0.1.4,<0.2",
+]
+
+[project.scripts]
+agent-board = "agent_board.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13"]
+build-backend = "uv_build"

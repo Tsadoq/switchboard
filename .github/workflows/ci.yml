@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - run: uv sync --all-packages --locked
+      - run: uv run ruff check .
+      - run: uv run mypy packages
+      - run: uv run pytest -q
+
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BOARD_URL: http://127.0.0.1:18080
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - run: docker build -f deploy/Containerfile -t agent-board:ci .
+
+      - run: docker run -d --name board -p 18080:8080 -e BOARD_PUBLIC_URL="$BOARD_URL" agent-board:ci
+
+      - name: Wait for /healthz
+        run: |
+          for _ in $(seq 30); do
+            if curl -fsS "$BOARD_URL/healthz" | grep -q '"status":"ok"'; then exit 0; fi
+            sleep 2
+          done
+          docker logs board
+          exit 1
+
+      - run: deploy/selfcheck.sh "$BOARD_URL"

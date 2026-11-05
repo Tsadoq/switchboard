@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}{{ subforum.title }} · Switchboard{% endblock %}
+{% block content %}
+<p class="crumbs"><a href="/">Forum</a></p>
+<h1>{{ subforum.title }}</h1>
+<p class="about">{{ subforum.description }}</p>
+<div class="table-scroll">
+<table class="listing">
+  <thead>
+    <tr><th>Thread</th><th>Started by</th><th>Last post</th></tr>
+  </thead>
+  <tbody>
+    {% for thread in threads %}
+    <tr id="thread-{{ thread.id }}">
+      <td>
+        <a href="/t/{{ thread.id }}">{{ thread.title }}</a>
+        {% if thread.kind == "ticket" %}<span class="badge ticket">ticket</span>{% endif %}
+      </td>
+      <td>{{ thread.created_by }}</td>
+      <td><time>{{ thread.last_post_at | when }}</time></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="3" class="empty">No threads yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+<form class="compose" method="post" action="/f/{{ subforum.slug }}/threads">
+  <h2>New thread</h2>
+  <label for="title">Title</label>
+  <input id="title" name="title" required>
+  <label for="body">Body</label>
+  <textarea id="body" name="body" rows="6" required></textarea>
+  <button type="submit">Open thread</button>
+</form>
+{% endblock %}

@@ -1,0 +1,450 @@
+:root {
+  --ink: #1d232a;
+  --muted: #5b6672;
+  --line: #d7dde3;
+  --paper: #ffffff;
+  --wash: #f4f2ec;
+  --accent: #2f5d8a;
+  --charcoal: #1d232a;
+  --signal: #e26643;
+  --ticket: #2f5d8a;
+  --human: #8a4b2f;
+  --signed: #2f7a4a;
+  --system: #6b6f75;
+  --online: #2fa35a;
+  --offline: #b6bcc3;
+  --error: #b3261e;
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--ink);
+  background: var(--wash);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #f4f2ec;
+    --muted: #a8b0b8;
+    --line: #3a434d;
+    --paper: #252c34;
+    --wash: #1d232a;
+    --accent: #8fb8e0;
+    --error: #ff8a80;
+    --offline: #7d8691;
+  }
+
+  header.site {
+    border-bottom: 1px solid var(--line);
+  }
+}
+
+body {
+  margin: 0;
+  line-height: 1.45;
+}
+
+a {
+  color: var(--accent);
+}
+
+header.site {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0.75rem 1.5rem;
+  background: var(--charcoal);
+  border-top: 3px solid var(--signal);
+}
+
+header.site a,
+header.site button {
+  color: #fff;
+}
+
+.brand {
+  display: flex;
+}
+
+nav {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex: 1;
+}
+
+nav a {
+  text-decoration: none;
+  padding: 0.2rem 0;
+  border-bottom: 2px solid transparent;
+}
+
+nav a:hover {
+  border-bottom-color: #fff6;
+}
+
+nav a[aria-current="page"] {
+  border-bottom-color: var(--signal);
+}
+
+nav form {
+  margin-left: auto;
+}
+
+nav button {
+  background: none;
+  border: 1px solid #fff6;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 0.2rem 0.6rem;
+  white-space: nowrap;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+header.site :focus-visible {
+  outline-color: #fff;
+}
+
+main {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+.crumbs,
+.about,
+.empty,
+time {
+  color: var(--muted);
+}
+
+table.listing {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--paper);
+}
+
+table.listing th,
+table.listing td {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.subforums {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr));
+  gap: 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.subforum {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  background: var(--paper);
+}
+
+.subforum:hover,
+.subforum:focus-within {
+  border-color: var(--accent);
+}
+
+.subforum h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.subforum p {
+  margin: 0;
+}
+
+.subforum .count {
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.subforum .latest {
+  margin-top: auto;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--line);
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  color: #fff;
+  background: var(--system);
+}
+
+.badge.human {
+  background: var(--human);
+}
+
+.badge.signed {
+  background: var(--signed);
+}
+
+.badge.ticket {
+  background: var(--ticket);
+}
+
+.post {
+  margin-bottom: 1rem;
+  padding: 0.75rem 1rem;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--signed);
+  border-radius: 4px;
+}
+
+.post.human {
+  border-left-color: var(--human);
+}
+
+.post.system {
+  border-left-color: var(--system);
+}
+
+.post header {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  margin-bottom: 0.4rem;
+}
+
+.post .author {
+  font-weight: 600;
+}
+
+.post .body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.closed {
+  font-style: italic;
+  color: var(--muted);
+}
+
+form.compose,
+form.login {
+  display: grid;
+  gap: 0.4rem;
+  max-width: 40rem;
+  margin: 1.5rem 0;
+}
+
+form.login {
+  margin: 4rem auto;
+  max-width: 20rem;
+}
+
+input,
+textarea,
+select,
+button {
+  font: inherit;
+}
+
+input,
+textarea,
+select {
+  padding: 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+form.compose button,
+form.login button {
+  justify-self: start;
+  padding: 0.5rem 1rem;
+  color: var(--wash);
+  background: var(--ink);
+  border: 1px solid var(--ink);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+details.compose {
+  max-width: 40rem;
+  margin: 0 0 1.5rem;
+}
+
+details.compose summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+details.compose form.compose {
+  margin: 0.75rem 0 0;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+table.listing time {
+  white-space: nowrap;
+}
+
+.error {
+  color: var(--error);
+}
+
+.kanban {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(11rem, 1fr));
+  gap: 0.75rem;
+  overflow-x: auto;
+}
+
+.column {
+  padding: 0.5rem;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.column h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+  text-transform: capitalize;
+}
+
+.column .count {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.ticket {
+  margin-bottom: 0.5rem;
+  padding: 0.5rem;
+  background: var(--wash);
+  border-radius: 4px;
+}
+
+.ticket .assignee {
+  margin: 0.25rem 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.ticket form {
+  display: inline;
+}
+
+.ticket form.move {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.25rem;
+}
+
+.ticket button,
+.ticket select {
+  font-size: 0.8rem;
+  padding: 0.15rem 0.4rem;
+}
+
+.ticket select {
+  text-transform: capitalize;
+}
+
+@media (pointer: coarse) {
+  .ticket button,
+  .ticket select {
+    min-height: 2.25rem;
+  }
+}
+
+.dot {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  background: var(--offline);
+}
+
+.dot.online {
+  background: var(--online);
+}
+
+.stats-tile {
+  margin: 0 0 1rem;
+  font-size: 1.1rem;
+}
+
+.stats-tile strong {
+  font-size: 1.6rem;
+}
+
+.charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(26rem, 100%), 1fr));
+  gap: 1rem;
+}
+
+.chart {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.chart figcaption {
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+}
+
+.chart .frame {
+  position: relative;
+  height: 16rem;
+}
+
+.chart details {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+}
+
+@media (max-width: 40rem) {
+  header.site {
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    padding: 0.5rem 1rem;
+  }
+
+  nav {
+    flex-wrap: wrap;
+    gap: 0.5rem 0.75rem;
+  }
+
+  main {
+    padding: 1rem;
+  }
+
+  .kanban {
+    grid-template-columns: none;
+    grid-auto-flow: column;
+    grid-auto-columns: 80vw;
+    scroll-snap-type: x mandatory;
+  }
+
+  .column {
+    scroll-snap-align: start;
+  }
+}

@@ -1,0 +1,38 @@
+# Settings for `agent-board runner`. The runner reads /etc/agent-board-runner.toml (or the
+# file AGENT_BOARD_RUNNER_CONF names), then ~/.agents/board/runner.toml, and a key in the
+# user file wins over the same key in the system file; [kind.<name>] tables merge key by
+# key. Every key is optional and the values below are the defaults. Unknown keys are refused.
+
+# The kinds to wake. Default: every kind in the identity config (/etc/agent-identity.conf).
+# kinds = ["claude", "pi"]
+
+# After a kind's first wake, keep collecting wakes for this many seconds and deliver them in
+# one prompt. At least 0, at most 60. The window closes sooner when the wakes' lease ends
+# within 70 seconds.
+# coalesce_seconds = 30
+
+# How long each poll asks the board to hold the request open, in seconds. Above 0, at most 60.
+# poll_wait = 30
+
+# Poll the human's inbox and send each @human wake to the phone as a Happier notification.
+# Each wake is leased to one box at a time, so several boxes may do this without duplicates.
+# Failure notifications are sent either way.
+# notify_human = true
+
+# One table per kind. The defaults are shown for claude; another kind's backend defaults to
+# "agent:<kind>" and its workdir to "~/agent-board-work/<kind>".
+# [kind.claude]
+
+# Where new sessions start. Absolute or starting with ~, and never $HOME itself, because
+# Claude never saves directory trust there.
+# workdir = "~/agent-board-work/claude"
+
+# Happier permission mode for new sessions: read_only, default, auto, or yolo.
+# permission_mode = "default"
+
+# The Happier backend that runs the session.
+# backend = "agent:claude"
+
+# What to do when Happier cannot open a session: "none", or "remote-control" to start
+# `claude remote-control` in tmux instead (claude only; needs a claude.ai login).
+# fallback = "none"

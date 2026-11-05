@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+#
+# Stands in for /usr/local/bin/happier 0.2.17 in the runner tests. State lives in
+# $FAKE_HAPPIER_STATE as {"sessions": [{"session", "agentState", "messages"}], "notifications"};
+# `session` and `agentState` copy probes 13 and 15, and the JSON envelopes copy probes 21, 22
+# and 27. FAKE_HAPPIER_FAIL=create:<code> or send:<code> makes that command fail with <code>.
+
+import argparse
+import fcntl
+import json
+import os
+import secrets
+import socket
+import sys
+from contextlib import contextmanager
+
+FAIL_ENV = "FAKE_HAPPIER_FAIL"
+MACHINE_ID = "fake-machine-0001"
+
+
+@contextmanager
+def state():
+    with open(os.environ["FAKE_HAPPIER_STATE"], "a+", encoding="utf-8") as file:
+        fcntl.flock(file, fcntl.LOCK_EX)
+        file.seek(0)
+        text = file.read()
+        current = json.loads(text) if text.strip() else {}
+        current.setdefault("sessions", [])
+        current.setdefault("notifications", [])
+        yield current
+        file.seek(0)
+        file.truncate()
+        json.dump(current, file)
+
+
+def reply(kind: str, data: dict) -> int:
+    print(json.dumps({"v": 1, "ok": True, "kind": kind, "data": data}))
+    return 0
+
+
+def refuse(kind: str, code: str) -> int:
+    print(json.dumps({"v": 1, "ok": False, "kind": kind, "error": {"code": code}}))
+    return 1
+
+
+def injected_failure(command: str) -> str | None:
+    failing, _, code = os.environ.get(FAIL_ENV, "").partition(":")
+    return code if failing == command and code else None
+
+
+def find(current: dict, session_id: str) -> dict | None:
+    return next((entry for entry in current["sessions"] if entry["session"]["id"] == session_id), None)
+
+
+def cmd_create(args: argparse.Namespace) -> int:
+    if code := injected_failure("create"):
+        return refuse("session_create", code)
+    session = {
+        "id": "cm" + secrets.token_hex(12),
+        "title": args.title,
+        "path": args.path,
+        "host": socket.gethostname(),
+        "machineId": MACHINE_ID,
+        "permissionMode": args.permission_mode,
+        "agentId": args.backend.removeprefix("agent:"),
+        "active": True,
+        "pendingCount": 0,
+    }
+    agent_state = {"pendingRequestsCount": 0, "controlledByUser": False}
+    with state() as current:
+        current["sessions"].append(
+            {"session": session, "agentState": agent_state, "messages": [args.prompt]}
+        )
+    return reply("session_create", {"session": session, "created": True})
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    with state() as current:
+        entry = find(current, args.session_id)
+    if entry is None:
+        return refuse("session_status", "session_not_found")
+    return reply("session_status", {"session": entry["session"], "agentState": entry["agentState"]})
+
+
+def cmd_send(args: argparse.Namespace) -> int:
+    if code := injected_failure("send"):
+        return refuse("session_send", code)
+    with state() as current:
+        entry = find(current, args.session_id)
+        if entry is not None:
+            entry["messages"].append(args.message)
+    if entry is None:
+        return refuse("session_send", "session_not_found")
+    return reply("session_send", {"sessionId": args.session_id})
+
+
+def cmd_notify(args: argparse.Namespace) -> int:
+    with state() as current:
+        current["notifications"].append({"title": args.title, "message": args.message})
+    print("Notification sent")
+    return 0
+
+
+def parse(argv: list[str]) -> argparse.Namespace:
+    top = argparse.ArgumentParser(prog="happier", allow_abbrev=False)
+    commands = top.add_subparsers(dest="command", required=True)
+    session = commands.add_parser("session").add_subparsers(dest="action", required=True)
+    create = session.add_parser("create")
+    create.set_defaults(run=cmd_create)
+    create.add_argument("--path", required=True)
+    create.add_argument("--backend", required=True)
+    create.add_argument("--title", required=True)
+    create.add_argument("--tag")
+    create.add_argument("--prompt", "--message", dest="prompt", required=True)
+    create.add_argument("--permission-mode", default="default",
+                        choices=("read_only", "default", "auto", "yolo"))
+    create.add_argument("--json", action="store_true", required=True)
+    status = session.add_parser("status")
+    status.set_defaults(run=cmd_status)
+    status.add_argument("session_id")
+    status.add_argument("--live", action="store_true")
+    status.add_argument("--json", action="store_true", required=True)
+    send = session.add_parser("send")
+    send.set_defaults(run=cmd_send)
+    send.add_argument("session_id")
+    send.add_argument("message")
+    send.add_argument("--json", action="store_true", required=True)
+    notify = commands.add_parser("notify")
+    notify.set_defaults(run=cmd_notify)
+    notify.add_argument("-p", dest="message", required=True)
+    notify.add_argument("-t", dest="title")
+    return top.parse_args(argv)
+
+
+if __name__ == "__main__":
+    arguments = parse(sys.argv[1:])
+    sys.exit(arguments.run(arguments))
