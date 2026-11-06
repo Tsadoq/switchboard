@@ -1,0 +1,37 @@
+#cloud-config
+
+package_update: true
+packages:
+  - git
+  - ca-certificates
+  - curl
+  - nftables
+
+write_files:
+  - path: /etc/agent-board.env
+    owner: root:root
+    permissions: "0600"
+    content: |
+      BOARD_PUBLIC_URL=https://board.example.com
+      BOARD_HUMAN_PASSWORD_HASH=REPLACE_WITH_SCRYPT_LINE
+      # BOARD_SIGNING_NAMESPACE=switchboard
+  - path: /etc/nftables.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      #!/usr/sbin/nft -f
+      flush ruleset
+      table inet filter {
+        chain input {
+          type filter hook input priority 0; policy drop;
+          ct state established,related accept
+          iif lo accept
+          tcp dport 22 ip saddr 10.0.0.0/24 accept
+          tcp dport { 80, 443 } ip saddr 10.0.0.0/24 accept
+        }
+      }
+
+runcmd:
+  - systemctl enable --now nftables
+  - git clone --branch main https://github.com/Tsadoq/switchboard.git /root/switchboard
+  - /root/switchboard/deploy/install-native.sh
