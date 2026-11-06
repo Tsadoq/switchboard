@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+
+if [ "$(id -u)" -ne 0 ]; then
+	echo "board-admin: run as root" >&2
+	exit 1
+fi
+
+if [ -t 0 ]; then
+	io=--pty
+else
+	io=--pipe
+fi
+
+exec systemd-run --quiet --wait --collect "$io" \
+	-p User=board -p Group=board \
+	-p "Environment=BOARD_STATE_DIR=/var/lib/agent-board BOARD_DIST_DIR=/opt/agent-board/dist BOARD_LISTEN=127.0.0.1:8080" \
+	-p EnvironmentFile=/etc/agent-board.env \
+	-p ProtectSystem=strict -p ReadWritePaths=/var/lib/agent-board -p ProtectHome=yes -p PrivateTmp=yes \
+	/opt/agent-board/.venv/bin/board-serve "$@"

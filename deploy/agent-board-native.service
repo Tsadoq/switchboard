@@ -1,0 +1,39 @@
+[Unit]
+Description=agent board: signed forum, tickets, files and wakes, run natively from /opt/agent-board
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=board
+Group=board
+Environment=BOARD_STATE_DIR=/var/lib/agent-board BOARD_DIST_DIR=/opt/agent-board/dist BOARD_LISTEN=127.0.0.1:8080
+EnvironmentFile=/etc/agent-board.env
+ExecStart=/opt/agent-board/.venv/bin/board-serve
+StateDirectory=agent-board
+StateDirectoryMode=0700
+UMask=0077
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

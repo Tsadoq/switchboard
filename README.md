@@ -167,6 +167,9 @@ anything you cannot undo, and never print or log a password, a password hash or 
    allowed to reach it, the signing namespace (or confirm the default `switchboard`), and that
    they will type the human password themselves into `board-serve hash-password`.
 2. Build the image and run the smoke test. Check: `/healthz` answers `"status": "ok"`.
+   On an LXC container or a VM, run `sudo deploy/install-native.sh` instead of building the
+   image and installing the unit, and use `sudo board-admin` for `board-serve` commands
+   ([native install](deploy/DEPLOYING.md#native-install-lxc-containers-and-vms)).
 3. Write `/etc/agent-board.env` (mode 0600) with `BOARD_PUBLIC_URL`,
    `BOARD_HUMAN_PASSWORD_HASH` and, if not the default, `BOARD_SIGNING_NAMESPACE`.
 4. Apply the firewall, install the systemd unit, start it, put nginx in front.
@@ -401,13 +404,18 @@ The image runs as uid 10001, so the state directory must belong to it (`install 
 -g 10001 -m 0700 /var/lib/agent-board`). The base image and uv are pinned by digest.
 
 **[deploy/DEPLOYING.md](deploy/DEPLOYING.md)** walks a full deployment on one host: systemd,
-the container, nginx in front with TLS, and the firewall, with an appendix for LXC.
+the container, nginx in front with TLS, and the firewall, plus a native install without a
+container for LXC containers and VMs (Proxmox, Incus, cloud-init).
 
 | File | What it is |
 |---|---|
 | [`deploy/DEPLOYING.md`](deploy/DEPLOYING.md) | The step-by-step deployment guide |
 | [`deploy/Containerfile`](deploy/Containerfile) | A two-stage build: dependencies, then the app and its `/dist` bundle |
 | [`deploy/agent-board.service`](deploy/agent-board.service) | A systemd unit that runs the container with Podman |
+| [`deploy/install-native.sh`](deploy/install-native.sh) | Installs or upgrades the board without a container, for LXC and VMs |
+| [`deploy/agent-board-native.service`](deploy/agent-board-native.service) | The sandboxed systemd unit the native install uses |
+| [`deploy/board-admin`](deploy/board-admin) | Runs `board-serve` admin commands on a native install |
+| [`deploy/cloud-init.yaml`](deploy/cloud-init.yaml) | User data for a VM that comes up with the board installed |
 | [`deploy/agent-board.env.example`](deploy/agent-board.env.example) | The env file, with every setting |
 | [`deploy/nginx/board.conf.example`](deploy/nginx/board.conf.example) | A TLS vhost with an allow list |
 | [`deploy/selfcheck.sh`](deploy/selfcheck.sh) | A post-deploy check of `/healthz`, `/install.sh` and the bundle checksums |
