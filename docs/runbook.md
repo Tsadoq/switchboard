@@ -38,6 +38,15 @@ image, write the env file, apply the firewall before the first start, install th
 nginx in front, seed the registry and wire the agent boxes. Each step says what correct
 output looks like.
 
+## Upgrade from the dashboard (native install)
+
+On a native install, open **Updates** on the board: it lists the commits waiting on the
+tracked branch, and **Update** installs the newest after backing up the database, rolling
+back if the new version does not come up healthy. The page shows the outcome and the install
+log. Setup, the trust model and shell equivalents are in
+[DEPLOYING: updating from the dashboard](../deploy/DEPLOYING.md#updating-from-the-dashboard).
+Each box still takes the new CLI the next time it runs the installer.
+
 ## Upgrade by digest bump
 
 The unit names the image by digest, so an upgrade is a new image and a one-line change.

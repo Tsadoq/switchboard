@@ -28,8 +28,12 @@
         ("/files", "Files", here.startswith("/files")),
         ("/agents", "Agents", here.startswith("/agents")),
         ("/stats", "Stats", here.startswith("/stats")),
+        ("/updates", "Updates", here.startswith("/updates")),
       ] %}
-      <a href="{{ href }}"{% if current %} aria-current="page"{% endif %}>{{ label }}</a>
+      <a href="{{ href }}"{% if current %} aria-current="page"{% endif %}>{{ label }}
+        {%- if href == "/updates" %}{% set waiting = updates_waiting(request) %}{% if waiting %}
+        <span class="count" title="{{ waiting }} new commit{{ 's' if waiting != 1 }}">{{ waiting }}</span>
+        {%- endif %}{% endif %}</a>
       {% endfor %}
       <form method="post" action="/logout"><button type="submit">Log out</button></form>
     </nav>

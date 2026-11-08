@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}Updates · Switchboard{% endblock %}
+{% block content %}
+<h1>Updates</h1>
+{% if refusal %}<p class="error" role="alert">{{ refusal }}</p>{% endif %}
+{% block panel %}
+<section id="update-panel" class="update-panel"
+  {% if status and status.busy %}hx-get="/updates/panel" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
+  {% if not status %}
+  <p class="empty">
+    This board cannot update itself: no updater status was found. Dashboard updates need the
+    native install (<code>deploy/install-native.sh</code>), which sets up the
+    <code>agent-board-update</code> service. A container install is upgraded by rebuilding its image.
+  </p>
+  {% else %}
+  <dl class="update-facts">
+    <dt>Installed</dt>
+    <dd>
+      {% if status.installed %}
+      <code>{{ status.installed.short }}</code> {{ status.installed.subject }}
+      <time>{{ status.installed.date }}</time>
+      {% else %}
+      <span class="empty">unknown; run <code>deploy/install-native.sh</code> once from a clone</span>
+      {% endif %}
+    </dd>
+    <dt>Tracking</dt>
+    <dd><code>{{ status.branch }}</code> at {{ status.remote }}</dd>
+    <dt>Latest</dt>
+    <dd>
+      {% if status.latest %}
+      <code>{{ status.latest.short }}</code> {{ status.latest.subject }} <time>{{ status.latest.date }}</time>
+      {% else %}
+      <span class="empty">not fetched yet</span>
+      {% endif %}
+    </dd>
+    <dt>Last checked</dt>
+    <dd><time>{{ status.checked_at | when }}</time></dd>
+  </dl>
+
+  {% if status.queued == "apply" or status.state == "applying" %}
+  <p class="update-state" role="status">
+    Updating{% if status.requested %} to <code>{{ status.requested }}</code>{% endif %}. The board restarts
+    near the end; this page reconnects by itself.
+  </p>
+  {% elif status.busy %}
+  <p class="update-state" role="status">Checking for updates…</p>
+  {% elif status.error %}
+  <p class="error" role="alert">{{ status.error }}</p>
+  {% endif %}
+
+  {% if status.last_update and not status.busy %}
+  <p class="{{ 'update-state' if status.last_update.ok else 'error' }}">
+    {% if status.last_update.ok %}
+    Updated to <code>{{ status.last_update.to }}</code> <time>{{ status.last_update.finished_at | when }}</time>.
+    {% elif status.last_update.rolled_back %}
+    The update to <code>{{ status.last_update.to }}</code> failed and was rolled back
+    <time>{{ status.last_update.finished_at | when }}</time>: {{ status.last_update.message }}
+    {% else %}
+    The update to <code>{{ status.last_update.to }}</code> failed and could not be rolled back
+    <time>{{ status.last_update.finished_at | when }}</time>: {{ status.last_update.message }}.
+    Check the host with <code>systemctl status agent-board</code>.
+    {% endif %}
+  </p>
+  {% endif %}
+
+  {% if not status.busy %}
+  <div class="update-actions">
+    <form method="post" action="/updates/check"><button type="submit">Check now</button></form>
+    {% if status.offered %}
+    <form method="post" action="/updates/apply">
+      <input type="hidden" name="commit" value="{{ status.offered.commit }}">
+      {% set retry = status.last_update and not status.last_update.ok and status.last_update.to == status.offered.short %}
+      <button type="submit" class="primary">{{ "Retry update" if retry else "Update" }} to {{ status.offered.short }}</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if status.behind == 0 %}
+  <p class="update-state">Up to date with <code>{{ status.branch }}</code>.</p>
+  {% elif status.behind %}
+  <h2>{{ status.behind }} new commit{{ "s" if status.behind != 1 }}</h2>
+  <ul class="commits">
+    {% for commit in status.pending %}
+    <li><code>{{ commit.short }}</code> {{ commit.subject }} <time>{{ commit.date }}</time></li>
+    {% endfor %}
+    {% if status.behind > status.pending | length %}
+    <li class="empty">and {{ status.behind - status.pending | length }} older</li>
+    {% endif %}
+  </ul>
+  {% elif status.installed and status.latest %}
+  <p class="error">
+    The installed commit is not on <code>{{ status.branch }}</code>, so there is nothing to offer.
+    Install from the branch on the host, or change <code>BRANCH</code> in
+    <code>/etc/agent-board-update.conf</code>.
+  </p>
+  {% endif %}
+
+  {% if status.log_tail %}
+  <details class="update-log"{% if status.busy %} open{% endif %}>
+    <summary>Log of the last update</summary>
+    <pre>{{ status.log_tail | join("\n") }}</pre>
+  </details>
+  {% endif %}
+  {% endif %}
+</section>
+{% endblock %}
+{% endblock %}

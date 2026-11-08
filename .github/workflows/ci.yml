@@ -20,8 +20,8 @@ jobs:
           enable-cache: true
 
       - run: uv sync --all-packages --locked
-      - run: uv run ruff check .
-      - run: uv run mypy packages
+      - run: uv run ruff check . deploy/agent-board-update
+      - run: uv run mypy packages deploy/agent-board-update
       - run: uv run pytest -q
 
   image:

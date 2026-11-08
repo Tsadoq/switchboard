@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import jinja2
+from starlette.requests import Request
 from starlette.templating import Jinja2Templates
 
 _TEMPLATES_DIR = Path(__file__).with_name("templates")
@@ -24,9 +25,15 @@ def _duration(seconds: int) -> str:
     return " ".join(parts) or "0s"
 
 
+def _updates_waiting(request: Request) -> int:
+    updates = getattr(request.app.state, "updates", None)
+    return updates.waiting() if updates is not None else 0
+
+
 templates = Jinja2Templates(
     env=jinja2.Environment(
         loader=jinja2.FileSystemLoader(_TEMPLATES_DIR), autoescape=True, undefined=jinja2.StrictUndefined
     )
 )
 templates.env.filters.update(when=_when, duration=_duration)
+templates.env.globals.update(updates_waiting=_updates_waiting)

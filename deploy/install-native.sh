@@ -7,6 +7,12 @@ STATE_DIR="/var/lib/agent-board"
 ENV_FILE="/etc/agent-board.env"
 UNIT="/etc/systemd/system/agent-board.service"
 ADMIN="/usr/local/sbin/board-admin"
+UPDATER="/usr/local/sbin/agent-board-update"
+UPDATE_DIR="/var/lib/agent-board-update"
+UPDATE_CONF="/etc/agent-board-update.conf"
+UPDATE_UNITS=(agent-board-update.service agent-board-update.path agent-board-update.timer)
+DEFAULT_REMOTE="https://github.com/Tsadoq/switchboard.git"
+DEFAULT_BRANCH="main"
 UV_CACHE="/var/cache/agent-board-uv"
 UV_VERSION="0.13.7"
 BOARD_USER="board"
@@ -22,9 +28,10 @@ Usage: install-native.sh [--no-start]
 
 Installs or upgrades the board on this host without a container: the code at $PREFIX/src,
 a venv at $PREFIX/.venv, the /dist bundle at $PREFIX/dist, state in $STATE_DIR, the
-agent-board.service unit and the $ADMIN wrapper for board-serve commands. Run it as root
-from a clone of the repository; it installs the clone's committed HEAD. $ENV_FILE is created
-from the example only when it does not exist. Running it again upgrades in place.
+agent-board.service unit, the $ADMIN wrapper for board-serve commands, and the updater
+behind the board's Updates page ($UPDATER and its units). Run it as root from a clone of the
+repository; it installs the clone's committed HEAD. $ENV_FILE and $UPDATE_CONF are created
+only when they do not exist. Running it again upgrades in place.
 
   --no-start  install everything but leave the service stopped
 USAGE
@@ -123,6 +130,17 @@ install_source() {
 	fi
 	mv -- "$PREFIX/src.new" "$PREFIX/src"
 	rm -rf -- "$PREFIX/src.old"
+	record_installed
+}
+
+record_installed() {
+	git -C "$REPO" log -1 --format='%H%x00%s%x00%cI' HEAD | python3.13 -I -c '
+import json, sys, time
+commit, subject, date = sys.stdin.read().rstrip("\n").split("\0")
+json.dump({"commit": commit, "subject": subject, "date": date, "installed_at": time.time()}, sys.stdout)
+' >"$PREFIX/installed.json.new"
+	chmod 0644 "$PREFIX/installed.json.new"
+	mv -- "$PREFIX/installed.json.new" "$PREFIX/installed.json"
 }
 
 build() {
@@ -137,11 +155,40 @@ build() {
 install_files() {
 	install -m 0644 "$REPO/deploy/agent-board-native.service" "$UNIT"
 	install -m 0755 "$REPO/deploy/board-admin" "$ADMIN"
+	install_updater
 	if [[ ! -e $ENV_FILE ]]; then
 		say "writing $ENV_FILE from the example; edit it before agents connect"
 		install -m 0600 -o root -g root "$REPO/deploy/agent-board.env.example" "$ENV_FILE"
 	fi
 	systemctl daemon-reload
+}
+
+install_updater() {
+	local unit
+	install -m 0755 "$REPO/deploy/agent-board-update" "$UPDATER"
+	for unit in "${UPDATE_UNITS[@]}"; do
+		install -m 0644 "$REPO/deploy/$unit" "/etc/systemd/system/$unit"
+	done
+	install -d -m 0755 -o root -g root "$UPDATE_DIR"
+	[[ -e $UPDATE_CONF ]] && return 0
+	local remote branch
+	remote="$(git -C "$REPO" remote get-url origin 2>/dev/null || echo "$DEFAULT_REMOTE")"
+	branch="$(git -C "$REPO" symbolic-ref --short -q HEAD || echo "$DEFAULT_BRANCH")"
+	say "writing $UPDATE_CONF: the Updates page follows $branch at $remote"
+	sed -e "s|^REMOTE=.*|REMOTE=${remote//[\\|&]/\\&}|" -e "s|^BRANCH=.*|BRANCH=$branch|" \
+		"$REPO/deploy/agent-board-update.conf.example" >"$UPDATE_CONF"
+	chmod 0644 "$UPDATE_CONF"
+}
+
+enable_updater() {
+	if ((!start)); then
+		systemctl enable -q agent-board-update.path agent-board-update.timer
+		return 0
+	fi
+	systemctl enable -q --now agent-board-update.path agent-board-update.timer
+	if [[ -z ${AGENT_BOARD_UPDATING:-} ]]; then
+		systemctl start --no-block agent-board-update.service
+	fi
 }
 
 start_service() {
@@ -167,6 +214,9 @@ remind() {
 	if ! grep -q '^BOARD_HUMAN_PASSWORD_HASH=.' "$ENV_FILE"; then
 		say "no human login yet: run 'board-admin hash-password', put the line in $ENV_FILE, then 'systemctl restart agent-board'"
 	fi
+	if ! grep -q '^REMOTE=https://' "$UPDATE_CONF"; then
+		say "$UPDATE_CONF does not fetch over https://; make sure root can fetch it without a password or key"
+	fi
 	if ! grep -q '^BOARD_PUBLIC_URL=https://' "$ENV_FILE" || grep -q '^BOARD_PUBLIC_URL=https://board.example.com$' "$ENV_FILE"; then
 		say "set BOARD_PUBLIC_URL in $ENV_FILE to the board's real https:// URL"
 	fi
@@ -184,6 +234,7 @@ main() {
 	build
 	install_files
 	start_service
+	enable_updater
 	remind
 }
 

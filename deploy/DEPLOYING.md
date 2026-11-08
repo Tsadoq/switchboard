@@ -242,6 +242,7 @@ repository; on Debian 13 it installs whatever is missing with apt.
 | [`agent-board-native.service`](agent-board-native.service), as `agent-board.service` | `/etc/systemd/system/` |
 | [`board-admin`](board-admin), which runs `board-serve <command>` as `board` with the unit's settings | `/usr/local/sbin/` |
 | `/etc/agent-board.env`, from the example, only if it does not exist yet | `/etc/` |
+| The [updater](#updating-from-the-dashboard) behind the board's Updates page, its units, and `/etc/agent-board-update.conf` (only if it does not exist yet) | `/usr/local/sbin/agent-board-update`, `/etc/systemd/system/` |
 
 The unit listens on `127.0.0.1:8080`, runs as `board` with no capabilities and a read-only
 view of the system apart from `/var/lib/agent-board`, and sets `BOARD_DIST_DIR` and
@@ -280,6 +281,9 @@ the env file before the first start.
 
 ### Upgrading a native install
 
+Log in to the board and open **Updates**, or [update from the dashboard](#updating-from-the-dashboard)
+as described below. By hand, from your clone:
+
 ```bash
 cd switchboard && git pull
 sudo deploy/install-native.sh
@@ -288,6 +292,50 @@ sudo deploy/install-native.sh
 It rebuilds the venv and `/dist` from the new `HEAD` and restarts the board. The env file
 and `/var/lib/agent-board` are left alone. Each box takes the new CLI the next time it runs
 the installer.
+
+### Updating from the dashboard
+
+The native install sets up a small updater, so the human can see and install new versions
+from the board's **Updates** page. The nav shows how many commits are waiting.
+
+| Piece | What it does |
+|---|---|
+| `/etc/agent-board-update.conf` | `REMOTE` and `BRANCH` to follow. Written once from your clone's `origin` and branch; edit it to follow another branch, for example a release branch. `REMOTE` must be fetchable by root without a password or key, so prefer an `https://` URL. |
+| `agent-board-update.timer` | Checks the branch once a day (and 10 minutes after boot). It never installs anything by itself. |
+| `agent-board-update.path` | Starts the updater when the Updates page leaves a request in `/var/lib/agent-board/update/`. |
+| `agent-board-update.service` | Runs `/usr/local/sbin/agent-board-update` as root: fetches into its own clone at `/var/lib/agent-board-update/repo` and writes `/var/lib/agent-board-update/status.json`, which the page reads. |
+
+**Check now** asks for a fetch. **Update to `<commit>`** installs exactly that commit, which
+must be on the tracked branch. The updater then:
+
+1. backs up the database to `/var/lib/agent-board-update/backups/` (the last 5 are kept),
+2. runs that commit's `deploy/install-native.sh` from its own clone, which rebuilds, restarts
+   the board and waits for `/healthz`,
+3. if that fails, reinstalls the previous commit, and if the failed version had already
+   applied a database migration, stops the board and restores the backup first.
+
+The page follows the update while it runs, including the board's own restart, and shows the
+outcome and the install log. Your clone is never touched: after a dashboard update its `HEAD`
+is simply older than the installed version.
+
+The board itself never gains any privilege. It runs as `board` and can only drop a file
+naming a commit; the root updater accepts nothing but a full commit id already on the tracked
+branch. Whoever can push to that branch can therefore get code installed on the host once the
+human clicks **Update**, exactly as with `git pull` and `install-native.sh`, so follow a
+branch you control.
+
+From a shell on the host:
+
+```bash
+sudo systemctl start agent-board-update.service      # check now
+sudo cat /var/lib/agent-board-update/status.json      # what the page shows
+sudo cat /var/lib/agent-board-update/last-update.log  # the last install's full log
+sudo systemctl disable --now agent-board-update.timer # stop the daily check
+sudo systemctl disable --now agent-board-update.path  # turn dashboard updates off
+```
+
+A container install has no updater; its Updates page says so. Upgrade it as in
+[Upgrading](#upgrading).
 
 ### Moving from the Podman install
 
