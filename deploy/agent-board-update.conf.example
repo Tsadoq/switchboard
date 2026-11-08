@@ -1,0 +1,10 @@
+# /etc/agent-board-update.conf: where the board's Updates page looks for new versions.
+# install-native.sh writes it on the first install from the clone's origin and branch, and
+# never overwrites it. Plain KEY=value lines, no quotes.
+
+# A URL root can fetch without a password or an SSH key. The updater keeps its own clone
+# in /var/lib/agent-board-update/repo and never touches the clone you installed from.
+REMOTE=https://github.com/Tsadoq/switchboard.git
+
+# The branch the Updates page offers. Use a release branch to take only releases.
+BRANCH=main

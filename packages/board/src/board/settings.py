@@ -26,6 +26,7 @@ class Settings:
     ssh_keygen: str
     listen: str
     signing_namespace: str = DEFAULT_NAMESPACE
+    update_status_path: Path = Path("/var/lib/agent-board-update/status.json")
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> Self:
@@ -45,6 +46,9 @@ class Settings:
             ssh_keygen=_text(env, "BOARD_SSH_KEYGEN", "ssh-keygen"),
             listen=_text(env, "BOARD_LISTEN", "0.0.0.0:8080"),
             signing_namespace=_namespace(env),
+            update_status_path=Path(
+                _text(env, "BOARD_UPDATE_STATUS", "/var/lib/agent-board-update/status.json")
+            ),
         )
 
 

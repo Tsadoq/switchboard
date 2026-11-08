@@ -1,0 +1,448 @@
+#!/usr/bin/python3 -I
+import json
+import os
+import re
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+import time
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+USAGE = """\
+Usage: agent-board-update [--check]
+
+Run by agent-board-update.service as root. Takes the requests the board's Updates page leaves
+in the request directory, fetches the tracked branch into a private clone, installs the
+requested commit with deploy/install-native.sh, and writes the status the page shows. With
+no apply request it only checks for new commits. --check ignores pending requests.
+"""
+
+STATUS_VERSION = 1
+SHA = re.compile(r"[0-9a-f]{40}")
+CONFIG_LINE = re.compile(r"([A-Z_]+)=(.*)")
+REQUEST_MAX_BYTES = 128
+PENDING_LIMIT = 30
+LOG_TAIL_LINES = 120
+BACKUPS_KEPT = 5
+GIT_SECONDS = 300
+INSTALL_SECONDS = 1800
+DATABASE_SECONDS = 300
+SQLITE_MAGIC = b"SQLite format 3\x00"
+SQLITE_HEADER_BYTES = 100
+DEFAULT_REMOTE = "https://github.com/Tsadoq/switchboard.git"
+DEFAULT_BRANCH = "main"
+BOARD_UNIT = "agent-board.service"
+
+
+class Failed(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class Paths:
+    config: Path
+    work_dir: Path
+    request_dir: Path
+    installed: Path
+    database: Path
+    run_as_board: tuple[str, ...]
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] = os.environ) -> "Paths":
+        return cls(
+            config=Path(env.get("AGENT_BOARD_UPDATE_CONFIG", "/etc/agent-board-update.conf")),
+            work_dir=Path(env.get("AGENT_BOARD_UPDATE_DIR", "/var/lib/agent-board-update")),
+            request_dir=Path(env.get("AGENT_BOARD_UPDATE_REQUESTS", "/var/lib/agent-board/update")),
+            installed=Path(env.get("AGENT_BOARD_INSTALLED", "/opt/agent-board/installed.json")),
+            database=Path(env.get("AGENT_BOARD_DATABASE", "/var/lib/agent-board/board.sqlite3")),
+            run_as_board=tuple(shlex.split(env.get("AGENT_BOARD_RUN_AS", "runuser -u board --"))),
+        )
+
+    @property
+    def repo(self) -> Path:
+        return self.work_dir / "repo"
+
+    @property
+    def status(self) -> Path:
+        return self.work_dir / "status.json"
+
+    @property
+    def log(self) -> Path:
+        return self.work_dir / "last-update.log"
+
+    @property
+    def backups(self) -> Path:
+        return self.work_dir / "backups"
+
+
+@dataclass(frozen=True)
+class Config:
+    remote: str
+    branch: str
+
+    @property
+    def tracking_ref(self) -> str:
+        return f"refs/remotes/origin/{self.branch}"
+
+
+def read_config(path: Path) -> Config:
+    values = {"REMOTE": DEFAULT_REMOTE, "BRANCH": DEFAULT_BRANCH}
+    if path.exists():
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            match = CONFIG_LINE.fullmatch(line)
+            if match is None:
+                raise Failed(f"{path}: not a KEY=value line: {line!r}")
+            values[match[1]] = match[2].strip()
+    branch = values["BRANCH"]
+    if subprocess.run(
+        ["git", "check-ref-format", "--branch", branch], check=False, capture_output=True
+    ).returncode:
+        raise Failed(f"{path}: BRANCH={branch!r} is not a branch name")
+    return Config(remote=values["REMOTE"], branch=branch)
+
+
+def take_request(request_dir: Path, name: str) -> str | None:
+    try:
+        dir_fd = os.open(request_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    try:
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            os.unlink(name, dir_fd=dir_fd)
+            return ""
+        try:
+            content = os.read(fd, REQUEST_MAX_BYTES) if stat.S_ISREG(os.fstat(fd).st_mode) else b""
+        finally:
+            os.close(fd)
+        os.unlink(name, dir_fd=dir_fd)
+        return content.decode("ascii", "replace").strip()
+    finally:
+        os.close(dir_fd)
+
+
+class Updater:
+    def __init__(self, paths: Paths, now: float | None = None) -> None:
+        self.paths = paths
+        self.status: dict[str, Any] = self._load_status()
+        self._now = now
+
+    def now(self) -> float:
+        return self._now if self._now is not None else time.time()
+
+    def run(self, apply_target: str | None) -> int:
+        self.paths.work_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
+        try:
+            config = read_config(self.paths.config)
+            self.status.update(remote=config.remote, branch=config.branch)
+            self._save(state="checking", error=None)
+            self.fetch(config)
+            error = None
+            if apply_target is not None:
+                try:
+                    self.apply(config, apply_target)
+                except Failed as failure:
+                    error = str(failure)
+            self.describe(config)
+            self._save(state="idle", checked_at=self.now(), requested=None, error=error)
+        except Failed as failure:
+            self._save(state="idle", error=str(failure), requested=None)
+        if self.status["error"]:
+            print(f"agent-board-update: {self.status['error']}", file=sys.stderr)
+            return 1
+        return 0
+
+    def fetch(self, config: Config) -> None:
+        repo = self.paths.repo
+        if not (repo / ".git").is_dir():
+            if repo.exists():
+                shutil.rmtree(repo)
+            self.git("init", "-q", str(repo), cwd=self.paths.work_dir)
+            self.git("remote", "add", "origin", config.remote)
+        self.git("remote", "set-url", "origin", config.remote)
+        self.git(
+            "fetch",
+            "-q",
+            "--prune",
+            "--no-tags",
+            "origin",
+            f"+refs/heads/{config.branch}:{config.tracking_ref}",
+        )
+
+    def describe(self, config: Config) -> None:
+        latest_sha = self.git("rev-parse", "--verify", f"{config.tracking_ref}^{{commit}}")
+        installed = self._installed()
+        installed_sha = installed.get("commit") if installed else None
+        pending: list[dict[str, str]] = []
+        behind: int | None = None
+        if isinstance(installed_sha, str) and self._is_ancestor(installed_sha, latest_sha):
+            behind = int(self.git("rev-list", "--count", f"{installed_sha}..{latest_sha}"))
+            listed = self.git("log", f"-n{PENDING_LIMIT}", "--format=%H", f"{installed_sha}..{latest_sha}")
+            pending = [self.commit(sha) for sha in listed.split()]
+        self.status.update(
+            installed=installed,
+            latest=self.commit(latest_sha),
+            behind=behind,
+            pending=pending,
+        )
+
+    def apply(self, config: Config, target: str) -> None:
+        if not SHA.fullmatch(target):
+            raise Failed("the update request does not name a full commit id")
+        if not self._is_ancestor(target, config.tracking_ref):
+            raise Failed(f"{target[:12]} is not on {config.branch} at {config.remote}")
+        installed = self._installed()
+        previous = installed.get("commit") if installed else None
+        if previous == target:
+            return
+        self._save(state="applying", requested=target, error=None)
+        self.paths.log.write_text("")
+        self._log(f"updating {previous or 'an unknown install'} to {target} from {config.branch}")
+        backup = self.back_up_database(target)
+        try:
+            self.install(target)
+        except Failed as failure:
+            self._log(f"update failed: {failure}")
+            rolled_back = isinstance(previous, str) and self.roll_back(previous, backup)
+            self._finish(previous, target, ok=False, rolled_back=rolled_back, message=str(failure))
+            raise Failed(f"the update to {target[:12]} failed: {failure}") from None
+        self._log("update installed and healthy")
+        self._finish(previous, target, ok=True, rolled_back=False, message="installed and healthy")
+
+    def install(self, commit: str) -> None:
+        self.git("checkout", "-q", "--force", "--detach", commit)
+        self.git("clean", "-q", "-ffdx")
+        script = self.paths.repo / "deploy" / "install-native.sh"
+        self._run_logged([str(script)], INSTALL_SECONDS, env={"AGENT_BOARD_UPDATING": "1"})
+
+    def roll_back(self, previous: str, backup: Path | None) -> bool:
+        self._log(f"rolling back to {previous}")
+        try:
+            self.git("cat-file", "-e", f"{previous}^{{commit}}")
+            if backup is not None and self._migrations(self.paths.database) != self._migrations(backup):
+                self._log("the failed version changed the database schema; restoring the backup")
+                self._run_logged(["systemctl", "stop", BOARD_UNIT], GIT_SECONDS)
+                try:
+                    self.restore_database(backup)
+                except Failed as failure:
+                    self._log(
+                        f"the database was not restored, starting the previous version anyway: {failure}"
+                    )
+            self.install(previous)
+        except Failed as failure:
+            self._log(f"rollback failed: {failure}")
+            return False
+        self._log("rolled back and healthy")
+        return True
+
+    def back_up_database(self, target: str) -> Path | None:
+        if not self.paths.database.exists():
+            return None
+        self.paths.backups.mkdir(mode=0o700, exist_ok=True)
+        backup = self.paths.backups / f"board-{int(self.now())}-{target[:12]}.sqlite3"
+        dump = (
+            "import sqlite3, sys\n"
+            "source = sqlite3.connect(f'file:{sys.argv[1]}?mode=ro', uri=True)\n"
+            "sys.stdout.buffer.write(source.serialize())\n"
+        )
+        completed = subprocess.run(
+            [*self.paths.run_as_board, sys.executable, "-I", "-c", dump, str(self.paths.database)],
+            check=False,
+            capture_output=True,
+            timeout=DATABASE_SECONDS,
+        )
+        if completed.returncode:
+            raise Failed(
+                f"could not back up the database: {completed.stderr.decode(errors='replace').strip()}"
+            )
+        fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as out:
+            out.write(_without_wal(completed.stdout))
+        self._log(f"database backed up to {backup}")
+        for old in sorted(self.paths.backups.glob("board-*.sqlite3"), key=_age)[:-BACKUPS_KEPT]:
+            old.unlink()
+        return backup
+
+    def restore_database(self, backup: Path) -> None:
+        load = (
+            "import sqlite3, sys\n"
+            "image = sqlite3.connect(':memory:')\n"
+            "image.deserialize(sys.stdin.buffer.read())\n"
+            "target = sqlite3.connect(sys.argv[1])\n"
+            "image.backup(target)\n"
+            "target.close()\n"
+        )
+        completed = subprocess.run(
+            [*self.paths.run_as_board, sys.executable, "-I", "-c", load, str(self.paths.database)],
+            check=False,
+            input=_without_wal(backup.read_bytes()),
+            capture_output=True,
+            timeout=DATABASE_SECONDS,
+        )
+        if completed.returncode:
+            raise Failed(
+                f"could not restore the database: {completed.stderr.decode(errors='replace').strip()}"
+            )
+        self._log(f"database restored from {backup}")
+
+    def commit(self, sha: str) -> dict[str, str]:
+        full, subject, date = self.git("log", "-1", "--format=%H%x00%s%x00%cI", sha).split("\0")
+        return {"commit": full, "short": full[:12], "subject": subject, "date": date}
+
+    def git(self, *args: str, cwd: Path | None = None) -> str:
+        env = {
+            **os.environ,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+        }
+        completed = subprocess.run(
+            ["git", *args],
+            check=False,
+            cwd=cwd or self.paths.repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=GIT_SECONDS,
+        )
+        if completed.returncode:
+            raise Failed(f"git {args[0]} failed: {completed.stderr.strip() or completed.returncode}")
+        return completed.stdout.strip()
+
+    def _is_ancestor(self, ancestor: str, descendant: str) -> bool:
+        try:
+            self.git("merge-base", "--is-ancestor", ancestor, descendant)
+        except Failed:
+            return False
+        return True
+
+    def _installed(self) -> dict[str, Any] | None:
+        try:
+            installed = json.loads(self.paths.installed.read_text())
+        except (FileNotFoundError, ValueError):
+            return None
+        return installed if isinstance(installed, dict) else None
+
+    def _migrations(self, database: Path) -> set[str]:
+        query = (
+            "import sqlite3, sys\n"
+            "rows = sqlite3.connect(f'file:{sys.argv[1]}?mode=ro', uri=True)"
+            ".execute('SELECT filename FROM schema_migrations')\n"
+            "print('\\n'.join(row[0] for row in rows))\n"
+        )
+        prefix = self.paths.run_as_board if database == self.paths.database else ()
+        completed = subprocess.run(
+            [*prefix, sys.executable, "-I", "-c", query, str(database)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=DATABASE_SECONDS,
+        )
+        if completed.returncode:
+            raise Failed(f"could not read the migrations of {database}")
+        return set(completed.stdout.split())
+
+    def _run_logged(self, command: Sequence[str], timeout: int, env: Mapping[str, str] | None = None) -> None:
+        with self.paths.log.open("a") as log:
+            try:
+                completed = subprocess.run(
+                    command,
+                    check=False,
+                    cwd=self.paths.repo,
+                    env={**os.environ, **(env or {})},
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                raise Failed(f"{Path(command[0]).name} ran over {timeout} s") from None
+        if completed.returncode:
+            raise Failed(f"{Path(command[0]).name} exited with status {completed.returncode}")
+
+    def _log(self, line: str) -> None:
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(self.now()))
+        with self.paths.log.open("a") as log:
+            log.write(f"==> {stamp} {line}\n")
+
+    def _finish(self, previous: str | None, target: str, ok: bool, rolled_back: bool, message: str) -> None:
+        self.status["last_update"] = {
+            "ok": ok,
+            "from": previous,
+            "to": target,
+            "rolled_back": rolled_back,
+            "finished_at": self.now(),
+            "message": message,
+        }
+
+    def _load_status(self) -> dict[str, Any]:
+        try:
+            loaded = json.loads(self.paths.status.read_text())
+        except (FileNotFoundError, ValueError):
+            loaded = None
+        if isinstance(loaded, dict) and loaded.get("version") == STATUS_VERSION:
+            return loaded
+        return {
+            "version": STATUS_VERSION,
+            "checked_at": None,
+            "installed": None,
+            "latest": None,
+            "behind": None,
+            "pending": [],
+            "last_update": None,
+        }
+
+    def _save(self, **changes: Any) -> None:
+        self.status.update(changes, updated_at=self.now(), log_tail=self._log_tail())
+        temporary = self.paths.status.with_suffix(".tmp")
+        temporary.write_text(json.dumps(self.status, indent=2) + "\n")
+        temporary.chmod(0o644)
+        temporary.replace(self.paths.status)
+
+    def _log_tail(self) -> list[str]:
+        try:
+            return self.paths.log.read_text(errors="replace").splitlines()[-LOG_TAIL_LINES:]
+        except FileNotFoundError:
+            return []
+
+
+def _without_wal(image: bytes) -> bytes:
+    # Bytes 18 and 19 of the header are 2 in a WAL database, and SQLite refuses to open a
+    # deserialized image in WAL mode; 1 is the rollback journal, which the board switches back from.
+    if len(image) < SQLITE_HEADER_BYTES or not image.startswith(SQLITE_MAGIC):
+        raise Failed("the database image is not an SQLite database")
+    return image[:18] + b"\x01\x01" + image[20:]
+
+
+def _age(path: Path) -> int:
+    return path.stat().st_mtime_ns
+
+
+def main(argv: Sequence[str]) -> int:
+    if argv[1:] in (["-h"], ["--help"]):
+        print(USAGE, end="")
+        return 0
+    if argv[1:] not in ([], ["--check"]):
+        print(USAGE, end="", file=sys.stderr)
+        return 2
+    paths = Paths.from_env()
+    target = None
+    if argv[1:] == []:
+        target = take_request(paths.request_dir, "apply")
+        take_request(paths.request_dir, "check")
+    return Updater(paths).run(target)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

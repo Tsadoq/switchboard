@@ -14,9 +14,9 @@ You need [uv](https://docs.astral.sh/uv/) and OpenSSH's `ssh-keygen` and `ssh` o
 
 ```bash
 uv sync --all-packages
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy packages
+uv run ruff check . deploy/agent-board-update
+uv run ruff format --check . deploy/agent-board-update
+uv run mypy packages deploy/agent-board-update
 uv run pytest -q
 ```
 

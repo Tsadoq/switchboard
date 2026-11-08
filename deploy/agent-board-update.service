@@ -1,0 +1,9 @@
+[Unit]
+Description=agent board updater: check the tracked branch, and install a version the Updates page asked for
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/agent-board-update
+TimeoutStartSec=45min

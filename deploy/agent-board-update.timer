@@ -1,0 +1,12 @@
+[Unit]
+Description=Check for agent board updates once a day
+
+[Timer]
+OnBootSec=10min
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+Unit=agent-board-update.service
+
+[Install]
+WantedBy=timers.target

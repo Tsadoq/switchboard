@@ -86,6 +86,7 @@ def settings(tmp_path: Path) -> Settings:
             "BOARD_STATE_DIR": str(tmp_path / "state"),
             "BOARD_PUBLIC_URL": "https://board.example.com",
             "BOARD_HUMAN_PASSWORD_HASH": passwords.hash_password(TEST_PASSWORD),
+            "BOARD_UPDATE_STATUS": str(tmp_path / "update-status.json"),
         }
     )
 

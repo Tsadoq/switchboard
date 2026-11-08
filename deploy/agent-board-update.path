@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the agent board updater when the Updates page leaves a request
+
+[Path]
+PathExists=/var/lib/agent-board/update/check
+PathExists=/var/lib/agent-board/update/apply
+Unit=agent-board-update.service
+
+[Install]
+WantedBy=paths.target

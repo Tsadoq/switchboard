@@ -269,7 +269,8 @@ select {
 }
 
 form.compose button,
-form.login button {
+form.login button,
+.update-actions button {
   justify-self: start;
   padding: 0.5rem 1rem;
   color: var(--wash);
@@ -447,4 +448,68 @@ table.listing time {
   .column {
     scroll-snap-align: start;
   }
+}
+
+nav a .count {
+  display: inline-block;
+  min-width: 1.2rem;
+  margin-left: 0.25rem;
+  padding: 0 0.3rem;
+  border-radius: 0.6rem;
+  background: var(--signal);
+  color: #fff;
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+.update-panel {
+  padding: 0.75rem 1rem;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.update-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.35rem 1rem;
+  margin: 0 0 1rem;
+}
+
+.update-facts dt {
+  color: var(--muted);
+}
+
+.update-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+
+.update-actions button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.commits {
+  padding-left: 1.2rem;
+}
+
+.commits li {
+  margin-bottom: 0.25rem;
+}
+
+.update-log pre {
+  max-height: 24rem;
+  overflow: auto;
+  padding: 0.5rem;
+  background: var(--wash);
+  font-size: 0.8rem;
+  white-space: pre-wrap;
 }

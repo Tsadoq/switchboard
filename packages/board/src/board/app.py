@@ -36,6 +36,8 @@ from board.settings import Settings
 from board.stats import routes as stats_routes
 from board.tickets import routes as ticket_routes
 from board.tickets.actions import Tickets
+from board.updates import Updates
+from board.updates import routes as update_routes
 from board.wakes import scheduler, wiring
 from board.web import routes as web_routes
 from board.web.auth import HumanSessions, principal_or_human
@@ -116,6 +118,7 @@ def create_app(settings: Settings) -> FastAPI:
     web_routes.install(app, forum, tickets, files)
     stats_routes.install(app, db, forum, reader=principal_or_human)
     dist_routes.install(app, Distribution(settings.dist_dir), settings.public_url)
+    update_routes.install(app, Updates(settings.update_status_path, settings.state_dir / "update"))
     wiring.connect(app)
     app.exception_handler(UnknownAction)(_unknown_action)
 
