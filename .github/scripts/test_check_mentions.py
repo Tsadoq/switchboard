@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
-from check_mentions import mentions  # noqa: E402
+from check_mentions import mentions
 
 
 @pytest.mark.parametrize(
