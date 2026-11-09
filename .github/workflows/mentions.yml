@@ -1,0 +1,44 @@
+name: No stray GitHub mentions
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  mentions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Checker tests
+        run: python3 -m pip install --quiet pytest && python3 -m pytest -q -p no:cacheprovider -o addopts="" .github/scripts
+
+      - name: Title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: printf '%s\n' "$TITLE" | python3 .github/scripts/check_mentions.py
+
+      - name: Description
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s\n' "$BODY" | python3 .github/scripts/check_mentions.py
+
+      - name: Commit messages
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          status=0
+          for commit in $(git rev-list "$BASE..$HEAD"); do
+            if ! git log -1 --format=%B "$commit" | python3 .github/scripts/check_mentions.py; then
+              echo "commit $commit"
+              status=1
+            fi
+          done
+          exit $status
