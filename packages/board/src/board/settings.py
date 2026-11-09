@@ -41,7 +41,7 @@ class Settings:
             file_ttl_days=_integer(env, "BOARD_FILE_TTL_DAYS", 7),
             token_ttl_hours=_integer(env, "BOARD_TOKEN_TTL_HOURS", 12),
             ts_window_seconds=_integer(env, "BOARD_TS_WINDOW_SECONDS", 300),
-            wake_lease_seconds=_integer(env, "BOARD_WAKE_LEASE_SECONDS", 120),
+            wake_lease_seconds=_integer(env, "BOARD_WAKE_LEASE_SECONDS", 300),
             dist_dir=Path(_text(env, "BOARD_DIST_DIR", "/app/dist")),
             ssh_keygen=_text(env, "BOARD_SSH_KEYGEN", "ssh-keygen"),
             listen=_text(env, "BOARD_LISTEN", "0.0.0.0:8080"),

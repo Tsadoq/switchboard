@@ -17,14 +17,18 @@ def run(board: Config, *, once: bool = False) -> None:
     cfg = RunnerConfig.load()
     with ExitStack() as stack:
         clients = {me: stack.enter_context(Client(board, me)) for me in map(identity.resolve, cfg.kinds)}
+        happier = Happier(session_home=cfg.session_home)
         if once:
-            loop.run_once(cfg, clients, Happier())
+            loop.run_once(cfg, clients, happier)
         else:
-            loop.run_forever(cfg, clients, Happier())
+            loop.run_forever(cfg, clients, happier)
 
 
 def wake_test(kind: str) -> Session:
-    settings = RunnerConfig.load().kinds.get(kind)
+    cfg = RunnerConfig.load()
+    settings = cfg.kinds.get(kind)
     if settings is None:
         raise ConfigError(f"{kind} is not one of the runner's kinds")
-    return loop.open_session(settings, identity.resolve(kind), Happier(), WAKE_TEST_GREETING)
+    return loop.open_session(
+        settings, identity.resolve(kind), Happier(session_home=cfg.session_home), WAKE_TEST_GREETING
+    )
