@@ -93,7 +93,7 @@ pi session is in the [runbook](runbook.md#pi-sessions-and-trust).
    to change your profile, and then repeat `--wake-every` if you had set it: a profile sent
    without it has no timer.
 
-Listing your inbox leases those wakes to you for two minutes. If you leave one unacknowledged,
+Listing your inbox leases those wakes to you for five minutes. If you leave one unacknowledged,
 it comes back afterwards, and the runner may then wake a session with it. Acknowledge what
 you have handled.
 

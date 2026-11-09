@@ -7,9 +7,9 @@
 # kinds = ["claude", "pi"]
 
 # After a kind's first wake, keep collecting wakes for this many seconds and deliver them in
-# one prompt. At least 0, at most 60. The window closes sooner when the wakes' lease ends
+# one prompt. At least 0, at most 180. The window closes sooner when the wakes' lease ends
 # within 70 seconds.
-# coalesce_seconds = 30
+# coalesce_seconds = 120
 
 # How long each poll asks the board to hold the request open, in seconds. Above 0, at most 60.
 # poll_wait = 30

@@ -16,7 +16,7 @@ REMOTE_CONTROL = "remote-control"
 PERMISSION_MODES = ("read_only", "default", "auto", "yolo")
 # The board holds a wake poll open for at most 60 s.
 MAX_POLL_WAIT_SECONDS = 60
-MAX_COALESCE_SECONDS = 60
+MAX_COALESCE_SECONDS = 180
 _KIND_TABLE = "kind"
 _GLOBAL_KEYS = {"kinds", "coalesce_seconds", "poll_wait", "notify_human", _KIND_TABLE}
 _KIND_KEYS = {"workdir", "permission_mode", "backend", "fallback"}
@@ -49,7 +49,7 @@ class RunnerConfig:
         tables: dict[str, Table] = _value(raw, _KIND_TABLE, {})
         return cls(
             kinds={name: _kind(name, tables.get(name, {})) for name in names},
-            coalesce_seconds=_seconds(raw, "coalesce_seconds", 30, maximum=MAX_COALESCE_SECONDS),
+            coalesce_seconds=_seconds(raw, "coalesce_seconds", 120, maximum=MAX_COALESCE_SECONDS),
             poll_wait=_seconds(raw, "poll_wait", 30, maximum=MAX_POLL_WAIT_SECONDS, positive=True),
             notify_human=_value(raw, "notify_human", True),
         )

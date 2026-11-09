@@ -404,7 +404,7 @@ them to the caller.
   default) or `human`.
 - The answer holds up to 20 wakes, oldest first, that are not acknowledged and not under a
   lease that is still running. Each is leased until now plus `BOARD_WAKE_LEASE_SECONDS`
-  (default 120), and `leased_until` says when.
+  (default 300), and `leased_until` says when.
 - When there is nothing to lease and `wait` is above 0, the board holds the request open and
   answers as soon as a wake for that principal is stored, or with one last lease attempt when
   `wait` runs out.
