@@ -14,12 +14,16 @@ from agent_board.runner import remote_control
 from agent_board.runner.config import REMOTE_CONTROL, KindConfig, RunnerConfig
 from agent_board.runner.happier import TIMEOUT_SECONDS, Happier, HappierError, Session
 from agent_board.runner.remote_control import RemoteControlError
+from agent_board.runner.weekly import WeeklyClock
 
 SESSION_FILE = "runner-session.json"
 NOTIFY_TITLE = "agent board"
 MY_INBOX: Final = "me"
 HUMAN_INBOX: Final = "human"
 TIMER_REASON: Final = "timer"
+WEEKLY_REASON: Final = "weekly"
+WEEKLY_FILE = "runner-weekly.json"
+_MODEL_PRIORITY = (WEEKLY_REASON, "mention", "follow", TIMER_REASON)
 _ALREADY_ACKED = (
     "The runner has already acknowledged these wakes, so `agent-board inbox` will not list them "
     "and there is nothing to ack."
@@ -31,6 +35,11 @@ _ANSWER_THREADS = (
     "Always reply to a post by the human that responds to you, even if only to confirm."
 )
 _CHECK_TICKETS = "For the scheduled wake, check your tickets with `agent-board tickets list --mine`."
+_WEEKLY_SUMMARY = "the weekly scheduled review"
+_WEEKLY_REVIEW = (
+    "For the weekly review, look back over the week: your tickets, the threads you follow, and anything "
+    "left open, and act on what needs it."
+)
 _SUMMARY = re.compile(r"(?P<author>\S+) (?:mentioned you|posted) in thread (?P<thread>\d+)\b")
 _DIGEST_THREADS = 5
 _DIGEST_AUTHORS = 3
@@ -42,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 type Wake = dict[str, Any]
 type InboxPrincipal = Literal["me", "human"]
-type Deliver = Callable[[list[Wake]], list[int]]
+type Deliver = Callable[[list[Wake]], Sequence[int | None]]
 
 
 def prompt_for(wakes: Sequence[Wake]) -> str:
@@ -50,7 +59,17 @@ def prompt_for(wakes: Sequence[Wake]) -> str:
     sentences = [f"You were woken by the agent board: {summaries}.", _ALREADY_ACKED, _ANSWER_THREADS]
     if any(wake["reason"] == TIMER_REASON for wake in wakes):
         sentences.append(_CHECK_TICKETS)
+    if any(wake["reason"] == WEEKLY_REASON for wake in wakes):
+        sentences.append(_WEEKLY_REVIEW)
     return " ".join(sentences)
+
+
+def model_for(wakes: Sequence[Wake], models: Mapping[str, str]) -> str | None:
+    reasons = {wake["reason"] for wake in wakes}
+    for reason in _MODEL_PRIORITY:
+        if reason in reasons and reason in models:
+            return models[reason]
+    return models.get("default")
 
 
 def run_once(cfg: RunnerConfig, clients: Mapping[Identity, Client], happier: Happier) -> None:
@@ -73,7 +92,9 @@ def run_forever(cfg: RunnerConfig, clients: Mapping[Identity, Client], happier: 
     raise failures.get()
 
 
-def open_session(settings: KindConfig, me: Identity, happier: Happier, prompt: str) -> Session:
+def open_session(
+    settings: KindConfig, me: Identity, happier: Happier, prompt: str, model: str | None = None
+) -> Session:
     session = happier.create(
         backend=settings.backend,
         path=settings.workdir,
@@ -81,6 +102,7 @@ def open_session(settings: KindConfig, me: Identity, happier: Happier, prompt: s
         title=f"agent board: {me.principal}",
         prompt=prompt,
         permission_mode=settings.permission_mode,
+        model=model,
     )
     (ensure_state_dir(me.kind) / SESSION_FILE).write_text(json.dumps({"session_id": session.id}))
     logger.info("%s: opened session %s", me.principal, session.id)
@@ -95,12 +117,14 @@ class _Inbox:
         principal: InboxPrincipal,
         deliver: Deliver,
         coalesce_seconds: float = 0,
+        scheduled: Callable[[], list[Wake]] | None = None,
     ) -> None:
         self.label = label
         self._client = client
         self._principal = principal
         self._deliver = deliver
         self._coalesce_seconds = coalesce_seconds
+        self._scheduled = scheduled
 
     def drain(self) -> None:
         wakes: list[Wake] = []
@@ -131,9 +155,11 @@ class _Inbox:
         return leased
 
     def _deliver_then_ack(self, wakes: list[Wake]) -> None:
+        if self._scheduled is not None:
+            wakes = wakes + self._scheduled()
         if not wakes:
             return
-        delivered = self._deliver(wakes)
+        delivered = [wake_id for wake_id in self._deliver(wakes) if wake_id is not None]
         if delivered:
             self._client.post("/api/wakes/ack", {"ids": delivered, "principal": self._principal})
 
@@ -143,19 +169,33 @@ class _AgentWaker:
         self._settings = settings
         self._me = me
         self._happier = happier
+        self._weekly = (
+            None
+            if settings.weekly is None
+            else WeeklyClock(settings.weekly, ensure_state_dir(me.kind) / WEEKLY_FILE)
+        )
+
+    def scheduled(self) -> list[Wake]:
+        if self._weekly is None or not self._weekly.due(time.time()):
+            return []
+        return [{"id": None, "reason": WEEKLY_REASON, "summary": _WEEKLY_SUMMARY}]
 
     def __call__(self, wakes: list[Wake]) -> list[int]:
         try:
-            delivered = self._deliver(prompt_for(wakes))
+            delivered = self._deliver(prompt_for(wakes), model_for(wakes, self._settings.models))
         except (HappierError, RemoteControlError) as error:
             _warn_human(
                 self._happier,
                 f"could not wake {self._me.principal} ({error}); {len(wakes)} wake(s) left leased for redelivery",
             )
             return []
-        return [wake["id"] for wake in wakes] if delivered else []
+        if not delivered:
+            return []
+        if self._weekly is not None and any(wake["reason"] == WEEKLY_REASON for wake in wakes):
+            self._weekly.mark(time.time())
+        return [wake["id"] for wake in wakes]
 
-    def _deliver(self, prompt: str) -> bool:
+    def _deliver(self, prompt: str, model: str | None) -> bool:
         recorded = _recorded_session(self._me.kind)
         state = None if recorded is None else self._happier.status(recorded)
         if recorded is not None and state is not None and state.active:
@@ -164,11 +204,13 @@ class _AgentWaker:
                     "%s: session %s is busy; wakes left leased for redelivery", self._me.principal, recorded
                 )
                 return False
-            self._happier.send(recorded, prompt)
-            logger.info("%s: sent wakes to session %s", self._me.principal, recorded)
+            self._happier.send(recorded, prompt, model)
+            logger.info(
+                "%s: sent wakes to session %s (model %s)", self._me.principal, recorded, model or "default"
+            )
             return True
         try:
-            open_session(self._settings, self._me, self._happier, prompt)
+            open_session(self._settings, self._me, self._happier, prompt, model)
         except HappierError as error:
             if self._settings.fallback != REMOTE_CONTROL or not remote_control.serves(self._me.kind):
                 raise
@@ -232,12 +274,10 @@ def _names(authors: list[str]) -> str:
 
 
 def _inboxes(cfg: RunnerConfig, clients: Mapping[Identity, Client], happier: Happier) -> list[_Inbox]:
-    inboxes = [
-        _Inbox(
-            me.principal, client, MY_INBOX, _AgentWaker(cfg.kinds[me.kind], me, happier), cfg.coalesce_seconds
-        )
-        for me, client in clients.items()
-    ]
+    inboxes = []
+    for me, client in clients.items():
+        waker = _AgentWaker(cfg.kinds[me.kind], me, happier)
+        inboxes.append(_Inbox(me.principal, client, MY_INBOX, waker, cfg.coalesce_seconds, waker.scheduled))
     if cfg.notify_human and clients:
         # The board lets any agent's token lease and ack the human inbox, so the first kind relays it.
         relay_client = next(iter(clients.values()))

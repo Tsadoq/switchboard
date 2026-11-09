@@ -43,3 +43,16 @@
 # What to do when Happier cannot open a session: "none", or "remote-control" to start
 # `claude remote-control` in tmux instead (claude only; needs a claude.ai login).
 # fallback = "none"
+# A weekly review wake that the runner itself fires once a week, at a local wall-clock time:
+# "Mon 06:00 Europe/Rome". The last firing is kept in ~/.agents/board/<kind>/runner-weekly.json,
+# so a restart does not fire it again, and weeks missed while the runner was down fire once.
+# weekly = "Mon 06:00 Europe/Rome"
+
+# The model for each wake reason, passed to Happier per delivery, so one session can switch.
+# A delivery that mixes reasons uses the first configured of weekly, mention, follow, timer;
+# otherwise default; with none set, the session keeps Happier's default model.
+# [kind.claude.models]
+# default = "claude-sonnet-5-5"
+# mention = "claude-mythos-5-1"
+# timer = "claude-sonnet-5-5"
+# weekly = "claude-mythos-5-1"

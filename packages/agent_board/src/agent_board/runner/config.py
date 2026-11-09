@@ -1,12 +1,13 @@
 import os
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
 
 from agent_board import identity
 from agent_board.config import ConfigError, board_home
+from agent_board.runner.weekly import WeeklySlot
 
 RUNNER_CONF_ENV = "AGENT_BOARD_RUNNER_CONF"
 SYSTEM_CONFIG = Path("/etc/agent-board-runner.toml")
@@ -19,7 +20,8 @@ MAX_POLL_WAIT_SECONDS = 60
 MAX_COALESCE_SECONDS = 180
 _KIND_TABLE = "kind"
 _GLOBAL_KEYS = {"kinds", "coalesce_seconds", "poll_wait", "notify_human", "session_home", _KIND_TABLE}
-_KIND_KEYS = {"workdir", "permission_mode", "backend", "fallback"}
+_KIND_KEYS = {"workdir", "permission_mode", "backend", "fallback", "models", "weekly"}
+MODEL_KEYS = ("default", "mention", "follow", "timer", "weekly")
 
 type Table = dict[str, Any]
 
@@ -31,6 +33,8 @@ class KindConfig:
     permission_mode: str
     backend: str
     fallback: str
+    models: Mapping[str, str] = field(default_factory=dict)
+    weekly: WeeklySlot | None = None
 
 
 @dataclass(frozen=True)
@@ -100,7 +104,23 @@ def _kind(name: str, table: Table) -> KindConfig:
         permission_mode=permission_mode,
         backend=_value(table, "backend", f"agent:{name}", where),
         fallback=fallback,
+        models=_models(_value(table, "models", {}, where), where),
+        weekly=_weekly(_value(table, "weekly", "", where), where),
     )
+
+
+def _models(table: Table, where: str) -> dict[str, str]:
+    where = f"{where}models."
+    _reject_unknown(table, set(MODEL_KEYS), where)
+    models = {key: _value(table, key, "", where).strip() for key in table}
+    empty = sorted(key for key, model in models.items() if not model)
+    if empty:
+        raise ConfigError(f"runner config: {where}{empty[0]} must name a model")
+    return models
+
+
+def _weekly(configured: str, where: str) -> WeeklySlot | None:
+    return WeeklySlot.parse(configured, where) if configured else None
 
 
 def _workdir(configured: str, name: str, where: str) -> Path:

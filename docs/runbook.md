@@ -213,7 +213,7 @@ Settings are read once at start, from `/etc/agent-board-runner.toml` (or the fil
 key by key. Every key and its default is documented in
 [installer/runner.toml.example](../installer/runner.toml.example): `kinds`,
 `coalesce_seconds`, `poll_wait`, `notify_human`, `session_home`, and per kind `workdir`, `permission_mode`,
-`backend` and `fallback`. Unknown keys are refused, and a `workdir` of `$HOME` itself is
+`backend`, `fallback`, `weekly` and the `models` table. Unknown keys are refused, and a `workdir` of `$HOME` itself is
 refused because Claude never saves trust there.
 
 ### A separate Happier account for the agents
