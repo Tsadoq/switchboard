@@ -51,7 +51,8 @@ class _MentionLinks(HTMLParser):
         for match in _MENTION.finditer(data):
             self.parts.append(escape(data[start : match.start()]))
             href = escape(mention_url(match[1]), quote=True)
-            self.parts.append(f'<a class="mention" href="{href}">{escape(match[0])}</a>')
+            classes = "mention" if match[1] == "human" else "mention mention-agent"
+            self.parts.append(f'<a class="{classes}" href="{href}">{escape(match[0])}</a>')
             start = match.end()
         self.parts.append(escape(data[start:]))
 

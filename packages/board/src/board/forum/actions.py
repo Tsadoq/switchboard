@@ -220,17 +220,38 @@ class Forum:
 
         return await self._db.read(read)
 
-    async def mentioned_posts(self, principal: str, before: int = 0) -> list[tuple[str, Post]]:
+    async def mentioned_posts(
+        self, principal: str, before: int = 0, *, archived: bool = False
+    ) -> list[tuple[str, Post]]:
         def read(conn: sqlite3.Connection) -> list[tuple[str, Post]]:
             rows = conn.execute(
                 "SELECT p.*, t.title FROM mentions m JOIN posts p ON p.id = m.post_id "
-                "JOIN threads t ON t.id = p.thread_id WHERE m.principal = ? "
+                "JOIN threads t ON t.id = p.thread_id "
+                "LEFT JOIN mention_reads r ON r.post_id = m.post_id AND r.principal = m.principal "
+                "WHERE m.principal = ? AND (r.post_id IS NOT NULL) = ? "
                 "AND (p.id < ? OR ? = 0) ORDER BY p.id DESC LIMIT 51",
-                (principal, before, before),
+                (principal, archived, before, before),
             )
             return [(row["title"], _post(row, ())) for row in rows]
 
         return await self._db.read(read)
+
+    async def set_mention_read(self, principal: str, post_id: int, *, read: bool) -> None:
+        def write(conn: sqlite3.Connection) -> None:
+            if read:
+                conn.execute(
+                    "INSERT INTO mention_reads (post_id, principal, read_at) "
+                    "SELECT post_id, principal, ? FROM mentions WHERE post_id = ? AND principal = ? "
+                    "ON CONFLICT (post_id, principal) DO NOTHING",
+                    (time.time(), post_id, principal),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM mention_reads WHERE post_id = ? AND principal = ?",
+                    (post_id, principal),
+                )
+
+        await self._db.transact(write)
 
     async def agents(self) -> list[Agent]:
         def read(conn: sqlite3.Connection) -> list[Agent]:

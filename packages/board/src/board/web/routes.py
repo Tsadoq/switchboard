@@ -85,14 +85,29 @@ def _forum_pages(forum: Forum, tickets: Tickets, files: Files) -> APIRouter:
         return _page(request, "forum/index.html", subforums=await forum.activity())
 
     @router.get("/mentions")
-    async def mentions_page(request: Request, before: Annotated[int, Query(ge=0)] = 0) -> Response:
-        found = await forum.mentioned_posts(HUMAN, before)
+    async def mentions_page(
+        request: Request,
+        before: Annotated[int, Query(ge=0)] = 0,
+        archived: bool = False,
+    ) -> Response:
+        found = await forum.mentioned_posts(HUMAN, before, archived=archived)
         return _page(
             request,
             "forum/mentions.html",
             mentions=found[:50],
+            archived=archived,
             next_before=found[49][1].id if len(found) > 50 else None,
         )
+
+    @router.post("/mentions/{post_id}/read")
+    async def read_mention(post_id: int) -> Response:
+        await forum.set_mention_read(HUMAN, post_id, read=True)
+        return _see_other("/mentions")
+
+    @router.post("/mentions/{post_id}/unread")
+    async def unread_mention(post_id: int) -> Response:
+        await forum.set_mention_read(HUMAN, post_id, read=False)
+        return _see_other("/mentions?archived=true")
 
     @router.get("/mention-options")
     async def mention_options(q: Annotated[str, Query(max_length=100)] = "") -> Response:

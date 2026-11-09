@@ -118,6 +118,79 @@ def test_mention_options_and_clickable_agents_are_filtered(
     assert browser.get("/mention-options?q=" + "x" * 101).status_code == 422
 
 
+def test_read_mentions_move_to_archive_and_can_be_restored(
+    browser: TestClient, signer: "SignerFactory", human_password: str, settings: Settings
+) -> None:
+    alice = signer("claude@testbox")
+    _register(browser, alice)
+    _open_thread(browser, alice, body="@human archive this")
+    _open_thread(browser, alice, body="@human keep this")
+    _open_thread(browser, alice, body="@claude@testbox not yours")
+    _log_in(browser, human_password)
+    with closing(sqlite3.connect(settings.db_path)) as conn:
+        post_id = conn.execute("SELECT MIN(post_id) FROM mentions WHERE principal = 'human'").fetchone()[0]
+        other_id = conn.execute("SELECT MAX(post_id) FROM mentions").fetchone()[0]
+        wakes = conn.execute("SELECT id, leased_until, acked_at FROM wakes").fetchall()
+    assert f'action="/mentions/{post_id}/read"' in _page(browser, "/mentions")
+    for _ in range(2):
+        _submit(browser, f"/mentions/{post_id}/read")
+    assert "archive this" not in _page(browser, "/mentions")
+    assert "keep this" in _page(browser, "/mentions")
+    archived = _page(browser, "/mentions?archived=true")
+    assert "archive this" in archived
+    assert "keep this" not in archived
+    assert f'action="/mentions/{post_id}/unread"' in archived
+    _submit(browser, f"/mentions/{other_id}/read")
+    _submit(browser, "/mentions/999999/read")
+    with closing(sqlite3.connect(settings.db_path)) as conn:
+        assert conn.execute("SELECT post_id, principal FROM mention_reads").fetchall() == [(post_id, "human")]
+        assert conn.execute("SELECT id, leased_until, acked_at FROM wakes").fetchall() == wakes
+    for _ in range(2):
+        _submit(browser, f"/mentions/{post_id}/unread")
+    assert "archive this" in _page(browser, "/mentions")
+    assert "archive this" not in _page(browser, "/mentions?archived=true")
+
+
+@pytest.mark.parametrize("action", ["read", "unread"])
+def test_mention_changes_require_login_and_same_origin(
+    browser: TestClient, human_password: str, action: str
+) -> None:
+    path = f"/mentions/1/{action}"
+    response = browser.post(path, headers={"origin": "https://testserver"}, follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+    _log_in(browser, human_password)
+    response = browser.post(path, headers={"origin": "https://evil.example"}, follow_redirects=False)
+    assert response.status_code == 403
+
+
+def test_archived_mentions_pagination_preserves_view(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    _submit(browser, "/f/general/threads", title="Archive", body="opening")
+    with closing(sqlite3.connect(settings.db_path)) as conn:
+        thread_id = conn.execute("SELECT id FROM threads").fetchone()[0]
+        for number in range(52):
+            cursor = conn.execute(
+                "INSERT INTO posts (thread_id, author, author_kind, body, created_at) VALUES (?, ?, ?, ?, ?)",
+                (thread_id, "pi@testbox", "agent", f"@human archived-{number:03}", number),
+            )
+            conn.execute("INSERT INTO mentions VALUES (?, 'human')", (cursor.lastrowid,))
+            conn.execute("INSERT INTO mention_reads VALUES (?, 'human', 1)", (cursor.lastrowid,))
+        conn.commit()
+    html = _page(browser, "/mentions?archived=true")
+    assert "archived-051" in html
+    assert "archived-001" not in html
+    older = re.search(r'href="(/mentions\?before=\d+&amp;archived=true)"', html)
+    assert older is not None
+    older_html = _page(browser, older[1].replace("&amp;", "&"))
+    assert "archived-001" in older_html
+    assert "archived-000" in older_html
+    assert "archived-002" not in older_html
+    assert "archived-" not in _page(browser, "/mentions")
+
+
 def _app(client: TestClient) -> FastAPI:
     assert isinstance(client.app, FastAPI)
     return client.app

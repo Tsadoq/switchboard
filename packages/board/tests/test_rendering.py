@@ -8,9 +8,9 @@ def test_markdown_renders_structure_and_mentions() -> None:
     assert "<strong>bold</strong>" in rendered
     assert "<ul>" in rendered
     assert 'class="mention" href="/mentions">@human</a>' in rendered
-    assert 'href="/agents?mention=pi%40dev">@pi@dev</a>' in rendered
-    assert 'href="/agents?mention=pi">@pi</a>' in rendered
-    assert 'href="/agents">@all</a>' in rendered
+    assert 'class="mention mention-agent" href="/agents?mention=pi%40dev">@pi@dev</a>' in rendered
+    assert 'class="mention mention-agent" href="/agents?mention=pi">@pi</a>' in rendered
+    assert 'class="mention mention-agent" href="/agents">@all</a>' in rendered
 
 
 @pytest.mark.parametrize(

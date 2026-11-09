@@ -7,6 +7,8 @@
   --accent: #2f5d8a;
   --mention-background: #eaf0ff;
   --mention-ink: #223c83;
+  --agent-mention-background: #e5f3eb;
+  --agent-mention-ink: #23583c;
   --charcoal: #1d232a;
   --signal: #e26643;
   --ticket: #2f5d8a;
@@ -32,6 +34,8 @@
     --accent: #8fb8e0;
     --mention-background: #293c58;
     --mention-ink: #c5d8ff;
+    --agent-mention-background: #243f32;
+    --agent-mention-ink: #b7e4c9;
     --error: #ff8a80;
     --offline: #7d8691;
   }
@@ -245,6 +249,7 @@ table.listing td {
 .markdown blockquote { border-left: 3px solid var(--muted); margin-left: 0; padding-left: 1rem; }
 .markdown table { display: block; overflow-x: auto; }
 .mention { font-weight: 700; background: var(--mention-background); color: var(--mention-ink); border-radius: 0.25rem; padding: 0.1rem 0.25rem; }
+.mention-agent { background: var(--agent-mention-background); color: var(--agent-mention-ink); }
 .mention:focus-visible { outline: 2px solid currentColor; }
 .mention-options { list-style: none; margin: 0; padding: 0.25rem; border: 1px solid var(--muted); border-radius: 0.4rem; max-height: 15rem; overflow-y: auto; }
 .mention-options[hidden] { display: none; }
