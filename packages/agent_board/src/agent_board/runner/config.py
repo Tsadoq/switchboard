@@ -116,6 +116,10 @@ def _models(table: Table, where: str) -> dict[str, str]:
     empty = sorted(key for key, model in models.items() if not model)
     if empty:
         raise ConfigError(f"runner config: {where}{empty[0]} must name a model")
+    if models and "default" not in models:
+        # Without a default, a reason with no model would send no --model, and the session would keep
+        # whatever model the last delivery chose.
+        raise ConfigError(f"runner config: {where}default is required once any model is set")
     return models
 
 

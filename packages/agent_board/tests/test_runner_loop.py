@@ -1,12 +1,16 @@
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
-from agent_board.runner import loop
-from agent_board.runner.happier import HappierError
+from agent_board.identity import Identity
+from agent_board.runner import loop, remote_control
+from agent_board.runner.config import KindConfig
+from agent_board.runner.happier import HappierError, Session, SessionState
 from agent_board.runner.loop import Wake, _Inbox
+from agent_board.runner.weekly import WeeklySlot
 
 _EPOCH = 1_800_000_000.0
 _LEASE_SECONDS = 120
@@ -248,3 +252,83 @@ def test_a_cut_digest_is_still_sent_once_and_acked() -> None:
     assert len(happier.sent) == 1 and happier.sent[0][1].endswith("\nhttps://board.example/mentions"), (
         happier.sent
     )
+
+
+class SessionHappier:
+    def __init__(self, fail_create: bool = False) -> None:
+        self.fail_create = fail_create
+        self.models: list[str | None] = []
+
+    def status(self, session_id: str) -> SessionState:
+        return SessionState(active=True, pending_requests=0, controlled_by_user=False)
+
+    def send(self, session_id: str, message: str, model: str | None = None) -> None:
+        self.models.append(model)
+
+    def create(self, **fields: Any) -> Session:
+        if self.fail_create:
+            raise HappierError("exit_1")
+        self.models.append(fields["model"])
+        return Session("cm-new", True)
+
+    def notify(self, title: str, message: str) -> None:
+        pass
+
+
+def _waker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    happier: SessionHappier,
+    *,
+    session: str | None,
+    **settings: Any,
+) -> "loop._AgentWaker":
+    monkeypatch.setattr(loop, "ensure_state_dir", lambda kind: tmp_path)
+    monkeypatch.setattr(loop, "_recorded_session", lambda kind: session)
+    kind = KindConfig("claude", tmp_path, "auto", "agent:claude", "remote-control", **settings)
+    return loop._AgentWaker(kind, Identity("claude@testbox", "claude", "testbox"), happier)  # type: ignore[arg-type]
+
+
+MYTHOS_POLICY = {"default": "sonnet", "mention": "mythos", "weekly": "mythos"}
+
+
+def test_one_session_switches_model_on_every_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    happier = SessionHappier()
+    waker = _waker(tmp_path, monkeypatch, happier, session="cm-old", models=MYTHOS_POLICY)
+
+    for reason in ("mention", "timer", "mention", "follow"):
+        assert waker([{"id": 1, "reason": reason, "summary": reason}]) == [1]
+
+    assert happier.models == ["mythos", "sonnet", "mythos", "sonnet"]
+
+
+def test_no_remote_control_fallback_when_a_model_is_required(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started: list[str] = []
+    monkeypatch.setattr(remote_control, "start", lambda *args: started.append("started"))
+    happier = SessionHappier(fail_create=True)
+    weekly = WeeklySlot.parse("Mon 06:00 UTC", "")
+    waker = _waker(tmp_path, monkeypatch, happier, session=None, models=MYTHOS_POLICY, weekly=weekly)
+    (tmp_path / loop.WEEKLY_FILE).write_text('{"last_fired_at": 0}')
+
+    acked = waker([{"id": 1, "reason": "mention", "summary": "m"}, *waker.scheduled()])
+
+    assert acked == [], acked
+    assert started == [], "fell back to remote control without the chosen model"
+    assert (tmp_path / loop.WEEKLY_FILE).read_text() == '{"last_fired_at": 0}', (
+        "weekly marked though undelivered"
+    )
+
+
+def test_remote_control_fallback_still_works_without_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started: list[str] = []
+    monkeypatch.setattr(remote_control, "start", lambda *args: started.append("started"))
+    waker = _waker(tmp_path, monkeypatch, SessionHappier(fail_create=True), session=None)
+
+    assert waker([{"id": 1, "reason": "mention", "summary": "m"}]) == [1]
+    assert started == ["started"]

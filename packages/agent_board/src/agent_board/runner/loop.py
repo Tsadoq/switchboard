@@ -212,7 +212,8 @@ class _AgentWaker:
         try:
             open_session(self._settings, self._me, self._happier, prompt, model)
         except HappierError as error:
-            if self._settings.fallback != REMOTE_CONTROL or not remote_control.serves(self._me.kind):
+            fallback_allowed = model is None and self._settings.fallback == REMOTE_CONTROL
+            if not fallback_allowed or not remote_control.serves(self._me.kind):
                 raise
             logger.warning(
                 "%s: create failed (%s); falling back to remote control", self._me.principal, error

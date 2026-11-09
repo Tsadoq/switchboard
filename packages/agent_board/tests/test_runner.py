@@ -172,7 +172,7 @@ def test_busy_or_controlled_session_leaves_wake_leased(
 def test_mentions_run_on_the_mention_model_in_the_one_session(
     runner_box: Fakes, agent_board: "AgentBoard"
 ) -> None:
-    _write_user_config('[kind.pi.models]\nmention = "big-model"\ntimer = "small-model"\n')
+    _write_user_config('[kind.pi.models]\ndefault = "small-model"\nmention = "big-model"\n')
     _post(agent_board, "claude", "Review", f"@{PI} please look")
     _drain(agent_board)
     _post(agent_board, "claude", "Again", f"@{PI} and this one")
@@ -185,7 +185,7 @@ def test_mentions_run_on_the_mention_model_in_the_one_session(
 
 def test_a_due_weekly_review_fires_once_on_its_model(runner_box: Fakes, agent_board: "AgentBoard") -> None:
     _write_user_config(
-        '[kind.pi]\nweekly = "Mon 06:00 Europe/Rome"\n[kind.pi.models]\nweekly = "big-model"\n'
+        '[kind.pi]\nweekly = "Mon 06:00 Europe/Rome"\n[kind.pi.models]\ndefault = "small-model"\nweekly = "big-model"\n'
     )
     state_dir = Path.home() / ".agents" / "board" / "pi"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -459,19 +459,22 @@ def test_prompt_for_a_timer_wake_points_at_the_agents_tickets() -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        '[kind.pi.models]\nsometimes = "x"\n',
-        '[kind.pi.models]\nmention = ""\n',
-        '[kind.pi]\nweekly = "someday"\n',
+        'kinds = ["pi"]\n[kind.pi.models]\ndefault = "d"\nsometimes = "x"\n',
+        'kinds = ["pi"]\n[kind.pi.models]\ndefault = "d"\nmention = ""\n',
+        'kinds = ["pi"]\n[kind.pi.models]\nmention = "m"\n',
+        'kinds = ["pi"]\n[kind.pi]\nweekly = "someday"\n',
     ],
 )
-def test_bad_model_or_weekly_settings_are_refused(text: str) -> None:
+def test_bad_model_or_weekly_settings_are_refused(fake_sign: "FakeSign", text: str) -> None:
+    fake_sign.configure(box=BOX, kinds=KINDS)
     _write_user_config(text)
 
     with pytest.raises(ConfigError):
         RunnerConfig.load()
 
 
-def test_models_and_weekly_are_read_per_kind() -> None:
+def test_models_and_weekly_are_read_per_kind(fake_sign: "FakeSign") -> None:
+    fake_sign.configure(box=BOX, kinds=KINDS)
     _write_user_config(
         '[kind.pi]\nweekly = "Sun 21:30 UTC"\n[kind.pi.models]\ndefault = "d"\nmention = "m"\n'
     )
