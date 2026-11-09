@@ -1,4 +1,5 @@
 import base64
+import dataclasses
 import sqlite3
 import time
 from collections.abc import AsyncIterator, MutableMapping
@@ -225,6 +226,55 @@ async def test_human_wakes_acked_by_any_runner(settings: Settings, signer: "Sign
         _expire_leases(settings)
         remaining = await _poll(client, headers, principal=HUMAN)
     assert remaining == [], f"acked human wake came back: {remaining}"
+
+
+def _age_wakes(settings: Settings, principal: str, seconds: float) -> None:
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.execute("UPDATE wakes SET created_at = created_at - ? WHERE principal = ?", (seconds, principal))
+
+
+async def test_human_wakes_wait_for_the_digest_window_then_lease_together(
+    settings: Settings, signer: "SignerFactory"
+) -> None:
+    pi = signer("pi@testbox")
+    async with _running_board(dataclasses.replace(settings, human_digest_seconds=600)) as (app, client):
+        _register(app, pi)
+        headers = await _bearer(client, pi)
+        await _bus(app).emit(_mention(HUMAN, 7))
+        await _bus(app).emit(_mention(pi.principal, 8))
+        too_soon = await _poll(client, headers, principal=HUMAN)
+        agent_wakes = await _poll(client, headers)
+
+        _age_wakes(settings, HUMAN, 601)
+        await _bus(app).emit(_mention(HUMAN, 9))
+        await _bus(app).emit(_mention(HUMAN, 10))
+        digest = await _poll(client, headers, principal=HUMAN)
+
+    assert too_soon == [], f"a human wake was leased inside the digest window: {too_soon}"
+    assert [wake["source_ref"] for wake in agent_wakes] == ["post:8"], f"agent wakes were held: {agent_wakes}"
+    refs = [wake["source_ref"] for wake in digest]
+    assert refs == ["post:7", "post:9", "post:10"], (
+        f"the digest did not lease every pending human wake: {refs}"
+    )
+
+
+async def test_unacked_digest_is_handed_out_again_after_its_lease(
+    settings: Settings, signer: "SignerFactory"
+) -> None:
+    pi = signer("pi@testbox")
+    async with _running_board(dataclasses.replace(settings, human_digest_seconds=600)) as (app, client):
+        _register(app, pi)
+        headers = await _bearer(client, pi)
+        await _bus(app).emit(_mention(HUMAN, 7))
+        _age_wakes(settings, HUMAN, 601)
+        first = await _poll(client, headers, principal=HUMAN)
+        while_leased = await _poll(client, headers, principal=HUMAN)
+        _expire_leases(settings)
+        again = await _poll(client, headers, principal=HUMAN)
+
+    assert [wake["source_ref"] for wake in first] == ["post:7"], first
+    assert while_leased == [], f"a leased digest was handed out twice: {while_leased}"
+    assert [wake["source_ref"] for wake in again] == ["post:7"], f"an unacked digest was lost: {again}"
 
 
 async def test_poll_updates_last_poll_at(settings: Settings, signer: "SignerFactory") -> None:

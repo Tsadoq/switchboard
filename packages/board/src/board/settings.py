@@ -22,6 +22,7 @@ class Settings:
     token_ttl_hours: int
     ts_window_seconds: int
     wake_lease_seconds: int
+    human_digest_seconds: int
     dist_dir: Path
     ssh_keygen: str
     listen: str
@@ -42,6 +43,7 @@ class Settings:
             token_ttl_hours=_integer(env, "BOARD_TOKEN_TTL_HOURS", 12),
             ts_window_seconds=_integer(env, "BOARD_TS_WINDOW_SECONDS", 300),
             wake_lease_seconds=_integer(env, "BOARD_WAKE_LEASE_SECONDS", 300),
+            human_digest_seconds=_integer(env, "BOARD_HUMAN_DIGEST_SECONDS", 600),
             dist_dir=Path(_text(env, "BOARD_DIST_DIR", "/app/dist")),
             ssh_keygen=_text(env, "BOARD_SSH_KEYGEN", "ssh-keygen"),
             listen=_text(env, "BOARD_LISTEN", "0.0.0.0:8080"),

@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 from agent_board.runner import loop
+from agent_board.runner.happier import HappierError
 from agent_board.runner.loop import Wake, _Inbox
 
 _EPOCH = 1_800_000_000.0
@@ -132,3 +133,63 @@ def test_unexpected_delivery_error_does_not_stop_the_inbox(
 
     assert delivered, f"inbox stopped after the first failure: {attempts}"
     assert client.acked[:1] == [1], f"wake not acked on retry: {client.acked}"
+
+
+class FakeHappier:
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+        self.sent: list[tuple[str, str]] = []
+
+    def notify(self, title: str, message: str) -> None:
+        if self.fail:
+            raise HappierError("exit_1")
+        self.sent.append((title, message))
+
+
+def _human_wake(wake_id: int, author: str, thread: int) -> Wake:
+    return {
+        "id": wake_id,
+        "reason": "mention",
+        "summary": f'{author} mentioned you in thread {thread} "T{thread}"',
+    }
+
+
+def test_one_human_wake_links_to_its_thread() -> None:
+    message = loop.human_digest([_human_wake(1, "pi@dev", 29)], "https://board.example")
+
+    assert message == 'pi@dev mentioned you in thread 29 "T29"\nhttps://board.example/t/29', message
+
+
+def test_several_human_wakes_become_one_push_grouped_by_thread() -> None:
+    happier = FakeHappier()
+    notifier = loop._HumanNotifier(happier, "https://board.example/")  # type: ignore[arg-type]
+    wakes = [
+        _human_wake(1, "pi@dev", 29),
+        _human_wake(2, "claude@ops", 29),
+        _human_wake(3, "pi@heimdall", 19),
+        _human_wake(4, "pi@dev", 29),
+    ]
+
+    acked = notifier(wakes)
+
+    assert acked == [1, 2, 3, 4], acked
+    assert happier.sent == [
+        (
+            "agent board",
+            "4 mentions: #29 (pi@dev, claude@ops), #19 (pi@heimdall)\nhttps://board.example/mentions",
+        )
+    ], happier.sent
+
+
+def test_unrecognised_summaries_still_count_in_the_digest() -> None:
+    wakes = [_human_wake(1, "pi@dev", 29), {"id": 2, "reason": "ticket", "summary": "something else"}]
+
+    message = loop.human_digest(wakes, "https://board.example")
+
+    assert message == "2 board updates: #29 (pi@dev), 1 other\nhttps://board.example/mentions", message
+
+
+def test_failed_digest_push_acks_nothing() -> None:
+    notifier = loop._HumanNotifier(FakeHappier(fail=True), "https://board.example")  # type: ignore[arg-type]
+
+    assert notifier([_human_wake(1, "pi@dev", 29), _human_wake(2, "pi@dev", 30)]) == []

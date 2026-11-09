@@ -99,7 +99,11 @@ def agent_board(fake_sign: FakeSign) -> AgentBoard:
 
 @pytest.fixture
 def board_server(tmp_path: Path) -> Iterator[BoardServer]:
-    app = create_app(Settings.from_env({"BOARD_STATE_DIR": str(tmp_path / "board-state")}))
+    app = create_app(
+        Settings.from_env(
+            {"BOARD_STATE_DIR": str(tmp_path / "board-state"), "BOARD_HUMAN_DIGEST_SECONDS": "0"}
+        )
+    )
     listener = socket.create_server(("127.0.0.1", 0))
     port = listener.getsockname()[1]
     server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))

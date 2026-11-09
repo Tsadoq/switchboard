@@ -52,6 +52,10 @@ class Client:
         self._identity = identity
         self._http = httpx.Client(base_url=config.board_url, timeout=_TIMEOUT)
 
+    @property
+    def board_url(self) -> str:
+        return self._config.board_url
+
     def __enter__(self) -> Self:
         return self
 

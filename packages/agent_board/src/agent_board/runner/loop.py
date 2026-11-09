@@ -1,6 +1,7 @@
 import json
 import logging
 import queue
+import re
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -30,6 +31,7 @@ _ANSWER_THREADS = (
     "Always reply to a post by the human that responds to you, even if only to confirm."
 )
 _CHECK_TICKETS = "For the scheduled wake, check your tickets with `agent-board tickets list --mine`."
+_SUMMARY = re.compile(r"(?P<author>\S+) (?:mentioned you|posted) in thread (?P<thread>\d+)\b")
 _RETRY_SECONDS = 10
 DELIVERY_BUDGET_SECONDS = TIMEOUT_SECONDS + 10
 logger = logging.getLogger(__name__)
@@ -174,19 +176,40 @@ class _AgentWaker:
 
 
 class _HumanNotifier:
-    def __init__(self, happier: Happier) -> None:
+    def __init__(self, happier: Happier, board_url: str) -> None:
         self._happier = happier
+        self._board_url = board_url.rstrip("/")
 
     def __call__(self, wakes: list[Wake]) -> list[int]:
-        notified: list[int] = []
-        for wake in wakes:
-            try:
-                self._happier.notify(NOTIFY_TITLE, wake["summary"])
-            except HappierError as error:
-                logger.warning("could not notify the human of wake %s: %s", wake["id"], error)
-                continue
-            notified.append(wake["id"])
-        return notified
+        try:
+            self._happier.notify(NOTIFY_TITLE, human_digest(wakes, self._board_url))
+        except HappierError as error:
+            logger.warning("could not notify the human of %d wake(s): %s", len(wakes), error)
+            return []
+        return [wake["id"] for wake in wakes]
+
+
+def human_digest(wakes: Sequence[Wake], board_url: str) -> str:
+    if len(wakes) == 1:
+        (wake,) = wakes
+        found = _SUMMARY.match(wake["summary"])
+        link = f"{board_url}/t/{found['thread']}" if found else f"{board_url}/mentions"
+        return f"{wake['summary']}\n{link}"
+    authors_by_thread: dict[str, list[str]] = {}
+    unplaced = 0
+    for wake in wakes:
+        found = _SUMMARY.match(wake["summary"])
+        if found is None:
+            unplaced += 1
+            continue
+        authors = authors_by_thread.setdefault(found["thread"], [])
+        if found["author"] not in authors:
+            authors.append(found["author"])
+    places = [f"#{thread} ({', '.join(authors)})" for thread, authors in authors_by_thread.items()]
+    if unplaced:
+        places.append(f"{unplaced} other")
+    noun = "mention" if all(wake.get("reason") == "mention" for wake in wakes) else "board update"
+    return f"{len(wakes)} {noun}s: {', '.join(places)}\n{board_url}/mentions"
 
 
 def _inboxes(cfg: RunnerConfig, clients: Mapping[Identity, Client], happier: Happier) -> list[_Inbox]:
@@ -199,7 +222,8 @@ def _inboxes(cfg: RunnerConfig, clients: Mapping[Identity, Client], happier: Hap
     if cfg.notify_human and clients:
         # The board lets any agent's token lease and ack the human inbox, so the first kind relays it.
         relay_client = next(iter(clients.values()))
-        inboxes.append(_Inbox(HUMAN_INBOX, relay_client, HUMAN_INBOX, _HumanNotifier(happier)))
+        notifier = _HumanNotifier(happier, relay_client.board_url)
+        inboxes.append(_Inbox(HUMAN_INBOX, relay_client, HUMAN_INBOX, notifier))
     return inboxes
 
 
