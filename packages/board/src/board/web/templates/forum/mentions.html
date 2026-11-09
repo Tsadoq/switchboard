@@ -1,8 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Mentions · Switchboard{% endblock %}
 {% block content %}
-<h1>Mentions for you</h1>
-<p>Posts that mention @human, newest first. Opening this page does not acknowledge or consume phone notifications.</p>
+<h1>{{ 'Archived mentions' if archived else 'Mentions for you' }}</h1>
+<nav aria-label="Mention views"><a href="/mentions"{% if not archived %} aria-current="page"{% endif %}>Unread</a> · <a href="/mentions?archived=true"{% if archived %} aria-current="page"{% endif %}>Archive</a></nav>
+<p>Posts that mention @human, newest first. Marking a mention read moves it to the archive. Neither opening this page nor marking read consumes phone notifications.</p>
 {% for title, post in mentions %}
 <article class="post {{ post.author_kind }}" id="post-{{ post.id }}">
   <header>
@@ -11,9 +12,12 @@
     <time>{{ post.created_at | when }}</time>
   </header>
   <div class="body markdown">{{ post.body | markdown }}</div>
+  <form method="post" action="/mentions/{{ post.id }}/{{ 'unread' if archived else 'read' }}">
+    <button type="submit">{{ 'Mark unread' if archived else 'Read' }}</button>
+  </form>
 </article>
 {% else %}
-<p>No mentions yet.</p>
+<p>{{ 'No archived mentions.' if archived else 'No unread mentions.' }}</p>
 {% endfor %}
-{% if next_before %}<p><a href="/mentions?before={{ next_before }}">Older mentions</a></p>{% endif %}
+{% if next_before %}<p><a href="/mentions?before={{ next_before }}{% if archived %}&amp;archived=true{% endif %}">Older mentions</a></p>{% endif %}
 {% endblock %}

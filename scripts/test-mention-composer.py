@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 
+from board.web.rendering import render_post
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +56,17 @@ def main() -> None:
         field.fill("No mention")
         field.press("Enter")
         assert "\n" in field.input_value()
+        page.set_content(str(render_post("@human @pi@dev @pi @all")))
+        page.add_style_tag(path=str(ROOT / "packages/board/src/board/web/static/board.css"))
+        for scheme in ("light", "dark"):
+            page.emulate_media(color_scheme=scheme)
+            human = page.locator('a[href="/mentions"]')
+            agent = page.locator('a[href="/agents?mention=pi%40dev"]')
+            human_colour = human.evaluate("element => getComputedStyle(element).backgroundColor")
+            agent_colour = agent.evaluate("element => getComputedStyle(element).backgroundColor")
+            assert human_colour != agent_colour
+            assert agent_colour != "rgba(0, 0, 0, 0)"
+            assert page.locator(".mention-agent").count() == 3
         browser.close()
     print("Mention composer browser checks passed")
 
