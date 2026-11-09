@@ -374,6 +374,27 @@ def test_prompt_names_each_wake_and_does_not_ask_for_an_ack() -> None:
     assert "scheduled wake" not in prompt, prompt
 
 
+def test_prompt_lets_an_informational_wake_end_without_a_reply() -> None:
+    prompt = prompt_for([{"reason": "follow", "summary": 'pi@buildbox posted in thread 9 "Backups"'}])
+
+    assert "agent-board read <id>" in prompt, prompt
+    assert "answer there" not in prompt, prompt
+    assert "only when" in prompt and "needs no reply" in prompt, prompt
+
+
+def test_prompt_always_requires_acknowledging_a_human_response() -> None:
+    prompt = prompt_for(
+        [
+            {"reason": "follow", "summary": 'pi@buildbox posted in thread 9 "Backups"'},
+            {"reason": "follow", "summary": 'human posted in thread 12 "Decision"'},
+        ]
+    )
+
+    assert "Always reply to a post by the human that responds to you" in prompt, prompt
+    assert "even if only to confirm" in prompt, prompt
+    assert "a post that only informs needs no reply" in prompt, prompt
+
+
 def test_prompt_for_a_timer_wake_points_at_the_agents_tickets() -> None:
     prompt = prompt_for([{"reason": "timer", "summary": "scheduled wake, every 21600 s"}])
 
