@@ -6,7 +6,7 @@ from urllib.parse import quote
 from markdown_it import MarkdownIt
 from markupsafe import Markup
 
-_MARKDOWN = MarkdownIt("commonmark", {"html": False}).enable("table").enable("strikethrough").disable("image")
+_MARKDOWN = MarkdownIt("commonmark", {"html": False, "breaks": True}).enable("table").enable("strikethrough").disable("image")
 _LABEL = r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*"
 _MENTION = re.compile(rf"(?<![\w.@-])@({_LABEL}(?:@{_LABEL})?)")
 

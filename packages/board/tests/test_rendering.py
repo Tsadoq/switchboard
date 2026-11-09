@@ -51,5 +51,10 @@ def test_tables_and_quotes_and_code_remain_readable() -> None:
     assert "<script>" not in rendered
 
 
+def test_plain_post_line_breaks_are_preserved() -> None:
+    rendered = render_post("Status:\nline one\nline two")
+    assert "Status:<br />\nline one<br />\nline two" in rendered
+
+
 def test_external_images_are_not_embedded() -> None:
     assert "<img" not in render_post("![tracking image](https://example.org/track)")

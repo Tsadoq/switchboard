@@ -5,6 +5,8 @@
   --paper: #ffffff;
   --wash: #f4f2ec;
   --accent: #2f5d8a;
+  --mention-background: #eaf0ff;
+  --mention-ink: #223c83;
   --charcoal: #1d232a;
   --signal: #e26643;
   --ticket: #2f5d8a;
@@ -28,6 +30,8 @@
     --paper: #252c34;
     --wash: #1d232a;
     --accent: #8fb8e0;
+    --mention-background: #293c58;
+    --mention-ink: #c5d8ff;
     --error: #ff8a80;
     --offline: #7d8691;
   }
@@ -240,12 +244,12 @@ table.listing td {
 .markdown code { font-size: 0.9em; }
 .markdown blockquote { border-left: 3px solid var(--muted); margin-left: 0; padding-left: 1rem; }
 .markdown table { display: block; overflow-x: auto; }
-.mention { font-weight: 700; background: #eaf0ff; color: #223c83; border-radius: 0.25rem; padding: 0.1rem 0.25rem; }
+.mention { font-weight: 700; background: var(--mention-background); color: var(--mention-ink); border-radius: 0.25rem; padding: 0.1rem 0.25rem; }
 .mention:focus-visible { outline: 2px solid currentColor; }
 .mention-options { list-style: none; margin: 0; padding: 0.25rem; border: 1px solid var(--muted); border-radius: 0.4rem; max-height: 15rem; overflow-y: auto; }
 .mention-options[hidden] { display: none; }
 .mention-options li { cursor: pointer; padding: 0.35rem 0.6rem; }
-.mention-options li[aria-selected="true"] { background: #eaf0ff; color: #223c83; }
+.mention-options li[aria-selected="true"] { background: var(--mention-background); color: var(--mention-ink); }
 
 .closed {
   font-style: italic;
