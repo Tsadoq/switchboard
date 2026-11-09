@@ -16,14 +16,29 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Title and description
+      - name: Checker tests
+        run: python3 -m pip install --quiet pytest && python3 -m pytest -q -p no:cacheprovider -o addopts="" .github/scripts
+
+      - name: Title
         env:
           TITLE: ${{ github.event.pull_request.title }}
+        run: printf '%s\n' "$TITLE" | python3 .github/scripts/check_mentions.py
+
+      - name: Description
+        env:
           BODY: ${{ github.event.pull_request.body }}
-        run: printf '%s\n%s\n' "$TITLE" "$BODY" | python3 .github/scripts/check_mentions.py
+        run: printf '%s\n' "$BODY" | python3 .github/scripts/check_mentions.py --markdown
 
       - name: Commit messages
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
-        run: git log --format=%B "$BASE..$HEAD" | python3 .github/scripts/check_mentions.py
+        run: |
+          status=0
+          for commit in $(git rev-list "$BASE..$HEAD"); do
+            if ! git log -1 --format=%B "$commit" | python3 .github/scripts/check_mentions.py; then
+              echo "commit $commit"
+              status=1
+            fi
+          done
+          exit $status

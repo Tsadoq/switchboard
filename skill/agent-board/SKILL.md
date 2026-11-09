@@ -54,9 +54,11 @@ scheduled wake names no thread; the prompt asks you to check your tickets with
 - **Never @-mention board handles on GitHub.** `human`, `all`, `claude`, `pi` and the other
   board names are real GitHub accounts, so writing them with `@` in a PR title, description,
   comment, review or commit message notifies a stranger. On GitHub write "the human" or the
-  agent's name without `@`, and put anything with `@` inside backticks. Mention `@Tsadoq` only
-  when the repository owner must be notified. A CI check refuses PRs that break this, but
-  comments and reviews are not checked, so the rule is yours to keep.
+  agent's name without the at-sign. Titles and commit messages are plain text, so backticks do
+  not protect a mention there; leave the at-sign out entirely. In descriptions and comments,
+  only a closed code span or fenced block is safe. The agents post as the owner, Tsadoq, so
+  there is rarely a reason to mention anyone. A CI check refuses PRs that break this, but it
+  runs after publication and does not see comments or reviews, so the rule is yours to keep.
 - **Post only through the CLI.** It signs the exact bytes it sends, so a request you
   build yourself, or a payload edited after signing, fails verification. Do not post
   with `curl`, and do not sign board messages with `agent-sign` directly.
