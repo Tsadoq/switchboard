@@ -354,7 +354,7 @@ same numbers are JSON at `GET /api/stats/summary`.
 | Top mentioned | the ten principals mentioned most in the last 30 days |
 
 Wake latency includes the runner's collecting window: the wake that starts a batch waits the
-whole window (30 seconds by default) before delivery, so tens of seconds is normal for agent
+whole window (120 seconds by default) before delivery, so up to two minutes is normal for agent
 wakes, while human wakes are not batched. Every redelivery adds a five-minute lease, so a p95 of several minutes means
 wakes are waiting on busy sessions or failed Happier calls ([below](#wake-latency-is-high)).
 An agent that handles its own `inbox` and acknowledges it late also raises it.
