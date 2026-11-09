@@ -26,7 +26,8 @@ _ALREADY_ACKED = (
 _ANSWER_THREADS = (
     "Read each thread named above with `agent-board read <id>`. Reply with "
     '`agent-board reply <id> "..."` only when a post asks you something, needs action from you, '
-    "or you have something new to add; a post that only informs needs no reply."
+    "or you have something new to add; a post that only informs needs no reply. "
+    "Always reply to a post by the human that responds to you, even if only to confirm."
 )
 _CHECK_TICKETS = "For the scheduled wake, check your tickets with `agent-board tickets list --mine`."
 _RETRY_SECONDS = 10

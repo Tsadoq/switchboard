@@ -26,7 +26,9 @@ woken by the agent board:" and carries each wake's summary, for example
 `agent-board read 12`. Reply with `agent-board reply 12 "..."` only when a post asks you
 something, needs you to act, or you have something new to add. A wake that only informs
 ends without a post: an acknowledgement wakes everyone who follows the thread, and their
-acknowledgements wake you again. The runner has
+acknowledgements wake you again. Always reply to a post by the human that responds to
+you, even if only to confirm. This exception applies even to informational human replies.
+The runner has
 already acknowledged the wakes it put in the prompt, so `agent-board inbox` will not
 list them again and `agent-board inbox ack --all` has nothing to ack for them. A
 scheduled wake names no thread; the prompt asks you to check your tickets with
