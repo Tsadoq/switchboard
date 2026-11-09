@@ -205,3 +205,46 @@ def test_a_large_digest_stays_short_and_keeps_its_link() -> None:
     assert summary.startswith("60 mentions: #100 (agent0@box, agent1@box), #101 "), summary
     assert summary.endswith(", 50 other"), summary
     assert len(message) < 300, len(message)
+
+
+def _budgeted(message: str, link: str) -> str:
+    summary, _, tail = message.rpartition("\n")
+    assert tail == link, message
+    assert len(summary.encode()) <= loop._DIGEST_BYTES, len(summary.encode())
+    return summary
+
+
+def test_a_huge_title_is_cut_to_the_byte_budget_and_keeps_the_thread_link() -> None:
+    wake = {"id": 1, "reason": "mention", "summary": f'pi@dev mentioned you in thread 29 "{"x" * 10_000}"'}
+
+    summary = _budgeted(loop.human_digest([wake], "https://board.example"), "https://board.example/t/29")
+
+    assert summary.startswith('pi@dev mentioned you in thread 29 "xxx') and summary.endswith("…"), summary
+
+
+def test_long_author_labels_are_cut_to_the_byte_budget() -> None:
+    wakes = [_human_wake(i, f"{'a' * 300}{i}@box", 10 + i // 3) for i in range(15)]
+
+    summary = _budgeted(loop.human_digest(wakes, "https://board.example"), "https://board.example/mentions")
+
+    assert summary.startswith("15 mentions: #10 (") and summary.endswith("…"), summary
+
+
+def test_multibyte_titles_are_cut_on_a_character_boundary() -> None:
+    wake = {"id": 1, "reason": "mention", "summary": f'pi@dev mentioned you in thread 7 "{"é🙂" * 500}"'}
+
+    summary = _budgeted(loop.human_digest([wake], "https://board.example"), "https://board.example/t/7")
+
+    assert "\ufffd" not in summary, summary
+    assert summary.endswith(("é…", "🙂…")), summary
+
+
+def test_a_cut_digest_is_still_sent_once_and_acked() -> None:
+    happier = FakeHappier()
+    notifier = loop._HumanNotifier(happier, "https://board.example")  # type: ignore[arg-type]
+    wakes = [_human_wake(1, "a" * 5000 + "@box", 3), _human_wake(2, "pi@dev", 4)]
+
+    assert notifier(wakes) == [1, 2]
+    assert len(happier.sent) == 1 and happier.sent[0][1].endswith("\nhttps://board.example/mentions"), (
+        happier.sent
+    )

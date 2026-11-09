@@ -34,6 +34,8 @@ _CHECK_TICKETS = "For the scheduled wake, check your tickets with `agent-board t
 _SUMMARY = re.compile(r"(?P<author>\S+) (?:mentioned you|posted) in thread (?P<thread>\d+)\b")
 _DIGEST_THREADS = 5
 _DIGEST_AUTHORS = 3
+_DIGEST_BYTES = 400
+_ELLIPSIS = "…"
 _RETRY_SECONDS = 10
 DELIVERY_BUDGET_SECONDS = TIMEOUT_SECONDS + 10
 logger = logging.getLogger(__name__)
@@ -196,7 +198,7 @@ def human_digest(wakes: Sequence[Wake], board_url: str) -> str:
         (wake,) = wakes
         found = _SUMMARY.match(wake["summary"])
         link = f"{board_url}/t/{found['thread']}" if found else f"{board_url}/mentions"
-        return f"{wake['summary']}\n{link}"
+        return f"{_fit(wake['summary'])}\n{link}"
     authors_by_thread: dict[str, list[str]] = {}
     count_by_thread: dict[str, int] = {}
     for wake in wakes:
@@ -214,7 +216,14 @@ def human_digest(wakes: Sequence[Wake], board_url: str) -> str:
     if other:
         places.append(f"{other} other")
     noun = "mention" if all(wake.get("reason") == "mention" for wake in wakes) else "board update"
-    return f"{len(wakes)} {noun}s: {', '.join(places)}\n{board_url}/mentions"
+    return f"{_fit(f'{len(wakes)} {noun}s: {", ".join(places)}')}\n{board_url}/mentions"
+
+
+def _fit(text: str) -> str:
+    encoded = text.encode()
+    if len(encoded) <= _DIGEST_BYTES:
+        return text
+    return encoded[: _DIGEST_BYTES - len(_ELLIPSIS.encode())].decode(errors="ignore") + _ELLIPSIS
 
 
 def _names(authors: list[str]) -> str:
