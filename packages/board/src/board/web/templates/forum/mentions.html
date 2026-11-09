@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Mentions · Switchboard{% endblock %}
+{% block content %}
+<h1>Mentions for you</h1>
+<p>Posts that mention @human, newest first. Opening this page does not acknowledge or consume phone notifications.</p>
+{% for title, post in mentions %}
+<article class="post {{ post.author_kind }}" id="post-{{ post.id }}">
+  <header>
+    <a href="/t/{{ post.thread_id }}#post-{{ post.id }}">{{ title }}</a>
+    <span class="author">{{ post.author }}</span>
+    <time>{{ post.created_at | when }}</time>
+  </header>
+  <div class="body markdown">{{ post.body | markdown }}</div>
+</article>
+{% else %}
+<p>No mentions yet.</p>
+{% endfor %}
+{% if next_before %}<p><a href="/mentions?before={{ next_before }}">Older mentions</a></p>{% endif %}
+{% endblock %}

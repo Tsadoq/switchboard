@@ -19,7 +19,7 @@
       {% endif %}
       <time>{{ post.created_at | when }}</time>
     </header>
-    <div class="body">{{ post.body }}</div>
+    <div class="body markdown">{{ post.body | markdown }}</div>
     {% if post.files %}
     <ul class="attachments">
       {% for file_id in post.files %}

@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 SESSION_COOKIE = "board_session"
 SESSION_ENTROPY_BYTES = 32
 THIRTY_DAYS_SECONDS = 30 * 86400
-PAGES = ["/", "/f/general", "/t/1", "/tickets", "/files", "/agents"]
+PAGES = ["/", "/f/general", "/t/1", "/tickets", "/files", "/agents", "/mentions"]
 
 
 @pytest.fixture
@@ -32,6 +32,90 @@ def browser(settings: Settings) -> Iterator[TestClient]:
     # only sends it back to an https origin.
     with TestClient(create_app(settings), base_url="https://testserver") as browser:
         yield browser
+
+
+@pytest.mark.parametrize("path", ["/mentions", "/mention-options?q=pi"])
+def test_mention_views_require_human_login(browser: TestClient, path: str) -> None:
+    response = browser.get(path, follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+
+
+def test_thread_and_poll_render_safe_markdown(
+    browser: TestClient, signer: "SignerFactory", human_password: str
+) -> None:
+    alice = signer("claude@testbox")
+    _register(browser, alice)
+    thread_id = _open_thread(browser, alice, body="**hello** @human <script>alert(1)</script>")
+    _log_in(browser, human_password)
+    for path in (f"/t/{thread_id}", f"/t/{thread_id}/posts"):
+        html = _page(browser, path)
+        assert "<strong>hello</strong>" in html
+        assert '<a class="mention" href="/mentions">@human</a>' in html
+        assert "<script>alert(1)</script>" not in html
+        assert "&lt;script&gt;" in html
+
+
+def test_human_mentions_are_persistent_and_do_not_consume_wakes(
+    browser: TestClient, signer: "SignerFactory", human_password: str, settings: Settings
+) -> None:
+    alice = signer("claude@testbox")
+    _register(browser, alice)
+    thread_id = _open_thread(browser, alice, title="Needs a decision", body="@human **please decide**")
+    _open_thread(browser, alice, title="Not for human", body="@claude@testbox internal")
+    _log_in(browser, human_password)
+    with closing(sqlite3.connect(settings.db_path)) as conn:
+        before = conn.execute("SELECT id, leased_until, acked_at FROM wakes").fetchall()
+    for _ in range(2):
+        html = _page(browser, "/mentions")
+        assert "Needs a decision" in html
+        assert "<strong>please decide</strong>" in html
+        assert f"/t/{thread_id}#post-" in html
+        assert "Not for human" not in html
+    with closing(sqlite3.connect(settings.db_path)) as conn:
+        assert conn.execute("SELECT id, leased_until, acked_at FROM wakes").fetchall() == before
+
+
+def test_human_mentions_are_paginated_newest_first(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    _submit(browser, "/f/general/threads", title="Mentions", body="opening")
+    with closing(sqlite3.connect(settings.db_path)) as conn:
+        thread_id = conn.execute("SELECT id FROM threads").fetchone()[0]
+        for number in range(52):
+            cursor = conn.execute(
+                "INSERT INTO posts (thread_id, author, author_kind, body, created_at) VALUES (?, ?, ?, ?, ?)",
+                (thread_id, "pi@testbox", "agent", f"@human item-{number:03}", number),
+            )
+            conn.execute("INSERT INTO mentions VALUES (?, 'human')", (cursor.lastrowid,))
+        conn.commit()
+    html = _page(browser, "/mentions")
+    assert "item-051" in html
+    assert "item-002" in html
+    assert "item-001" not in html
+    older = re.search(r'href="(/mentions\?before=\d+)"', html)
+    assert older is not None
+    older_html = _page(browser, older[1])
+    assert "item-001" in older_html
+    assert "item-000" in older_html
+    assert "item-002" not in older_html
+    assert "Older mentions" not in older_html
+    assert browser.get("/mentions?before=-1").status_code == 422
+
+
+def test_mention_options_and_clickable_agents_are_filtered(
+    browser: TestClient, signer: "SignerFactory", human_password: str
+) -> None:
+    alice, bob = signer("claude@testbox"), signer("pi@testbox")
+    _register(browser, alice, bob)
+    _log_in(browser, human_password)
+    assert _read(browser, "/mention-options?q=pi") == [{"value": "@pi"}, {"value": "@pi@testbox"}]
+    assert _read(browser, "/mention-options?q=human") == [{"value": "@human"}]
+    assert _read(browser, "/mention-options?q=missing") == []
+    assert "pi@testbox" in _page(browser, "/agents?mention=pi%40testbox")
+    assert "claude@testbox" not in _page(browser, "/agents?mention=pi%40testbox")
+    assert browser.get("/mention-options?q=" + "x" * 101).status_code == 422
 
 
 def _app(client: TestClient) -> FastAPI:

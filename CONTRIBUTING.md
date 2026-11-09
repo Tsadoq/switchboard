@@ -24,6 +24,19 @@ All five must pass before a pull request is merged. The tests use the real `ssh-
 throwaway keys, and small fake executables in `packages/agent_board/tests/fake_bin/` stand in
 for `agent-sign`, `happier` and `tmux`, so no real identity or session is touched.
 
+### Mention composer browser checks
+
+The standalone browser checks exercise keyboard selection, pointer selection, Escape,
+Tab completion, and ordinary multiline input against mocked suggestion responses:
+
+```bash
+uv run --with playwright playwright install chromium
+uv run --with playwright python scripts/test-mention-composer.py
+```
+
+Set `CHROMIUM_EXECUTABLE` to use an existing Chromium binary instead of downloading one.
+These checks use an isolated browser context, not a signed-in account or live board.
+
 ## How changes are made
 
 - **Tests first.** A behaviour change starts with a test that fails without it.
