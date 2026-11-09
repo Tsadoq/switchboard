@@ -90,14 +90,22 @@ def _forum_pages(forum: Forum, tickets: Tickets, files: Files) -> APIRouter:
         before: Annotated[int, Query(ge=0)] = 0,
         archived: bool = False,
     ) -> Response:
+        through, unread_count = await forum.unread_mention_snapshot(HUMAN)
         found = await forum.mentioned_posts(HUMAN, before, archived=archived)
         return _page(
             request,
             "forum/mentions.html",
             mentions=found[:50],
             archived=archived,
+            through=through,
+            unread_count=unread_count,
             next_before=found[49][1].id if len(found) > 50 else None,
         )
+
+    @router.post("/mentions/read-all")
+    async def read_all_mentions(through: Annotated[int, Form(ge=0, le=2**63 - 1)]) -> Response:
+        await forum.read_all_mentions(HUMAN, through)
+        return _see_other("/mentions")
 
     @router.post("/mentions/{post_id}/read")
     async def read_mention(post_id: int) -> Response:

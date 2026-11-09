@@ -118,6 +118,73 @@ def test_mention_options_and_clickable_agents_are_filtered(
     assert browser.get("/mention-options?q=" + "x" * 101).status_code == 422
 
 
+def test_read_all_mentions_crosses_pages_but_preserves_new_arrivals_and_wakes(
+    browser: TestClient, signer: "SignerFactory", human_password: str, settings: Settings
+) -> None:
+    alice = signer("claude@testbox")
+    _register(browser, alice)
+    _open_thread(browser, alice, body="@human first mention")
+    _open_thread(browser, alice, body="@claude@testbox private mention")
+    _log_in(browser, human_password)
+    with closing(sqlite3.connect(settings.db_path)) as conn:
+        thread_id = conn.execute("SELECT MIN(id) FROM threads").fetchone()[0]
+        for number in range(51):
+            cursor = conn.execute(
+                "INSERT INTO posts (thread_id, author, author_kind, body, created_at) VALUES (?, ?, ?, ?, ?)",
+                (thread_id, "claude@testbox", "agent", f"@human bulk-{number:03}", number),
+            )
+            conn.execute("INSERT INTO mentions VALUES (?, 'human')", (cursor.lastrowid,))
+        conn.commit()
+    html = _page(browser, "/mentions")
+    assert "52 unread mentions across all pages" in html
+    cutoff = re.search(r'name="through" value="(\d+)"', html)
+    assert cutoff is not None
+    older = re.search(r'href="(/mentions\?before=\d+)"', html)
+    assert older is not None
+    older_html = _page(browser, older[1])
+    assert f'name="through" value="{cutoff[1]}"' in older_html
+    _open_thread(browser, alice, body="@human new arrival")
+    with closing(sqlite3.connect(settings.db_path)) as conn:
+        wakes = conn.execute("SELECT id, leased_until, acked_at FROM wakes").fetchall()
+    for _ in range(2):
+        _submit(browser, "/mentions/read-all", through=cutoff[1])
+    unread = _page(browser, "/mentions")
+    assert "1 unread mention across all pages" in unread
+    assert "new arrival" in unread
+    assert "bulk-" not in unread
+    assert "first mention" not in unread
+    archived = _page(browser, "/mentions?archived=true")
+    assert "bulk-050" in archived
+    assert "new arrival" not in archived
+    assert 'action="/mentions/read-all"' not in archived
+    with closing(sqlite3.connect(settings.db_path)) as conn:
+        assert (
+            conn.execute("SELECT COUNT(*) FROM mention_reads WHERE principal = 'human'").fetchone()[0] == 52
+        )
+        assert (
+            conn.execute("SELECT COUNT(*) FROM mention_reads WHERE principal != 'human'").fetchone()[0] == 0
+        )
+        assert conn.execute("SELECT id, leased_until, acked_at FROM wakes").fetchall() == wakes
+
+
+def test_read_all_requires_login_same_origin_and_valid_cutoff(
+    browser: TestClient, human_password: str
+) -> None:
+    response = browser.post("/mentions/read-all", data={"through": 0}, follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+    _log_in(browser, human_password)
+    response = browser.post(
+        "/mentions/read-all", data={"through": 0}, headers={"origin": "https://evil.example"}
+    )
+    assert response.status_code == 403
+    for fields in ({}, {"through": -1}, {"through": "bad"}, {"through": 2**63}):
+        assert browser.post("/mentions/read-all", data=fields).status_code == 422
+    for _ in range(2):
+        _submit(browser, "/mentions/read-all", through="0")
+    assert '<button type="submit" disabled>Read all</button>' in _page(browser, "/mentions")
+
+
 def test_read_mentions_move_to_archive_and_can_be_restored(
     browser: TestClient, signer: "SignerFactory", human_password: str, settings: Settings
 ) -> None:

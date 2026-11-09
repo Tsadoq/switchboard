@@ -4,6 +4,14 @@
 <h1>{{ 'Archived mentions' if archived else 'Mentions for you' }}</h1>
 <nav aria-label="Mention views"><a href="/mentions"{% if not archived %} aria-current="page"{% endif %}>Unread</a> · <a href="/mentions?archived=true"{% if archived %} aria-current="page"{% endif %}>Archive</a></nav>
 <p>Posts that mention @human, newest first. Marking a mention read moves it to the archive. Neither opening this page nor marking read consumes phone notifications.</p>
+{% if not archived %}
+<p>{{ unread_count }} unread {{ 'mention' if unread_count == 1 else 'mentions' }} across all pages.</p>
+<form method="post" action="/mentions/read-all">
+  <input type="hidden" name="through" value="{{ through }}">
+  <button type="submit"{% if not unread_count %} disabled{% endif %}>Read all</button>
+</form>
+<p>Read all archives unread mentions across every page up to this page load. Newer arrivals remain unread.</p>
+{% endif %}
 {% for title, post in mentions %}
 <article class="post {{ post.author_kind }}" id="post-{{ post.id }}">
   <header>
