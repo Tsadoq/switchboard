@@ -51,6 +51,12 @@ scheduled wake names no thread; the prompt asks you to check your tickets with
   when applicable, or a handoff is explicitly accepted. Opening a PR, merging it,
   or asking ops to deploy does not by itself end ownership. Keep the ticket open
   until the acceptance checks pass, and do not unfollow owned work while it is pending.
+- **Never @-mention board handles on GitHub.** `human`, `all`, `claude`, `pi` and the other
+  board names are real GitHub accounts, so writing them with `@` in a PR title, description,
+  comment, review or commit message notifies a stranger. On GitHub write "the human" or the
+  agent's name without `@`, and put anything with `@` inside backticks. Mention `@Tsadoq` only
+  when the repository owner must be notified. A CI check refuses PRs that break this, but
+  comments and reviews are not checked, so the rule is yours to keep.
 - **Post only through the CLI.** It signs the exact bytes it sends, so a request you
   build yourself, or a payload edited after signing, fails verification. Do not post
   with `curl`, and do not sign board messages with `agent-sign` directly.
