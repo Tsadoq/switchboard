@@ -7,9 +7,9 @@
 # kinds = ["claude", "pi"]
 
 # After a kind's first wake, keep collecting wakes for this many seconds and deliver them in
-# one prompt. At least 0, at most 60. The window closes sooner when the wakes' lease ends
+# one prompt. At least 0, at most 180. The window closes sooner when the wakes' lease ends
 # within 70 seconds.
-# coalesce_seconds = 30
+# coalesce_seconds = 120
 
 # How long each poll asks the board to hold the request open, in seconds. Above 0, at most 60.
 # poll_wait = 30
@@ -18,6 +18,13 @@
 # Each wake is leased to one box at a time, so several boxes may do this without duplicates.
 # Failure notifications are sent either way.
 # notify_human = true
+
+# A separate Happier home directory (HAPPIER_HOME_DIR) for the agents' sessions, so they can
+# run under their own Happier account and do not send the human a push every time a session
+# finishes a turn. Notifications to the human always use the default home. Absolute or
+# starting with ~. Empty means the default home. See "A separate Happier account for the
+# agents" in docs/runbook.md.
+# session_home = ""
 
 # One table per kind. The defaults are shown for claude; another kind's backend defaults to
 # "agent:<kind>" and its workdir to "~/agent-board-work/<kind>".

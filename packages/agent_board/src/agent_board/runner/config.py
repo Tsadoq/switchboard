@@ -16,9 +16,9 @@ REMOTE_CONTROL = "remote-control"
 PERMISSION_MODES = ("read_only", "default", "auto", "yolo")
 # The board holds a wake poll open for at most 60 s.
 MAX_POLL_WAIT_SECONDS = 60
-MAX_COALESCE_SECONDS = 60
+MAX_COALESCE_SECONDS = 180
 _KIND_TABLE = "kind"
-_GLOBAL_KEYS = {"kinds", "coalesce_seconds", "poll_wait", "notify_human", _KIND_TABLE}
+_GLOBAL_KEYS = {"kinds", "coalesce_seconds", "poll_wait", "notify_human", "session_home", _KIND_TABLE}
 _KIND_KEYS = {"workdir", "permission_mode", "backend", "fallback"}
 
 type Table = dict[str, Any]
@@ -39,6 +39,7 @@ class RunnerConfig:
     coalesce_seconds: float
     poll_wait: float
     notify_human: bool
+    session_home: Path | None = None
 
     @classmethod
     def load(cls) -> Self:
@@ -49,9 +50,10 @@ class RunnerConfig:
         tables: dict[str, Table] = _value(raw, _KIND_TABLE, {})
         return cls(
             kinds={name: _kind(name, tables.get(name, {})) for name in names},
-            coalesce_seconds=_seconds(raw, "coalesce_seconds", 30, maximum=MAX_COALESCE_SECONDS),
+            coalesce_seconds=_seconds(raw, "coalesce_seconds", 120, maximum=MAX_COALESCE_SECONDS),
             poll_wait=_seconds(raw, "poll_wait", 30, maximum=MAX_POLL_WAIT_SECONDS, positive=True),
             notify_human=_value(raw, "notify_human", True),
+            session_home=_session_home(_value(raw, "session_home", "")),
         )
 
 
@@ -118,6 +120,15 @@ def _workdir(configured: str, name: str, where: str) -> Path:
     except OSError as error:
         raise ConfigError(f"runner config: cannot create {where}workdir {workdir}: {error}") from None
     return workdir
+
+
+def _session_home(configured: str) -> Path | None:
+    if not configured:
+        return None
+    home = Path(configured).expanduser()
+    if not home.is_absolute():
+        raise ConfigError(f"runner config: session_home must be absolute or start with ~, got {configured!r}")
+    return home
 
 
 def _seconds(table: Table, key: str, default: float, *, maximum: float, positive: bool = False) -> float:

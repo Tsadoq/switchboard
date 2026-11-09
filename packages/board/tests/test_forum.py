@@ -10,7 +10,7 @@ from board.app import create_app, main
 from board.constants import HUMAN
 from board.forum import mentions
 from board.forum.actions import Forum
-from board.forum.entities import ThreadTarget
+from board.forum.entities import AuthorKind, ThreadTarget
 from board.forum.fanout import WakeRequest, WakeRequested
 from board.identity.presence import PRESENCE_WINDOW_SECONDS
 from board.settings import Settings
@@ -182,6 +182,69 @@ def test_human_post_publishes_wake_requests_like_agent_post(
 
     woken = [(wake.principal, wake.reason) for wake in wakes]
     assert woken == [("claude@testbox", "mention")], f"human post woke the wrong principals: {wakes}"
+
+
+def test_participants_automatically_follow_without_self_wakes_or_duplicates(
+    client: TestClient, signer: "SignerFactory"
+) -> None:
+    alice, bob, carol = signer("claude@testbox"), signer("pi@testbox"), signer("pi@otherbox")
+    _register(client, alice, bob, carol)
+    wakes = _collect_wakes(client)
+    thread_id = _open_thread(client, alice)
+    assert wakes == []
+    target = f"thread:{thread_id}"
+
+    response = _send(client, bob, "post", target, {"body": "joining without a mention"})
+    assert response.status_code == 201
+    assert [(wake.principal, wake.reason) for wake in wakes] == [(alice.principal, "follow")]
+    wakes.clear()
+
+    response = _send(client, alice, "post", target, {"body": "an unmentioned reply"})
+    assert response.status_code == 201
+    assert [(wake.principal, wake.reason) for wake in wakes] == [(bob.principal, "follow")]
+    wakes.clear()
+
+    response = _send(client, alice, "post", target, {"body": "hello @pi@testbox"})
+    assert response.status_code == 201
+    assert [(wake.principal, wake.reason) for wake in wakes] == [(bob.principal, "mention")]
+    assert _portal(client).call(_forum(client).followers_of, thread_id, "general") == {
+        alice.principal,
+        bob.principal,
+    }
+
+
+def test_unfollow_sticks_across_comments_until_explicit_follow(
+    client: TestClient, signer: "SignerFactory"
+) -> None:
+    alice, bob = signer("claude@testbox"), signer("pi@testbox")
+    _register(client, alice, bob)
+    thread_id = _open_thread(client, alice)
+    target = f"thread:{thread_id}"
+    assert _send(client, alice, "unfollow", target, {}).status_code == 200
+    assert _send(client, alice, "unfollow", target, {}).status_code == 200
+    assert _send(client, alice, "post", target, {"body": "still opted out"}).status_code == 201
+    wakes = _collect_wakes(client)
+    assert _send(client, bob, "post", target, {"body": "no mention"}).status_code == 201
+    assert wakes == []
+
+    assert _send(client, alice, "follow", target, {}).status_code == 200
+    assert _send(client, bob, "post", target, {"body": "following again"}).status_code == 201
+    assert [(wake.principal, wake.reason) for wake in wakes] == [(alice.principal, "follow")]
+    assert _send(client, alice, "unfollow", target, {}).status_code == 200
+    assert _send(client, alice, "post", target, {"body": "opted out again"}).status_code == 201
+    assert _portal(client).call(_forum(client).followers_of, thread_id, "general") == {bob.principal}
+
+
+def test_only_agent_posts_automatically_follow(client: TestClient, signer: "SignerFactory") -> None:
+    alice = signer("claude@testbox")
+    _register(client, alice)
+    thread_id = _open_thread(client, alice)
+    nonagents: tuple[tuple[str, AuthorKind], ...] = ((HUMAN, "human"), ("system", "system"))
+    for author, kind in nonagents:
+        _portal(client).call(
+            _forum(client).post, author, kind, ThreadTarget(thread_id), {"body": "not an agent"}
+        )
+    assert _portal(client).call(_forum(client).followers_of, thread_id, "general") == {alice.principal}
 
 
 def test_follow_and_unfollow_round_trip(client: TestClient, signer: "SignerFactory") -> None:

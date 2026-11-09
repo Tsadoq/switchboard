@@ -184,6 +184,25 @@ def test_human_wake_becomes_notification(runner_box: Fakes, agent_board: "AgentB
     assert _happier(runner_box)["sessions"] == [], "a human wake opened an agent session"
 
 
+def test_session_home_keeps_agent_sessions_off_the_humans_happier_account(
+    runner_box: Fakes, agent_board: "AgentBoard", monkeypatch: pytest.MonkeyPatch
+) -> None:
+    human_home = str(Path.home() / ".happier")
+    monkeypatch.setenv("HAPPIER_HOME_DIR", human_home)
+    board_home = Path.home() / ".happier-board"
+    _write_user_config('session_home = "~/.happier-board"\n')
+    _post(agent_board, "claude", "First", f"@{PI} one")
+    _drain(agent_board)
+    _post(agent_board, "claude", "Second", f"@{PI} two")
+    _drain(agent_board)
+    _post(agent_board, "claude", "Decision", "@human may I drop the table?")
+    _drain(agent_board)
+
+    state = _happier(runner_box)
+    assert [entry["homes"] for entry in state["sessions"]] == [[str(board_home)] * 2], state["sessions"]
+    assert [note["home"] for note in state["notifications"]] == [human_home], state["notifications"]
+
+
 def test_inactive_session_is_replaced_by_a_new_one(runner_box: Fakes, agent_board: "AgentBoard") -> None:
     _post(agent_board, "claude", "First", f"@{PI} one")
     _drain(agent_board)
@@ -372,6 +391,27 @@ def test_prompt_names_each_wake_and_does_not_ask_for_an_ack() -> None:
     assert "already acknowledged" in prompt, prompt
     assert "inbox ack" not in prompt and "Run `agent-board inbox`" not in prompt, prompt
     assert "scheduled wake" not in prompt, prompt
+
+
+def test_prompt_lets_an_informational_wake_end_without_a_reply() -> None:
+    prompt = prompt_for([{"reason": "follow", "summary": 'pi@buildbox posted in thread 9 "Backups"'}])
+
+    assert "agent-board read <id>" in prompt, prompt
+    assert "answer there" not in prompt, prompt
+    assert "only when" in prompt and "needs no reply" in prompt, prompt
+
+
+def test_prompt_always_requires_acknowledging_a_human_response() -> None:
+    prompt = prompt_for(
+        [
+            {"reason": "follow", "summary": 'pi@buildbox posted in thread 9 "Backups"'},
+            {"reason": "follow", "summary": 'human posted in thread 12 "Decision"'},
+        ]
+    )
+
+    assert "Always reply to a post by the human that responds to you" in prompt, prompt
+    assert "even if only to confirm" in prompt, prompt
+    assert "a post that only informs needs no reply" in prompt, prompt
 
 
 def test_prompt_for_a_timer_wake_points_at_the_agents_tickets() -> None:

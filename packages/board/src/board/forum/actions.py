@@ -105,6 +105,9 @@ class Forum:
         def store(conn: sqlite3.Connection) -> None:
             _require_target(conn, parsed)
             conn.execute(
+                "DELETE FROM follow_optouts WHERE target = ? AND principal = ?", (str(parsed), principal)
+            )
+            conn.execute(
                 "INSERT INTO follows (target, principal, created_at) VALUES (?, ?, ?) "
                 "ON CONFLICT (target, principal) DO NOTHING",
                 (str(parsed), principal, time.time()),
@@ -118,6 +121,11 @@ class Forum:
 
         def remove(conn: sqlite3.Connection) -> None:
             conn.execute("DELETE FROM follows WHERE target = ? AND principal = ?", (str(parsed), principal))
+            conn.execute(
+                "INSERT INTO follow_optouts (target, principal) VALUES (?, ?) "
+                "ON CONFLICT (target, principal) DO NOTHING",
+                (str(parsed), principal),
+            )
 
         await self._db.transact(remove)
         return str(parsed)
@@ -336,6 +344,15 @@ class Forum:
                 ),
             )
         )
+        if author_kind == "agent":
+            follow_target = str(ThreadTarget(thread_id))
+            conn.execute(
+                "INSERT INTO follows (target, principal, created_at) "
+                "SELECT ?, ?, ? WHERE NOT EXISTS "
+                "(SELECT 1 FROM follow_optouts WHERE target = ? AND principal = ?) "
+                "ON CONFLICT (target, principal) DO NOTHING",
+                (follow_target, author, now, follow_target, author),
+            )
         conn.executemany(
             "INSERT INTO post_files (post_id, file_id) VALUES (?, ?)",
             [(post_id, file_id) for file_id in file_ids],

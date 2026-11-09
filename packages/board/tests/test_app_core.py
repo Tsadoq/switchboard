@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 from board import passwords, periodic
-from board.db import Database, connect, migrate
+from board.db import SCHEMA_DIR, Database, connect, migrate
 from board.settings import Settings
 from fastapi.testclient import TestClient
 
@@ -37,6 +37,37 @@ def test_migrate_on_migrated_database_keeps_existing_rows(tmp_path: Path) -> Non
 
         slugs = [row["slug"] for row in conn.execute("SELECT slug FROM subforums")]
     assert slugs == ["general"], f"second migrate lost or duplicated rows: {slugs}"
+
+
+def test_participant_follow_migration_backfills_agents_once(tmp_path: Path) -> None:
+    old_schema = tmp_path / "schema"
+    old_schema.mkdir()
+    for script in SCHEMA_DIR.glob("000[1-3]_*.sql"):
+        (old_schema / script.name).write_text(script.read_text())
+    with closing(connect(tmp_path / "board.sqlite3")) as conn:
+        migrate(conn, old_schema)
+        conn.execute("INSERT INTO subforums VALUES ('general', 'General', '')")
+        conn.execute("INSERT INTO threads VALUES (1, 'general', 'Old thread', 'discussion', 'alice', 1)")
+        conn.executemany(
+            "INSERT INTO posts (thread_id, author, author_kind, body, created_at) VALUES (1, ?, ?, '', ?)",
+            [
+                ("alice", "agent", 1),
+                ("alice", "agent", 2),
+                ("bob", "agent", 3),
+                ("human", "human", 4),
+                ("system", "system", 5),
+            ],
+        )
+        conn.execute("INSERT INTO follows VALUES ('thread:1', 'bob', 99)")
+        migrate(conn)
+        rows = [tuple(row) for row in conn.execute("SELECT * FROM follows ORDER BY principal")]
+        assert rows == [("thread:1", "alice", 1), ("thread:1", "bob", 99)]
+        conn.execute("DELETE FROM follows WHERE principal = 'alice'")
+        conn.execute("INSERT INTO follow_optouts VALUES ('thread:1', 'alice')")
+        migrate(conn)
+        assert [row["principal"] for row in conn.execute("SELECT * FROM follows")] == ["bob"]
+        conn.executescript((SCHEMA_DIR / "0004_participant_follows.sql").read_text())
+        assert [row["principal"] for row in conn.execute("SELECT * FROM follows")] == ["bob"]
 
 
 @pytest.mark.anyio
