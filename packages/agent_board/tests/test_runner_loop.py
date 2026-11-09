@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 from agent_board.runner import loop
+from agent_board.runner.happier import HappierError
 from agent_board.runner.loop import Wake, _Inbox
 
 _EPOCH = 1_800_000_000.0
@@ -132,3 +133,118 @@ def test_unexpected_delivery_error_does_not_stop_the_inbox(
 
     assert delivered, f"inbox stopped after the first failure: {attempts}"
     assert client.acked[:1] == [1], f"wake not acked on retry: {client.acked}"
+
+
+class FakeHappier:
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+        self.sent: list[tuple[str, str]] = []
+
+    def notify(self, title: str, message: str) -> None:
+        if self.fail:
+            raise HappierError("exit_1")
+        self.sent.append((title, message))
+
+
+def _human_wake(wake_id: int, author: str, thread: int) -> Wake:
+    return {
+        "id": wake_id,
+        "reason": "mention",
+        "summary": f'{author} mentioned you in thread {thread} "T{thread}"',
+    }
+
+
+def test_one_human_wake_links_to_its_thread() -> None:
+    message = loop.human_digest([_human_wake(1, "pi@dev", 29)], "https://board.example")
+
+    assert message == 'pi@dev mentioned you in thread 29 "T29"\nhttps://board.example/t/29', message
+
+
+def test_several_human_wakes_become_one_push_grouped_by_thread() -> None:
+    happier = FakeHappier()
+    notifier = loop._HumanNotifier(happier, "https://board.example/")  # type: ignore[arg-type]
+    wakes = [
+        _human_wake(1, "pi@dev", 29),
+        _human_wake(2, "claude@ops", 29),
+        _human_wake(3, "pi@heimdall", 19),
+        _human_wake(4, "pi@dev", 29),
+    ]
+
+    acked = notifier(wakes)
+
+    assert acked == [1, 2, 3, 4], acked
+    assert happier.sent == [
+        (
+            "agent board",
+            "4 mentions: #29 (pi@dev, claude@ops), #19 (pi@heimdall)\nhttps://board.example/mentions",
+        )
+    ], happier.sent
+
+
+def test_unrecognised_summaries_still_count_in_the_digest() -> None:
+    wakes = [_human_wake(1, "pi@dev", 29), {"id": 2, "reason": "ticket", "summary": "something else"}]
+
+    message = loop.human_digest(wakes, "https://board.example")
+
+    assert message == "2 board updates: #29 (pi@dev), 1 other\nhttps://board.example/mentions", message
+
+
+def test_failed_digest_push_acks_nothing() -> None:
+    notifier = loop._HumanNotifier(FakeHappier(fail=True), "https://board.example")  # type: ignore[arg-type]
+
+    assert notifier([_human_wake(1, "pi@dev", 29), _human_wake(2, "pi@dev", 30)]) == []
+
+
+def test_a_large_digest_stays_short_and_keeps_its_link() -> None:
+    wakes = [_human_wake(i, f"agent{i % 5}@box", 100 + i // 2) for i in range(60)]
+
+    message = loop.human_digest(wakes, "https://board.example")
+
+    summary, link = message.split("\n")
+    assert link == "https://board.example/mentions", message
+    assert summary.startswith("60 mentions: #100 (agent0@box, agent1@box), #101 "), summary
+    assert summary.endswith(", 50 other"), summary
+    assert len(message) < 300, len(message)
+
+
+def _budgeted(message: str, link: str) -> str:
+    summary, _, tail = message.rpartition("\n")
+    assert tail == link, message
+    assert len(summary.encode()) <= loop._DIGEST_BYTES, len(summary.encode())
+    return summary
+
+
+def test_a_huge_title_is_cut_to_the_byte_budget_and_keeps_the_thread_link() -> None:
+    wake = {"id": 1, "reason": "mention", "summary": f'pi@dev mentioned you in thread 29 "{"x" * 10_000}"'}
+
+    summary = _budgeted(loop.human_digest([wake], "https://board.example"), "https://board.example/t/29")
+
+    assert summary.startswith('pi@dev mentioned you in thread 29 "xxx') and summary.endswith("…"), summary
+
+
+def test_long_author_labels_are_cut_to_the_byte_budget() -> None:
+    wakes = [_human_wake(i, f"{'a' * 300}{i}@box", 10 + i // 3) for i in range(15)]
+
+    summary = _budgeted(loop.human_digest(wakes, "https://board.example"), "https://board.example/mentions")
+
+    assert summary.startswith("15 mentions: #10 (") and summary.endswith("…"), summary
+
+
+def test_multibyte_titles_are_cut_on_a_character_boundary() -> None:
+    wake = {"id": 1, "reason": "mention", "summary": f'pi@dev mentioned you in thread 7 "{"é🙂" * 500}"'}
+
+    summary = _budgeted(loop.human_digest([wake], "https://board.example"), "https://board.example/t/7")
+
+    assert "\ufffd" not in summary, summary
+    assert summary.endswith(("é…", "🙂…")), summary
+
+
+def test_a_cut_digest_is_still_sent_once_and_acked() -> None:
+    happier = FakeHappier()
+    notifier = loop._HumanNotifier(happier, "https://board.example")  # type: ignore[arg-type]
+    wakes = [_human_wake(1, "a" * 5000 + "@box", 3), _human_wake(2, "pi@dev", 4)]
+
+    assert notifier(wakes) == [1, 2]
+    assert len(happier.sent) == 1 and happier.sent[0][1].endswith("\nhttps://board.example/mentions"), (
+        happier.sent
+    )

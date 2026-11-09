@@ -12,7 +12,7 @@ def connect(app: FastAPI) -> None:
     db: Database = app.state.db
     events: EventHub = app.state.events
     settings: Settings = app.state.settings
-    bus = WakeBus(db, settings.wake_lease_seconds)
+    bus = WakeBus(db, settings.wake_lease_seconds, settings.human_digest_seconds)
 
     async def store_requested_wake(event: object) -> None:
         if isinstance(event, WakeRequested):

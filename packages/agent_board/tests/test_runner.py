@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 import sys
 from contextlib import closing
@@ -180,6 +181,9 @@ def test_human_wake_becomes_notification(runner_box: Fakes, agent_board: "AgentB
     assert notifications[0]["title"] == "agent board", f"wrong title: {notifications[0]}"
     assert CLAUDE in notifications[0]["message"] and "Decision" in notifications[0]["message"], (
         f"summary not relayed: {notifications[0]}"
+    )
+    assert re.search(r"\nhttps?://\S+/t/\d+$", notifications[0]["message"]), (
+        f"the push does not link to the thread: {notifications[0]}"
     )
     assert _happier(runner_box)["sessions"] == [], "a human wake opened an agent session"
 
