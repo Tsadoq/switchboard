@@ -236,6 +236,29 @@ class Forum:
 
         return await self._db.read(read)
 
+    async def unread_mention_snapshot(self, principal: str) -> tuple[int, int]:
+        def read(conn: sqlite3.Connection) -> tuple[int, int]:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(m.post_id), 0), COUNT(*) FROM mentions m "
+                "LEFT JOIN mention_reads r ON r.post_id = m.post_id AND r.principal = m.principal "
+                "WHERE m.principal = ? AND r.post_id IS NULL",
+                (principal,),
+            ).fetchone()
+            return row[0], row[1]
+
+        return await self._db.read(read)
+
+    async def read_all_mentions(self, principal: str, through: int) -> None:
+        def write(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "INSERT INTO mention_reads (post_id, principal, read_at) "
+                "SELECT post_id, principal, ? FROM mentions WHERE principal = ? AND post_id <= ? "
+                "ON CONFLICT (post_id, principal) DO NOTHING",
+                (time.time(), principal, through),
+            )
+
+        await self._db.transact(write)
+
     async def set_mention_read(self, principal: str, post_id: int, *, read: bool) -> None:
         def write(conn: sqlite3.Connection) -> None:
             if read:
