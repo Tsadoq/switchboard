@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -7,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 SESSION_NOT_FOUND = "session_not_found"
+HOME_DIR_ENV = "HAPPIER_HOME_DIR"
 TIMEOUT_SECONDS = 60
 _REDACTED = "<redacted>"
 logger = logging.getLogger(__name__)
@@ -41,8 +43,9 @@ class _Body:
 
 
 class Happier:
-    def __init__(self, bin: str = "happier") -> None:
+    def __init__(self, bin: str = "happier", session_home: Path | None = None) -> None:
         self._bin = bin
+        self._session_env = None if session_home is None else {**os.environ, HOME_DIR_ENV: str(session_home)}
 
     def create(
         self, *, backend: str, path: Path, tag: str, title: str, prompt: str, permission_mode: str
@@ -95,7 +98,7 @@ class Happier:
             raise HappierError(f"exit_{completed.returncode}")
 
     def _envelope(self, *args: str | _Body) -> Any:
-        completed = self._run(*args)
+        completed = self._run(*args, env=self._session_env)
         try:
             envelope = json.loads(completed.stdout)
         except ValueError:
@@ -108,13 +111,13 @@ class Happier:
         code = error.get("code") if isinstance(error, dict) else None
         raise HappierError(str(code or f"exit_{completed.returncode}"))
 
-    def _run(self, *args: str | _Body) -> subprocess.CompletedProcess[str]:
+    def _run(self, *args: str | _Body, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         argv = [self._bin, *(arg.text if isinstance(arg, _Body) else arg for arg in args)]
         shown = shlex.join([self._bin, *(_REDACTED if isinstance(arg, _Body) else arg for arg in args)])
         logger.info("running %s", shown)
         try:
             completed = subprocess.run(
-                argv, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, check=False
+                argv, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, check=False, env=env
             )
         except FileNotFoundError:
             raise HappierError("not_installed") from None

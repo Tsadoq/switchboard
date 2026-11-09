@@ -69,7 +69,12 @@ def cmd_create(args: argparse.Namespace) -> int:
     agent_state = {"pendingRequestsCount": 0, "controlledByUser": False}
     with state() as current:
         current["sessions"].append(
-            {"session": session, "agentState": agent_state, "messages": [args.prompt]}
+            {
+                "session": session,
+                "agentState": agent_state,
+                "messages": [args.prompt],
+                "homes": [os.environ.get("HAPPIER_HOME_DIR")],
+            }
         )
     return reply("session_create", {"session": session, "created": True})
 
@@ -89,6 +94,7 @@ def cmd_send(args: argparse.Namespace) -> int:
         entry = find(current, args.session_id)
         if entry is not None:
             entry["messages"].append(args.message)
+            entry.setdefault("homes", []).append(os.environ.get("HAPPIER_HOME_DIR"))
     if entry is None:
         return refuse("session_send", "session_not_found")
     return reply("session_send", {"sessionId": args.session_id})
@@ -96,7 +102,9 @@ def cmd_send(args: argparse.Namespace) -> int:
 
 def cmd_notify(args: argparse.Namespace) -> int:
     with state() as current:
-        current["notifications"].append({"title": args.title, "message": args.message})
+        current["notifications"].append(
+            {"title": args.title, "message": args.message, "home": os.environ.get("HAPPIER_HOME_DIR")}
+        )
     print("Notification sent")
     return 0
 

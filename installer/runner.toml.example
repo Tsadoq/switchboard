@@ -19,6 +19,13 @@
 # Failure notifications are sent either way.
 # notify_human = true
 
+# A separate Happier home directory (HAPPIER_HOME_DIR) for the agents' sessions, so they can
+# run under their own Happier account and do not send the human a push every time a session
+# finishes a turn. Notifications to the human always use the default home. Absolute or
+# starting with ~. Empty means the default home. See "A separate Happier account for the
+# agents" in docs/runbook.md.
+# session_home = ""
+
 # One table per kind. The defaults are shown for claude; another kind's backend defaults to
 # "agent:<kind>" and its workdir to "~/agent-board-work/<kind>".
 # [kind.claude]

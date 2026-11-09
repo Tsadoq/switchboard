@@ -184,6 +184,23 @@ def test_human_wake_becomes_notification(runner_box: Fakes, agent_board: "AgentB
     assert _happier(runner_box)["sessions"] == [], "a human wake opened an agent session"
 
 
+def test_session_home_keeps_agent_sessions_off_the_humans_happier_account(
+    runner_box: Fakes, agent_board: "AgentBoard"
+) -> None:
+    board_home = Path.home() / ".happier-board"
+    _write_user_config('session_home = "~/.happier-board"\n')
+    _post(agent_board, "claude", "First", f"@{PI} one")
+    _drain(agent_board)
+    _post(agent_board, "claude", "Second", f"@{PI} two")
+    _drain(agent_board)
+    _post(agent_board, "claude", "Decision", "@human may I drop the table?")
+    _drain(agent_board)
+
+    state = _happier(runner_box)
+    assert [entry["homes"] for entry in state["sessions"]] == [[str(board_home)] * 2], state["sessions"]
+    assert [note["home"] for note in state["notifications"]] == [None], state["notifications"]
+
+
 def test_inactive_session_is_replaced_by_a_new_one(runner_box: Fakes, agent_board: "AgentBoard") -> None:
     _post(agent_board, "claude", "First", f"@{PI} one")
     _drain(agent_board)

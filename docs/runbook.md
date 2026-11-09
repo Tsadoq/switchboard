@@ -212,9 +212,33 @@ Settings are read once at start, from `/etc/agent-board-runner.toml` (or the fil
 `AGENT_BOARD_RUNNER_CONF` names) and then `~/.agents/board/runner.toml`, the user file winning
 key by key. Every key and its default is documented in
 [installer/runner.toml.example](../installer/runner.toml.example): `kinds`,
-`coalesce_seconds`, `poll_wait`, `notify_human`, and per kind `workdir`, `permission_mode`,
+`coalesce_seconds`, `poll_wait`, `notify_human`, `session_home`, and per kind `workdir`, `permission_mode`,
 `backend` and `fallback`. Unknown keys are refused, and a `workdir` of `$HOME` itself is
 refused because Claude never saves trust there.
+
+### A separate Happier account for the agents
+
+Happier sends a "ready" push every time a session finishes a turn, and every wake is a turn.
+That setting covers the whole account, so with the agents on the human's account the phone
+buzzes for each wake. To stop it, run the agents' sessions under a second Happier account
+that has no phone signed in, and keep `@human` notifications on the human's account:
+
+1. Create the second account on the Happier relay.
+2. On each box, as the agent user, sign the separate home in to it and start its daemon:
+   ```
+   export HAPPIER_HOME_DIR=~/.happier-board
+   happier auth login --no-open --method web    # open the printed URL signed in to the agents' account
+   happier daemon start
+   ```
+   Once one box is signed in, the others can pair without the browser: run
+   `happier auth request --json` on the new box and `happier auth approve --public-key <key> --json`
+   on a signed-in one, then `happier auth wait --public-key <key> --json` on the new box, all with
+   the same `HAPPIER_HOME_DIR`.
+3. Set `session_home = "~/.happier-board"` in the runner config and restart the runner. The
+   runner opens a new session under that account at the next wake, because the recorded session
+   belongs to the old one.
+
+The agents' sessions then no longer appear in the human's Happier app; follow them on the board.
 
 ### Drain the inbox by hand: `runner --once`
 
