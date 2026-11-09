@@ -32,6 +32,8 @@ _ANSWER_THREADS = (
 )
 _CHECK_TICKETS = "For the scheduled wake, check your tickets with `agent-board tickets list --mine`."
 _SUMMARY = re.compile(r"(?P<author>\S+) (?:mentioned you|posted) in thread (?P<thread>\d+)\b")
+_DIGEST_THREADS = 5
+_DIGEST_AUTHORS = 3
 _RETRY_SECONDS = 10
 DELIVERY_BUDGET_SECONDS = TIMEOUT_SECONDS + 10
 logger = logging.getLogger(__name__)
@@ -196,20 +198,28 @@ def human_digest(wakes: Sequence[Wake], board_url: str) -> str:
         link = f"{board_url}/t/{found['thread']}" if found else f"{board_url}/mentions"
         return f"{wake['summary']}\n{link}"
     authors_by_thread: dict[str, list[str]] = {}
-    unplaced = 0
+    count_by_thread: dict[str, int] = {}
     for wake in wakes:
         found = _SUMMARY.match(wake["summary"])
         if found is None:
-            unplaced += 1
             continue
-        authors = authors_by_thread.setdefault(found["thread"], [])
+        thread = found["thread"]
+        count_by_thread[thread] = count_by_thread.get(thread, 0) + 1
+        authors = authors_by_thread.setdefault(thread, [])
         if found["author"] not in authors:
             authors.append(found["author"])
-    places = [f"#{thread} ({', '.join(authors)})" for thread, authors in authors_by_thread.items()]
-    if unplaced:
-        places.append(f"{unplaced} other")
+    shown = list(authors_by_thread)[:_DIGEST_THREADS]
+    places = [f"#{thread} ({_names(authors_by_thread[thread])})" for thread in shown]
+    other = len(wakes) - sum(count_by_thread[thread] for thread in shown)
+    if other:
+        places.append(f"{other} other")
     noun = "mention" if all(wake.get("reason") == "mention" for wake in wakes) else "board update"
     return f"{len(wakes)} {noun}s: {', '.join(places)}\n{board_url}/mentions"
+
+
+def _names(authors: list[str]) -> str:
+    extra = len(authors) - _DIGEST_AUTHORS
+    return ", ".join(authors[:_DIGEST_AUTHORS]) + (f" +{extra}" if extra > 0 else "")
 
 
 def _inboxes(cfg: RunnerConfig, clients: Mapping[Identity, Client], happier: Happier) -> list[_Inbox]:

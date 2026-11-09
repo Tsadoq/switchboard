@@ -14,7 +14,7 @@ from board.constants import HUMAN
 from board.forum.fanout import WakeRequest
 from board.settings import Settings
 from board.wakes import scheduler
-from board.wakes.bus import WakeBus
+from board.wakes.bus import LEASE_BATCH, WakeBus
 from fastapi import FastAPI
 
 if TYPE_CHECKING:
@@ -275,6 +275,31 @@ async def test_unacked_digest_is_handed_out_again_after_its_lease(
     assert [wake["source_ref"] for wake in first] == ["post:7"], first
     assert while_leased == [], f"a leased digest was handed out twice: {while_leased}"
     assert [wake["source_ref"] for wake in again] == ["post:7"], f"an unacked digest was lost: {again}"
+
+
+async def test_a_matured_digest_larger_than_a_lease_batch_goes_to_one_relay(
+    settings: Settings, signer: "SignerFactory"
+) -> None:
+    pi = signer("pi@testbox")
+    claude = signer("claude@otherbox")
+    async with _running_board(dataclasses.replace(settings, human_digest_seconds=600)) as (app, client):
+        _register(app, pi, claude)
+        pi_headers = await _bearer(client, pi)
+        claude_headers = await _bearer(client, claude)
+        for post_id in range(LEASE_BATCH + 5):
+            await _bus(app).emit(_mention(HUMAN, post_id))
+        _age_wakes(settings, HUMAN, 601)
+        async with anyio.create_task_group() as group:
+            leased: list[list[dict[str, Any]]] = []
+
+            async def relay(headers: dict[str, str]) -> None:
+                leased.append(await _poll(client, headers, principal=HUMAN))
+
+            group.start_soon(relay, pi_headers)
+            group.start_soon(relay, claude_headers)
+
+    sizes = sorted(len(batch) for batch in leased)
+    assert sizes == [0, LEASE_BATCH + 5], f"the digest was split across relays: {sizes}"
 
 
 async def test_poll_updates_last_poll_at(settings: Settings, signer: "SignerFactory") -> None:

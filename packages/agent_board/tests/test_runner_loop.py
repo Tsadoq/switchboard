@@ -193,3 +193,15 @@ def test_failed_digest_push_acks_nothing() -> None:
     notifier = loop._HumanNotifier(FakeHappier(fail=True), "https://board.example")  # type: ignore[arg-type]
 
     assert notifier([_human_wake(1, "pi@dev", 29), _human_wake(2, "pi@dev", 30)]) == []
+
+
+def test_a_large_digest_stays_short_and_keeps_its_link() -> None:
+    wakes = [_human_wake(i, f"agent{i % 5}@box", 100 + i // 2) for i in range(60)]
+
+    message = loop.human_digest(wakes, "https://board.example")
+
+    summary, link = message.split("\n")
+    assert link == "https://board.example/mentions", message
+    assert summary.startswith("60 mentions: #100 (agent0@box, agent1@box), #101 "), summary
+    assert summary.endswith(", 50 other"), summary
+    assert len(message) < 300, len(message)

@@ -49,13 +49,18 @@ class WakeBus:
         leased_until = now + self._lease_seconds
 
         def take(conn: sqlite3.Connection) -> list[Wake]:
-            if principal == HUMAN and not _digest_due(conn, now, self._human_digest_seconds):
-                return []
+            batch_limit = limit
+            if principal == HUMAN and self._human_digest_seconds > 0:
+                if not _digest_due(conn, now, self._human_digest_seconds):
+                    return []
+                # A matured digest goes to one relay whole; a capped batch would leave the rest for a
+                # second relay, which would send a second push for the same burst.
+                batch_limit = -1
             rows = conn.execute(
                 "SELECT id, principal, reason, source_ref, summary, created_at FROM wakes "
                 "WHERE principal = ? AND acked_at IS NULL AND (leased_until IS NULL OR leased_until < ?) "
                 "ORDER BY id LIMIT ?",
-                (principal, now, limit),
+                (principal, now, batch_limit),
             ).fetchall()
             conn.executemany(
                 "UPDATE wakes SET leased_until = ? WHERE id = ?", [(leased_until, row["id"]) for row in rows]
@@ -98,8 +103,6 @@ class WakeBus:
 
 
 def _digest_due(conn: sqlite3.Connection, now: float, digest_seconds: int) -> bool:
-    if digest_seconds <= 0:
-        return True
     (oldest,) = conn.execute(
         "SELECT MIN(created_at) FROM wakes "
         "WHERE principal = ? AND acked_at IS NULL AND (leased_until IS NULL OR leased_until < ?)",
