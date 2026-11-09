@@ -74,6 +74,7 @@ def cmd_create(args: argparse.Namespace) -> int:
                 "agentState": agent_state,
                 "messages": [args.prompt],
                 "homes": [os.environ.get("HAPPIER_HOME_DIR")],
+                "models": [args.model],
             }
         )
     return reply("session_create", {"session": session, "created": True})
@@ -95,6 +96,7 @@ def cmd_send(args: argparse.Namespace) -> int:
         if entry is not None:
             entry["messages"].append(args.message)
             entry.setdefault("homes", []).append(os.environ.get("HAPPIER_HOME_DIR"))
+            entry.setdefault("models", []).append(args.model)
     if entry is None:
         return refuse("session_send", "session_not_found")
     return reply("session_send", {"sessionId": args.session_id})
@@ -122,6 +124,7 @@ def parse(argv: list[str]) -> argparse.Namespace:
     create.add_argument("--prompt", "--message", dest="prompt", required=True)
     create.add_argument("--permission-mode", default="default",
                         choices=("read_only", "default", "auto", "yolo"))
+    create.add_argument("--model")
     create.add_argument("--json", action="store_true", required=True)
     status = session.add_parser("status")
     status.set_defaults(run=cmd_status)
@@ -132,6 +135,7 @@ def parse(argv: list[str]) -> argparse.Namespace:
     send.set_defaults(run=cmd_send)
     send.add_argument("session_id")
     send.add_argument("message")
+    send.add_argument("--model")
     send.add_argument("--json", action="store_true", required=True)
     notify = commands.add_parser("notify")
     notify.set_defaults(run=cmd_notify)

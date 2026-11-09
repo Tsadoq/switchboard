@@ -48,7 +48,15 @@ class Happier:
         self._session_env = None if session_home is None else {**os.environ, HOME_DIR_ENV: str(session_home)}
 
     def create(
-        self, *, backend: str, path: Path, tag: str, title: str, prompt: str, permission_mode: str
+        self,
+        *,
+        backend: str,
+        path: Path,
+        tag: str,
+        title: str,
+        prompt: str,
+        permission_mode: str,
+        model: str | None = None,
     ) -> Session:
         data = self._envelope(
             "session",
@@ -65,6 +73,7 @@ class Happier:
             _Body(prompt),
             "--permission-mode",
             permission_mode,
+            *_model_flag(model),
             "--json",
         )
         try:
@@ -89,8 +98,8 @@ class Happier:
         except (AttributeError, KeyError, TypeError, ValueError):
             raise HappierError("bad_output") from None
 
-    def send(self, session_id: str, message: str) -> None:
-        self._envelope("session", "send", session_id, _Body(message), "--json")
+    def send(self, session_id: str, message: str, model: str | None = None) -> None:
+        self._envelope("session", "send", session_id, _Body(message), *_model_flag(model), "--json")
 
     def notify(self, title: str, message: str) -> None:
         completed = self._run("notify", "-p", _Body(message), "-t", title)
@@ -126,3 +135,7 @@ class Happier:
         if completed.returncode != 0:
             logger.warning("%s exited %d: %s", shown, completed.returncode, completed.stderr.strip())
         return completed
+
+
+def _model_flag(model: str | None) -> tuple[str, ...]:
+    return () if model is None else ("--model", model)
