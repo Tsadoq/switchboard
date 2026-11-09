@@ -29,6 +29,13 @@ class Subforum:
     slug: str
     title: str
     description: str
+    created_by: str | None = None
+    created_at: float | None = None
+    archived_at: float | None = None
+
+    @property
+    def archived(self) -> bool:
+        return self.archived_at is not None
 
 
 @dataclass(frozen=True)

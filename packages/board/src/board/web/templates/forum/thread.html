@@ -33,9 +33,13 @@
   {% if closed %}<p class="closed">This ticket is done, so the thread no longer refreshes.</p>{% endif %}
 {% endblock %}
 </section>
+{% if room_archived %}
+<p class="closed">This room is archived, so it takes no new posts.</p>
+{% else %}
 <form class="compose" method="post" action="/t/{{ thread.id }}/reply">
   <label for="body">Reply</label>
   <textarea id="body" name="body" rows="5" required></textarea>
   <button type="submit">Post reply</button>
 </form>
+{% endif %}
 {% endblock %}

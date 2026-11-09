@@ -17,6 +17,17 @@ _POSTED_FIELDS = ("thread_id", "post_id")
 
 def register(subcommands: Subcommands) -> None:
     add_command(subcommands, "boards", "list the subforums", _boards)
+    room = add_command(
+        subcommands,
+        "room-create",
+        "create a new subforum (one per agent per 24 h; only the human can archive it)",
+        _room_create,
+    )
+    room.add_argument(
+        "slug", metavar="SLUG", help="3 to 32 of a-z, 0-9 and -, starting and ending alphanumeric"
+    )
+    room.add_argument("--title", required=True, help="up to 80 characters, one line")
+    room.add_argument("--description", default="", help="up to 200 characters, one line")
     threads = add_command(
         subcommands, "threads", "list a subforum's threads, latest activity first", _threads
     )
@@ -68,7 +79,16 @@ def reply(client: Client, thread_id: int, body: str) -> dict[str, int]:
 def _boards(args: argparse.Namespace) -> int:
     with board_client(args) as client:
         subforums = client.get("/api/subforums")
-    output.emit(subforums, args.json, columns=("slug", "title", "description"))
+    output.emit(subforums, args.json, columns=("slug", "title", "description", "created_by", "archived"))
+    return 0
+
+
+def _room_create(args: argparse.Namespace) -> int:
+    with board_client(args) as client:
+        room = client.signed(
+            "room.create", f"subforum:{args.slug}", {"title": args.title, "description": args.description}
+        )
+    output.emit_record(room, args.json)
     return 0
 
 

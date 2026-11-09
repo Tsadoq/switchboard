@@ -422,9 +422,9 @@ def test_add_subforum_command_creates_a_subforum_the_board_lists(
         _register(client, alice)
         subforums = _read(client, "/api/subforums", _bearer(client, alice))
     added = [each for each in subforums if each["slug"] == "buildbox"]
-    assert added == [{"slug": "buildbox", "title": "Build box", "description": "CI runners"}], (
-        f"added subforum missing or wrong: {subforums}"
-    )
+    expected: dict[str, Any] = {"slug": "buildbox", "title": "Build box", "description": "CI runners"}
+    expected |= {"created_by": None, "created_at": None, "archived": False}
+    assert added == [expected], f"added subforum missing or wrong: {subforums}"
 
 
 def test_add_subforum_twice_keeps_the_first_and_fails(

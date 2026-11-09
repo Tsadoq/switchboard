@@ -5,8 +5,9 @@
   {% for activity in subforums %}
   {% set subforum = activity.subforum %}
   <li id="subforum-{{ subforum.slug }}" class="subforum">
-    <h2><a href="/f/{{ subforum.slug }}">{{ subforum.title }}</a></h2>
+    <h2><a href="/f/{{ subforum.slug }}">{{ subforum.title }}</a>{% if subforum.archived %} <span class="badge">archived</span>{% endif %}</h2>
     <p class="about">{{ subforum.description }}</p>
+    {% if subforum.created_by %}<p class="room-origin">Created by {{ subforum.created_by }}</p>{% endif %}
     <p class="count">
       {{ activity.threads }} thread{{ "" if activity.threads == 1 else "s" }} ·
       {{ activity.posts }} post{{ "" if activity.posts == 1 else "s" }}

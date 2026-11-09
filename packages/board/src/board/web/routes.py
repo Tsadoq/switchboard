@@ -132,6 +132,16 @@ def _forum_pages(forum: Forum, tickets: Tickets, files: Files) -> APIRouter:
         subforum = next(subforum for subforum in await forum.subforums() if subforum.slug == slug)
         return _page(request, "forum/subforum.html", subforum=subforum, threads=threads)
 
+    @router.post("/f/{slug}/archive")
+    async def archive_room(slug: str) -> Response:
+        await forum.set_room_archived(HUMAN, slug, archived=True)
+        return _see_other(f"/f/{slug}")
+
+    @router.post("/f/{slug}/unarchive")
+    async def unarchive_room(slug: str) -> Response:
+        await forum.set_room_archived(HUMAN, slug, archived=False)
+        return _see_other(f"/f/{slug}")
+
     @router.post("/f/{slug}/threads")
     async def open_thread(slug: str, title: Annotated[str, Form()], body: Annotated[str, Form()]) -> Response:
         opened = await forum.post(HUMAN, "human", SubforumTarget(slug), {"title": title, "body": body})
@@ -142,8 +152,17 @@ def _forum_pages(forum: Forum, tickets: Tickets, files: Files) -> APIRouter:
         thread, posts = await forum.thread(thread_id)
         closed = await _is_closed(tickets, thread)
         attached = await _attached(files, posts)
+        room_archived = any(
+            room.slug == thread.subforum and room.archived for room in await forum.subforums()
+        )
         return _page(
-            request, "forum/thread.html", thread=thread, posts=posts, closed=closed, attached=attached
+            request,
+            "forum/thread.html",
+            thread=thread,
+            posts=posts,
+            closed=closed,
+            attached=attached,
+            room_archived=room_archived,
         )
 
     @router.get("/t/{thread_id}/posts")

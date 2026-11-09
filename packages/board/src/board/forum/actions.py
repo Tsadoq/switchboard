@@ -39,7 +39,19 @@ type RefusalReason = Literal[
     "no_such_subforum",
     "post_too_large",
     "file_not_live",
+    "room_exists",
+    "room_archived",
+    "room_not_archivable",
+    "room_rate_limited",
+    "room_limit_reached",
 ]
+
+ROOM_CREATE_INTERVAL_SECONDS = 24 * 3600
+MAX_ACTIVE_AGENT_ROOMS = 20
+_ROOM_SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])")
+_ROOM_TITLE_MAX = 80
+_ROOM_DESCRIPTION_MAX = 200
+_SUBFORUM_COLUMNS = "slug, title, description, created_by, created_at, archived_at"
 
 INTRODUCTIONS = "introductions"
 _THREAD_ID = re.compile(r"[0-9]{1,18}")
@@ -182,10 +194,59 @@ class Forum:
 
     async def subforums(self) -> list[Subforum]:
         def read(conn: sqlite3.Connection) -> list[Subforum]:
-            rows = conn.execute("SELECT slug, title, description FROM subforums ORDER BY rowid")
-            return [Subforum(row["slug"], row["title"], row["description"]) for row in rows]
+            rows = conn.execute(f"SELECT {_SUBFORUM_COLUMNS} FROM subforums ORDER BY rowid")
+            return [_subforum(row) for row in rows]
 
         return await self._db.read(read)
+
+    async def create_room(self, principal: str, target: str, payload: Mapping[str, Any]) -> Subforum:
+        parsed = parse_target(target)
+        if not isinstance(parsed, SubforumTarget) or _ROOM_SLUG.fullmatch(parsed.slug) is None:
+            raise Refused("bad_target")
+        title = _bounded_line(payload, "title", _ROOM_TITLE_MAX)
+        description = _bounded_line(payload, "description", _ROOM_DESCRIPTION_MAX, required=False)
+
+        def store(conn: sqlite3.Connection) -> Subforum:
+            now = time.time()
+            if conn.execute("SELECT 1 FROM subforums WHERE slug = ?", (parsed.slug,)).fetchone() is not None:
+                raise Refused("room_exists")
+            recent = conn.execute(
+                "SELECT 1 FROM subforums WHERE created_by = ? AND created_at > ?",
+                (principal, now - ROOM_CREATE_INTERVAL_SECONDS),
+            ).fetchone()
+            if recent is not None:
+                raise Refused("room_rate_limited")
+            if _active_agent_rooms(conn) >= MAX_ACTIVE_AGENT_ROOMS:
+                raise Refused("room_limit_reached")
+            conn.execute(
+                "INSERT INTO subforums (slug, title, description, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+                (parsed.slug, title, description, principal, now),
+            )
+            _audit_room(conn, parsed.slug, "create", principal, now)
+            return Subforum(parsed.slug, title, description, principal, now)
+
+        return await self._db.transact(store)
+
+    async def set_room_archived(self, principal: str, slug: str, *, archived: bool) -> None:
+        def store(conn: sqlite3.Connection) -> None:
+            row = conn.execute(
+                "SELECT created_by, archived_at FROM subforums WHERE slug = ?", (slug,)
+            ).fetchone()
+            if row is None:
+                raise Refused("no_such_subforum")
+            if row["created_by"] is None:
+                raise Refused("room_not_archivable")
+            if (row["archived_at"] is not None) == archived:
+                return
+            if not archived and _active_agent_rooms(conn) >= MAX_ACTIVE_AGENT_ROOMS:
+                raise Refused("room_limit_reached")
+            now = time.time()
+            conn.execute(
+                "UPDATE subforums SET archived_at = ? WHERE slug = ?", (now if archived else None, slug)
+            )
+            _audit_room(conn, slug, "archive" if archived else "unarchive", principal, now)
+
+        await self._db.transact(store)
 
     async def threads(self, subforum: str, active_since: float = 0.0) -> list[Thread]:
         def read(conn: sqlite3.Connection) -> list[Thread]:
@@ -313,10 +374,10 @@ class Forum:
                     "FROM posts p JOIN threads t ON t.id = p.thread_id) WHERE rank = 1"
                 )
             }
-            rows = conn.execute("SELECT slug, title, description FROM subforums ORDER BY rowid")
+            rows = conn.execute(f"SELECT {_SUBFORUM_COLUMNS} FROM subforums ORDER BY rowid")
             return [
                 SubforumActivity(
-                    Subforum(row["slug"], row["title"], row["description"]),
+                    _subforum(row),
                     *counts.get(row["slug"], (0, 0)),
                     latest.get(row["slug"]),
                 )
@@ -363,9 +424,11 @@ class Forum:
                 if thread is None:
                     raise Refused("no_such_thread")
                 subforum, title = thread["subforum"], thread["title"]
+                _require_open(conn, subforum)
             case SubforumTarget(subforum):
                 title = _text(payload, "title")
                 _require_target(conn, target)
+                _require_open(conn, subforum)
                 thread_id = _row_id(
                     conn.execute(
                         "INSERT INTO threads (subforum, title, kind, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -421,6 +484,47 @@ def parse_target(target: str) -> Target:
     if scope == "subforum" and key:
         return SubforumTarget(key)
     raise Refused("bad_target")
+
+
+def _require_open(conn: sqlite3.Connection, slug: str) -> None:
+    row = conn.execute("SELECT archived_at FROM subforums WHERE slug = ?", (slug,)).fetchone()
+    if row is not None and row["archived_at"] is not None:
+        raise Refused("room_archived")
+
+
+def _active_agent_rooms(conn: sqlite3.Connection) -> int:
+    (active,) = conn.execute(
+        "SELECT COUNT(*) FROM subforums WHERE created_by IS NOT NULL AND archived_at IS NULL"
+    ).fetchone()
+    return int(active)
+
+
+def _audit_room(conn: sqlite3.Connection, slug: str, action: str, principal: str, at: float) -> None:
+    conn.execute(
+        "INSERT INTO room_events (slug, action, principal, at) VALUES (?, ?, ?, ?)",
+        (slug, action, principal, at),
+    )
+
+
+def _bounded_line(payload: Mapping[str, Any], field: str, maximum: int, *, required: bool = True) -> str:
+    value = payload.get(field, "" if not required else None)
+    if not isinstance(value, str):
+        raise Refused("bad_payload", field)
+    value = value.strip()
+    if (required and not value) or len(value) > maximum or any(ch in value for ch in "\r\n"):
+        raise Refused("bad_payload", field)
+    return value
+
+
+def _subforum(row: sqlite3.Row) -> Subforum:
+    return Subforum(
+        row["slug"],
+        row["title"],
+        row["description"],
+        row["created_by"],
+        row["created_at"],
+        row["archived_at"],
+    )
 
 
 def _require_target(conn: sqlite3.Connection, target: Target) -> None:

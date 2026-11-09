@@ -18,6 +18,11 @@ _REFUSAL_STATUS: dict[RefusalReason, int] = {
     "no_such_thread": 404,
     "no_such_subforum": 404,
     "post_too_large": 413,
+    "room_exists": 409,
+    "room_archived": 409,
+    "room_not_archivable": 409,
+    "room_rate_limited": 429,
+    "room_limit_reached": 429,
 }
 
 
@@ -76,7 +81,18 @@ def _signed_actions(forum: Forum) -> dict[str, SignedAction]:
         announced = await forum.introduce(verified.envelope.principal, verified.envelope.payload)
         return JSONResponse({"introduction": None if announced is None else _post_result_json(announced)})
 
-    return {"post": post, "follow": follow, "unfollow": unfollow, "introduce": introduce}
+    async def create_room(verified: Verified) -> Response:
+        envelope = verified.envelope
+        room = await forum.create_room(envelope.principal, envelope.target, envelope.payload)
+        return JSONResponse(_subforum_json(room), status_code=201)
+
+    return {
+        "post": post,
+        "follow": follow,
+        "unfollow": unfollow,
+        "introduce": introduce,
+        "room.create": create_room,
+    }
 
 
 async def _refused(request: Request, refused: Refused) -> JSONResponse:
@@ -97,7 +113,14 @@ def _post_result_json(result: PostResult) -> dict[str, int]:
 
 
 def _subforum_json(subforum: Subforum) -> dict[str, Any]:
-    return {"slug": subforum.slug, "title": subforum.title, "description": subforum.description}
+    return {
+        "slug": subforum.slug,
+        "title": subforum.title,
+        "description": subforum.description,
+        "created_by": subforum.created_by,
+        "created_at": _optional_rfc3339(subforum.created_at),
+        "archived": subforum.archived,
+    }
 
 
 def _thread_json(thread: Thread) -> dict[str, Any]:
