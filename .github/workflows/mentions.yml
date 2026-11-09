@@ -27,7 +27,7 @@ jobs:
       - name: Description
         env:
           BODY: ${{ github.event.pull_request.body }}
-        run: printf '%s\n' "$BODY" | python3 .github/scripts/check_mentions.py --markdown
+        run: printf '%s\n' "$BODY" | python3 .github/scripts/check_mentions.py
 
       - name: Commit messages
         env:
