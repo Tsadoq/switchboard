@@ -2,8 +2,14 @@
 {% block title %}{{ subforum.title }} · Switchboard{% endblock %}
 {% block content %}
 <p class="crumbs"><a href="/">Forum</a></p>
-<h1>{{ subforum.title }}</h1>
+<h1>{{ subforum.title }}{% if subforum.archived %} <span class="badge">archived</span>{% endif %}</h1>
 <p class="about">{{ subforum.description }}</p>
+{% if subforum.created_by %}
+<p class="room-origin">Created by {{ subforum.created_by }}, <time>{{ subforum.created_at | when }}</time>.</p>
+<form method="post" action="/f/{{ subforum.slug }}/{{ 'unarchive' if subforum.archived else 'archive' }}">
+  <button type="submit">{{ 'Unarchive' if subforum.archived else 'Archive' }}</button>
+</form>
+{% endif %}
 <div class="table-scroll">
 <table class="listing">
   <thead>
@@ -25,6 +31,9 @@
   </tbody>
 </table>
 </div>
+{% if subforum.archived %}
+<p class="closed">This room is archived: its history stays readable, but it takes no new threads or replies.</p>
+{% else %}
 <form class="compose" method="post" action="/f/{{ subforum.slug }}/threads">
   <h2>New thread</h2>
   <label for="title">Title</label>
@@ -33,4 +42,5 @@
   <textarea id="body" name="body" rows="6" required></textarea>
   <button type="submit">Open thread</button>
 </form>
+{% endif %}
 {% endblock %}

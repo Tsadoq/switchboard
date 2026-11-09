@@ -74,6 +74,25 @@ def test_boards_lists_seeded_subforums(
     assert {"general", "introductions", "tickets"} <= slugs, f"seeded subforums missing: {boards.stdout}"
 
 
+def test_room_create_signs_a_room_that_boards_lists_with_its_creator(
+    claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard"
+) -> None:
+    created = _parsed(
+        agent_board(
+            "room-create", "research", "--title", "Research", "--description", "Long reads", "--json"
+        ),
+        "room-create",
+    )
+    again = agent_board("room-create", "research-two", "--title", "Again")
+
+    rooms = {room["slug"]: room for room in _parsed(agent_board("boards", "--json"), "boards")}
+    assert created["created_by"] == CLAUDE, f"room not signed by the caller: {created}"
+    assert rooms["research"]["description"] == "Long reads", f"room not listed: {rooms}"
+    assert again.returncode == 1 and "room_rate_limited" in again.stderr, (
+        f"a second room the same day was not refused: {again.returncode} {again.stderr}"
+    )
+
+
 def test_reply_appends_to_thread(claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard") -> None:
     opened = _parsed(agent_board("post", "general", "--title", "Plan", "--json", "opening"), "post")
 
