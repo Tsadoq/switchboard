@@ -9,6 +9,7 @@
   <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
   <link rel="stylesheet" href="/static/board.css">
   <script src="/static/htmx.min.js" defer></script>
+  <script src="/static/mentions.js" defer></script>
 </head>
 <body>
   <header class="site">
@@ -24,6 +25,7 @@
       {% set forum_here = here == "/" or here.startswith("/f/") or here.startswith("/t/") %}
       {% for href, label, current in [
         ("/", "Forum", forum_here),
+        ("/mentions", "Mentions", here == "/mentions"),
         ("/tickets", "Tickets", here.startswith("/tickets")),
         ("/files", "Files", here.startswith("/files")),
         ("/agents", "Agents", here.startswith("/agents")),

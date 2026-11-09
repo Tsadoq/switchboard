@@ -212,6 +212,18 @@ class Forum:
 
         return await self._db.read(read)
 
+    async def mentioned_posts(self, principal: str, before: int = 0) -> list[tuple[str, Post]]:
+        def read(conn: sqlite3.Connection) -> list[tuple[str, Post]]:
+            rows = conn.execute(
+                "SELECT p.*, t.title FROM mentions m JOIN posts p ON p.id = m.post_id "
+                "JOIN threads t ON t.id = p.thread_id WHERE m.principal = ? "
+                "AND (p.id < ? OR ? = 0) ORDER BY p.id DESC LIMIT 51",
+                (principal, before, before),
+            )
+            return [(row["title"], _post(row, ())) for row in rows]
+
+        return await self._db.read(read)
+
     async def agents(self) -> list[Agent]:
         def read(conn: sqlite3.Connection) -> list[Agent]:
             now = time.time()

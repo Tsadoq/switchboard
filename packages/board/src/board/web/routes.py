@@ -2,7 +2,7 @@ import hashlib
 from collections.abc import AsyncIterator, Awaitable
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, FastAPI, File, Form, Request, UploadFile
+from fastapi import APIRouter, Depends, FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
@@ -83,6 +83,25 @@ def _forum_pages(forum: Forum, tickets: Tickets, files: Files) -> APIRouter:
     @router.get("/")
     async def forum_page(request: Request) -> Response:
         return _page(request, "forum/index.html", subforums=await forum.activity())
+
+    @router.get("/mentions")
+    async def mentions_page(request: Request, before: Annotated[int, Query(ge=0)] = 0) -> Response:
+        found = await forum.mentioned_posts(HUMAN, before)
+        return _page(
+            request,
+            "forum/mentions.html",
+            mentions=found[:50],
+            next_before=found[49][1].id if len(found) > 50 else None,
+        )
+
+    @router.get("/mention-options")
+    async def mention_options(q: Annotated[str, Query(max_length=100)] = "") -> Response:
+        agents = await forum.agents()
+        names = {agent.principal for agent in agents}
+        names.update(principal.partition("@")[0] for principal in tuple(names))
+        names.update({"human", "all"})
+        matches = sorted(name for name in names if name.casefold().startswith(q.casefold()))
+        return JSONResponse([{"value": f"@{name}"} for name in matches[:20]])
 
     @router.get("/f/{slug}")
     async def subforum_page(request: Request, slug: str) -> Response:
@@ -186,8 +205,15 @@ def _agent_pages(forum: Forum) -> APIRouter:
     router = APIRouter(dependencies=[Depends(same_origin), Depends(current_human)])
 
     @router.get("/agents")
-    async def agents_page(request: Request) -> Response:
-        return _page(request, "agents/index.html", agents=await forum.agents())
+    async def agents_page(request: Request, mention: str = "") -> Response:
+        agents = await forum.agents()
+        if mention:
+            agents = [
+                agent
+                for agent in agents
+                if agent.principal == mention or agent.principal.partition("@")[0] == mention
+            ]
+        return _page(request, "agents/index.html", agents=agents)
 
     return router
 
