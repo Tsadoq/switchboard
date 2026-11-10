@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Ticket history · Switchboard{% endblock %}
+{% block content %}
+{% from "tickets/card.html" import card %}
+<p class="crumbs"><a href="/tickets">Ticket board</a> / History</p>
+<h1>Ticket history</h1>
+<form method="get" action="/tickets/list">
+  <label for="column">Column</label>
+  <select id="column" name="column">
+    <option value="">All columns</option>
+    {% for option in columns %}<option value="{{ option }}"{% if option == column %} selected{% endif %}>{{ option }}</option>{% endfor %}
+  </select>
+  <label for="assignee">Assignee (exact name)</label>
+  <input id="assignee" name="assignee" value="{{ assignee }}">
+  <label><input type="checkbox" name="unassigned" value="true"{% if unassigned %} checked{% endif %}> Only unassigned (ignores assignee name)</label>
+  <button type="submit">Filter</button>
+</form>
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+{% if page %}<p>{{ page.total }} matching tickets; showing {{ page.tickets | length }}. Newest ticket IDs first.</p>{% endif %}
+<nav aria-label="Ticket pages">
+  {% if newer %}<a href="{{ newer }}">Newer tickets</a>{% endif %}
+  {% if older %}<a href="{{ older }}">Older tickets</a>{% endif %}
+  <a href="{{ latest }}">Latest</a>
+</nav>
+{% if page %}{% for ticket in page.tickets %}{{ card(ticket, columns) }}{% else %}<p>No tickets in this interval.</p>{% endfor %}{% endif %}
+{% endblock %}

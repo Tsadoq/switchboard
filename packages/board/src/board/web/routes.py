@@ -1,6 +1,7 @@
 import hashlib
 from collections.abc import AsyncIterator, Awaitable
 from typing import Annotated, Any
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, FastAPI, File, Form, Path, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -12,7 +13,7 @@ from board.files import Declaration, FileEntry, Files
 from board.forum.actions import Forum, Refused
 from board.forum.entities import Post, SubforumTarget, Thread, ThreadTarget
 from board.tickets import COLUMNS
-from board.tickets.actions import Conflict, NoSuchTicket, Ticket, Tickets
+from board.tickets.actions import Conflict, NoSuchTicket, Tickets
 from board.web import STATIC_DIR, templates
 from board.web.auth import (
     CrossSite,
@@ -217,12 +218,68 @@ def _ticket_pages(tickets: Tickets) -> APIRouter:
 
     @router.get("")
     async def board_page(request: Request, error: str = "") -> Response:
-        board = _by_column(await tickets.find())
+        board = await tickets.previews()
         return _page(request, "tickets/board.html", board=board, refusal=_TICKET_REFUSALS.get(error))
 
     @router.get("/columns")
     async def board_columns() -> Response:
-        return _fragment("tickets/board.html", "columns", board=_by_column(await tickets.find()))
+        return _fragment("tickets/board.html", "columns", board=await tickets.previews())
+
+    @router.get("/list")
+    async def ticket_list(
+        request: Request,
+        column: Annotated[str, Query(max_length=20)] = "",
+        assignee: Annotated[str, Query(max_length=200)] = "",
+        unassigned: bool = False,
+        before: Annotated[int | None, Query(ge=0, le=2**63 - 1)] = None,
+        after: Annotated[int | None, Query(ge=0, le=2**63 - 1)] = None,
+    ) -> Response:
+        if unassigned:
+            assignee = ""
+        try:
+            page = await tickets.page(
+                column=column or None,
+                assignee=assignee or None,
+                unassigned=unassigned,
+                before=before,
+                after=after,
+            )
+        except Refused:
+            return _page(
+                request,
+                "tickets/list.html",
+                status_code=400,
+                page=None,
+                older=None,
+                newer=None,
+                columns=COLUMNS,
+                column=column,
+                assignee=assignee,
+                unassigned=unassigned,
+                error="Choose a valid column and use only one page cursor. Return to Latest to start again.",
+                latest="/tickets/list",
+            )
+        filters = {key: value for key, value in {"column": column, "assignee": assignee}.items() if value}
+        if unassigned:
+            filters["unassigned"] = "true"
+
+        def link(**cursor: int) -> str:
+            query = urlencode(filters | cursor)
+            return "/tickets/list" + (f"?{query}" if query else "")
+
+        return _page(
+            request,
+            "tickets/list.html",
+            page=page,
+            columns=COLUMNS,
+            column=column,
+            assignee=assignee,
+            unassigned=unassigned,
+            latest=link(),
+            error=None,
+            older=link(before=page.older) if page.older is not None else None,
+            newer=link(after=page.newer) if page.newer is not None else None,
+        )
 
     @router.post("")
     async def create(
@@ -338,10 +395,6 @@ async def _attached(files: Files, posts: list[Post]) -> dict[str, FileEntry]:
     if not ids:
         return {}
     return {entry.id: entry for entry in await files.live_by_ids(ids)}
-
-
-def _by_column(found: list[Ticket]) -> dict[str, list[Ticket]]:
-    return {column: [ticket for ticket in found if ticket.column == column] for column in COLUMNS}
 
 
 async def _put_upload(files: Files, upload: UploadFile, ttl_days: int | None) -> None:
