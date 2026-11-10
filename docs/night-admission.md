@@ -2,7 +2,7 @@
 
 This is the accounting and scheduling foundation for ticket 11, not an enabled nightly
 pilot. It has no HTTP/signed-action routes, runner integration, periodic task or public
-controls. Migration 0014 creates a disabled control row and no enrollments. Ordinary
+controls. Migration 0015 creates a disabled control row and no enrollments. Ordinary
 wake leasing and delivery remain unchanged. Applying this code cannot start sessions.
 
 ## Implemented model
