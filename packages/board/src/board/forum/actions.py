@@ -23,6 +23,7 @@ from board.forum.entities import (
     Target,
     Thread,
     ThreadKind,
+    ThreadPage,
     ThreadTarget,
 )
 from board.forum.fanout import ForumEvent, WakeRequested
@@ -46,6 +47,7 @@ type RefusalReason = Literal[
     "room_limit_reached",
 ]
 
+THREAD_PAGE_MAX = 200
 ROOM_CREATE_INTERVAL_SECONDS = 24 * 3600
 MAX_ACTIVE_AGENT_ROOMS = 20
 _ROOM_SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])")
@@ -278,6 +280,68 @@ class Forum:
                 (thread_id,),
             )
             return _thread(row), [_post(post, tuple(attachments.get(post["id"], ()))) for post in posts]
+
+        return await self._db.read(read)
+
+    async def thread_page(
+        self,
+        thread_id: int,
+        *,
+        before: int | None = None,
+        after: int | None = None,
+        limit: int = 50,
+    ) -> ThreadPage:
+        if not 1 <= limit <= THREAD_PAGE_MAX:
+            raise Refused("bad_payload", "limit")
+        if before is not None and after is not None:
+            raise Refused("bad_payload", "cursor")
+        if any(cursor is not None and not 0 <= cursor <= 2**63 - 1 for cursor in (before, after)):
+            raise Refused("bad_payload", "cursor")
+
+        def read(conn: sqlite3.Connection) -> ThreadPage:
+            row = conn.execute(
+                "SELECT t.*, (SELECT MAX(created_at) FROM posts WHERE thread_id = t.id) AS last_post_at "
+                "FROM threads t WHERE t.id = ?",
+                (thread_id,),
+            ).fetchone()
+            if row is None:
+                raise Refused("no_such_thread")
+            where = "thread_id = ?"
+            params = [thread_id]
+            if before is not None:
+                where += " AND id < ?"
+                params.append(before)
+            if after is not None:
+                where += " AND id > ?"
+                params.append(after)
+            direction = "ASC" if after is not None else "DESC"
+            rows = conn.execute(
+                f"SELECT * FROM posts WHERE {where} ORDER BY id {direction} LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+            if after is None:
+                rows.reverse()
+            attachments: dict[int, list[str]] = {}
+            if rows:
+                placeholders = ",".join("?" for _ in rows)
+                for link in conn.execute(
+                    f"SELECT post_id, file_id FROM post_files WHERE post_id IN ({placeholders}) ORDER BY rowid",
+                    tuple(post["id"] for post in rows),
+                ):
+                    attachments.setdefault(link["post_id"], []).append(link["file_id"])
+            posts = tuple(_post(post, tuple(attachments.get(post["id"], ()))) for post in rows)
+            total = conn.execute("SELECT COUNT(*) FROM posts WHERE thread_id = ?", (thread_id,)).fetchone()[0]
+            older = newer = None
+            if posts:
+                if conn.execute(
+                    "SELECT 1 FROM posts WHERE thread_id = ? AND id < ? LIMIT 1", (thread_id, posts[0].id)
+                ).fetchone():
+                    older = posts[0].id
+                if conn.execute(
+                    "SELECT 1 FROM posts WHERE thread_id = ? AND id > ? LIMIT 1", (thread_id, posts[-1].id)
+                ).fetchone():
+                    newer = posts[-1].id
+            return ThreadPage(_thread(row), posts, total, older, newer)
 
         return await self._db.read(read)
 
