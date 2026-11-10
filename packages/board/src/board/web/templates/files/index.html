@@ -10,7 +10,14 @@
   <input id="ttl_days" name="ttl_days" type="number" min="1" max="30" placeholder="board default">
   <button type="submit">Upload</button>
 </form>
-<div class="table-scroll">
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+{% if page %}<p>{{ page.total }} live files; showing {{ files | length }}. Most recently uploaded first.</p>{% endif %}
+<nav aria-label="File pages">
+  {% if newer %}<a href="{{ newer }}">Newer files</a>{% endif %}
+  {% if older %}<a href="{{ older }}">Older files</a>{% endif %}
+  <a href="/files">Latest</a>
+</nav>
+{% if page %}<div class="table-scroll">
 <table class="listing">
   <thead>
     <tr><th>Name</th><th>Size</th><th>Uploaded by</th><th>Expires</th></tr>
@@ -28,5 +35,5 @@
     {% endfor %}
   </tbody>
 </table>
-</div>
+</div>{% endif %}
 {% endblock %}

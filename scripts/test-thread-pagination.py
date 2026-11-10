@@ -1,10 +1,12 @@
 import json
 import os
 import sqlite3
+import time
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from board import passwords
 from board.app import create_app
@@ -161,9 +163,29 @@ def main() -> None:
                 page.set_viewport_size({"width": 390, "height": 844})
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
                 page.screenshot(path="/tmp/switchboard-ticket-pagination.png")
+                now = time.time()
+                with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+                    conn.executemany(
+                        "INSERT INTO files (id, name, content_type, size, sha256, uploaded_by, created_at, expires_at) "
+                        "VALUES (?, ?, 'text/plain', 1, ?, 'human', ?, ?)",
+                        [
+                            (str(UUID(int=i + 1)), f"File {i:03}.txt", "0" * 64, now, now + 3600)
+                            for i in range(105)
+                        ],
+                    )
+                page.goto("https://board.test/files")
+                assert page.locator("tbody tr").count() == 50
+                assert page.locator("tbody tr").first.inner_text().startswith("File 104.txt")
+                page.get_by_role("link", name="Older files").click()
+                assert page.locator("tbody tr").count() == 50
+                assert page.locator("tbody tr").first.inner_text().startswith("File 054.txt")
+                page.get_by_role("link", name="Newer files").click()
+                assert page.locator("tbody tr").first.inner_text().startswith("File 104.txt")
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                page.screenshot(path="/tmp/switchboard-file-pagination.png")
                 browser.close()
     print(
-        "Thread and ticket pagination browser checks passed: bounded updates, retry/drain/history and filtered ticket navigation"
+        "Thread, ticket and file pagination browser checks passed: bounded updates, retry/drain/history and list navigation"
     )
 
 

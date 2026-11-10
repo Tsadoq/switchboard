@@ -1190,6 +1190,143 @@ def test_ticket_history_unassigned_filter_survives_navigation(
     assert 'id="assignee" name="assignee" value=""' in ignored
 
 
+def _seed_files(settings: Settings, count: int, *, expired: bool = False) -> list[str]:
+    from uuid import UUID
+
+    now = time.time()
+    ids = [str(UUID(int=number + 1)) for number in range(count)]
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.executemany(
+            "INSERT INTO files (id, name, content_type, size, sha256, uploaded_by, created_at, expires_at) "
+            "VALUES (?, ?, 'text/plain', 1, ?, 'human', ?, ?)",
+            [
+                (file_id, f"File {number:03}.txt", "0" * 64, now, now - 1 if expired else now + 3600)
+                for number, file_id in enumerate(ids)
+            ],
+        )
+    return ids
+
+
+def test_file_pages_bound_reads_and_preserve_legacy_api(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    ids = _seed_files(settings, 105)
+    expected = list(reversed(ids))
+    seen: list[str] = []
+    path = "/files"
+    for count in (50, 50, 5):
+        html = _page(browser, path)
+        shown = re.findall(r'<tr id="file-([^"]+)"', html)
+        assert len(shown) == count and "105 live files" in html
+        seen.extend(shown)
+        older = re.search(r'href="([^"]+)"[^>]*>Older files', html)
+        if count == 5:
+            assert older is None
+        else:
+            assert older is not None
+            path = unescape(older[1])
+    assert seen == expected
+    newer = re.search(r'href="([^"]+)"[^>]*>Newer files', html)
+    assert newer is not None
+    middle = _page(browser, unescape(newer[1]))
+    assert re.findall(r'<tr id="file-([^"]+)"', middle) == expected[50:100]
+    assert [entry["id"] for entry in _read(browser, "/api/files")] == ids
+
+
+def test_file_cursor_survives_expired_deleted_boundary_and_rejects_bad_urls(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    ids = _seed_files(settings, 51)
+    first = _page(browser, "/files")
+    older = re.search(r'href="([^"]+)"[^>]*>Older files', first)
+    assert older is not None
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.execute("DELETE FROM files WHERE id = ?", (ids[1],))
+    tail = _page(browser, unescape(older[1]))
+    assert re.findall(r'<tr id="file-([^"]+)"', tail) == [ids[0]]
+    assert "50 live files" in tail
+    for path in ("/files?before=invalid", "/files?before=x&after=y"):
+        response = browser.get(path)
+        assert response.status_code == 400 and 'role="alert"' in response.text
+        assert response.headers["content-type"].startswith("text/html")
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.execute("UPDATE files SET expires_at = 0")
+    empty = _page(browser, "/files")
+    assert "0 live files" in empty and "No live files" in empty and ">Latest</a>" in empty
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, [], [True, "x"], [float("nan"), "x"], [float("inf"), "x"], [-1, "x"], [1, "not-a-uuid"], [1, 2]],
+)
+def test_file_cursor_rejects_invalid_payloads(
+    browser: TestClient, human_password: str, value: object
+) -> None:
+    import base64
+    import json
+
+    _log_in(browser, human_password)
+    token = base64.urlsafe_b64encode(json.dumps(value).encode()).decode()
+    response = browser.get("/files", params={"before": token})
+    assert response.status_code == 400 and 'role="alert"' in response.text
+
+
+def test_file_older_page_ignores_new_uploads_and_excludes_expired_files(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    from uuid import UUID
+
+    _log_in(browser, human_password)
+    ids = _seed_files(settings, 105)
+    first = _page(browser, "/files")
+    older = re.search(r'href="([^"]+)"[^>]*>Older files', first)
+    assert older is not None
+    now = time.time()
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.execute("UPDATE files SET expires_at = 0 WHERE id = ?", (ids[54],))
+        conn.execute(
+            "INSERT INTO files (id, name, content_type, size, sha256, uploaded_by, created_at, expires_at) "
+            "VALUES (?, 'New upload', 'text/plain', 1, ?, 'human', ?, ?)",
+            (str(UUID(int=999)), "0" * 64, now, now + 3600),
+        )
+    page = _page(browser, unescape(older[1]))
+    assert re.findall(r'<tr id="file-([^"]+)"', page) == list(reversed(ids[:54]))[:50]
+    assert "105 live files" in page and "New upload" not in page
+
+
+def test_file_page_queries_are_bounded_and_indexed(
+    browser: TestClient, human_password: str, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from board import db
+
+    _log_in(browser, human_password)
+    _seed_files(settings, 105)
+    statements: list[str] = []
+    original = db.connect
+
+    def traced(path: Path) -> sqlite3.Connection:
+        conn = original(path)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(db, "connect", traced)
+    _page(browser, "/files")
+    reads = [sql for sql in statements if sql.startswith("SELECT id, name, content_type")]
+    assert len(reads) == 1 and "LIMIT 50" in reads[0]
+    with closing(sqlite3.connect(settings.db_path)) as conn:
+        for clause, args in [("", (0,)), (" AND (created_at, id) < (?, ?)", (0, time.time(), "z"))]:
+            plan = conn.execute(
+                "EXPLAIN QUERY PLAN SELECT id FROM files WHERE expires_at > ?"
+                + clause
+                + " ORDER BY created_at DESC, id DESC LIMIT 50",
+                args,
+            ).fetchall()
+            assert any("files_created_id" in row[3] for row in plan), plan
+            assert not any("TEMP B-TREE" in row[3] for row in plan), plan
+
+
 def test_reply_permalink_preserves_preceding_conversation(
     browser: TestClient, human_password: str, settings: Settings
 ) -> None:

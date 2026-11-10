@@ -310,8 +310,33 @@ def _file_pages(files: Files) -> APIRouter:
     router = APIRouter(prefix="/files", dependencies=[Depends(same_origin), Depends(current_human)])
 
     @router.get("")
-    async def files_page(request: Request) -> Response:
-        return _page(request, "files/index.html", files=await files.live())
+    async def files_page(
+        request: Request,
+        before: Annotated[str | None, Query(max_length=512)] = None,
+        after: Annotated[str | None, Query(max_length=512)] = None,
+    ) -> Response:
+        try:
+            page = await files.page(before=before, after=after)
+        except Refused:
+            return _page(
+                request,
+                "files/index.html",
+                page=None,
+                files=(),
+                older=None,
+                newer=None,
+                error="Invalid file page cursor. Return to Latest to start again.",
+                status_code=400,
+            )
+        return _page(
+            request,
+            "files/index.html",
+            page=page,
+            files=page.files,
+            error=None,
+            older="/files?" + urlencode({"before": page.older}) if page.older is not None else None,
+            newer="/files?" + urlencode({"after": page.newer}) if page.newer is not None else None,
+        )
 
     @router.post("")
     async def upload(
