@@ -19,12 +19,12 @@ def install(app: FastAPI, distribution: Distribution, public_url: str) -> None:
 def _routes(distribution: Distribution, public_url: str) -> APIRouter:
     router = APIRouter()
 
-    @router.get("/install.sh")
+    @router.api_route("/install.sh", methods=["GET", "HEAD"])
     async def install_sh() -> Response:
         script = await run_in_threadpool(install_script, distribution, public_url)
         return Response(script, media_type=SHELL_SCRIPT, headers=_NO_STORE)
 
-    @router.get("/dist/{name:path}")
+    @router.api_route("/dist/{name:path}", methods=["GET", "HEAD"])
     async def dist_file(name: str) -> FileResponse:
         path = await run_in_threadpool(distribution.file, name)
         return FileResponse(path, media_type=_media_type(path), headers=_NO_STORE)

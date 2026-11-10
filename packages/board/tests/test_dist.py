@@ -122,3 +122,22 @@ def test_downloads_declare_their_length_and_forbid_caching(dist_client: TestClie
     assert r.status_code == 200, f"{path} not served: {r.status_code} {r.text[:200]}"
     assert r.headers.get("cache-control") == "no-store", f"{path} may be cached: {r.headers}"
     assert r.headers.get("content-length") == str(len(r.content)), f"{path} length not declared: {r.headers}"
+
+
+@pytest.mark.parametrize("path", ["/install.sh", f"/dist/{CHECKSUMS}", "/dist/install.sh"])
+def test_downloads_answer_head_like_get_without_a_body(dist_client: TestClient, path: str) -> None:
+    got = dist_client.get(path)
+    head = dist_client.head(path)
+
+    assert head.status_code == 200, f"HEAD {path} refused: {head.status_code} {head.text[:200]}"
+    assert head.content == b"", f"HEAD {path} sent a body of {len(head.content)} bytes"
+    for header in ("content-type", "content-length", "cache-control"):
+        assert head.headers.get(header) == got.headers.get(header), (
+            f"HEAD {path} {header} is {head.headers.get(header)!r}, GET says {got.headers.get(header)!r}"
+        )
+
+
+def test_head_on_a_missing_dist_file_is_404(dist_client: TestClient) -> None:
+    r = dist_client.head("/dist/no-such-file")
+
+    assert r.status_code == 404, f"HEAD on a missing file answered {r.status_code}"
