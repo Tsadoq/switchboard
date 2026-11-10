@@ -1,8 +1,14 @@
 # Night verifier protocol draft, version 1
 
 Status: design for review, not an implemented endpoint, installed root service or
-permission grant. The pilot remains disabled. This extends the cooperative user-unit
-primitive with independent stop authority; it does not become a general sandbox.
+permission grant. The pilot remains disabled. This supersedes the user-unit primitive
+for pilot launch and settlement: delegated user cgroups cannot provide termination
+proof because the agent can migrate processes out. The root service creates runs in
+nondelegated system units. It still does not become a general sandbox.
+
+Only request-frame encoding/validation is currently implemented, in night_protocol.py.
+It validates structure, not authorization. There is no socket listener, grant client,
+root executor, timer, signer enrollment or external settlement handler in this slice.
 
 ## Ownership and authority
 
@@ -18,6 +24,12 @@ current grants/stop requests for their configured box and publishing signed obse
 for those grants. Existing generic token/action routes must enforce that role separation,
 not merely add a permissive verifier endpoint beside them. No operator token is installed
 on an agent box.
+
+Ops defines switchboard-night.slice in the system manager with per-box MemoryMax,
+TasksMax and CPUQuota. The root service enforces one active or uncertain run per box
+under a local atomic gate, independently of server capacity claims. Uncertain state
+continues to occupy that gate across service restarts. No second start is allowed merely
+because a server grant exists or a client repeats a request.
 
 The root service and its dependencies/configuration must come from a reviewed root-owned
 installed release, never an editable agent worktree or agent-controlled PATH/config/home.
@@ -45,42 +57,63 @@ Request fields:
 
 - v: integer 1, not a boolean.
 - request_id: canonical UUID for correlation, not authorization or a new grant.
-- op: arm, status or stop.
+- op: start, status or stop.
 - run_id: canonical admitted UUID.
 - fence: opaque server-issued fence.
 
 Response fields: v, request_id, run_id, status and a bounded machine-readable reason.
 Success may include an opaque receipt_id. Echo neither the fence nor private state.
-Supported statuses are armed, stopping, stopped, quarantined and refused. A stopped
+Supported statuses are starting, running, stopping, stopped, quarantined and refused. A stopped
 socket response alone never authorizes board settlement.
 
-## Arm before native execution
+## Root-created run and native execution
 
-1. Fetch a fresh authoritative grant from the fixed board configured by ops, authenticated
+1. Acquire the root-journaled local gate, including active or uncertain runs. Fetch a
+   fresh authoritative grant from the fixed board configured by ops, authenticated
    as the verifier. The caller supplies no board URL. The grant must bind the run/fence,
    principal, configured box/UID, eligibility, remaining budget and UTC window end. Verify
    that it is current, enabled and not stopping, superseded, finished or quarantined.
-2. Derive the only permitted user-unit name from the validated run UUID. Query the user
-   manager/kernel directly and bind the actual boot ID, invocation and exact cgroup. Do
-   not trust an agent's journal, supplied properties, idle telemetry or stopped boolean.
-3. Persist that binding and an immutable deadline in a root-only, fsynced journal. Derive
-   a conservative deadline from server remaining time minus the whole verification RPC,
-   with stop grace/headroom inside the grant. Define the host clock basis explicitly.
-4. Arm a root/system-manager-owned stop backstop before returning armed. The agent UID
-   must not be able to disarm or extend it. A root daemon crash must not remove it.
-   Include an independent UTC window cutoff and test pause/snapshot/clock-step behavior;
-   the user primitive's CLOCK_MONOTONIC test is not evidence for those cases.
-5. Only then may the launcher execute the native target. Its final freshness/expiry
-   check still applies. A refused/unavailable verifier means no native execution.
+2. Persist a start intent and immutable deadline in a root-only fsynced journal before
+   creating anything. Derive the only permitted system-unit name from the run UUID.
+   Use switchboard-night.slice, User set to the configured account, Delegate=no,
+   KillMode=control-group, RuntimeMaxSec and configured limits. Root owns the cgroup
+   and its ancestors, so the agent cannot write the common ancestor needed to migrate
+   a process into its delegated user subtree. Do not wrap a pre-existing user unit.
+3. Use only a root-configured installed launcher and server-authorized isolated worktree
+   selection. No socket-supplied command or path is executed. Set HOME, dedicated
+   HAPPIER_HOME_DIR and XDG_RUNTIME_DIR=/run/user/UID from configuration. Drop to the
+   configured agent UID for native work; no model, daemon or editable repository code
+   executes as root. The root-owned pre-exec gate is part of the launch transaction,
+   not a voluntary wait performed by an ordinary same-UID launcher.
+4. Bind the actual boot ID, system-manager invocation and root-owned cgroup from direct
+   manager/kernel observations. Do not trust an agent journal, supplied properties,
+   idle telemetry or stopped boolean. Unknown creation outcome retains the local gate.
+5. Arm independent root-owned stop authority before native execution. Its budget clock
+   is CLOCK_BOOTTIME, measured with clock_gettime(CLOCK_BOOTTIME), so suspend counts
+   against the grant. Derive remaining time conservatively by subtracting the whole
+   server verification RPC. Stop grace/headroom stay inside that interval. Pair it with
+   an independent absolute UTC night-window cutoff. Do not equate OnBootSec or a
+   WakeSystem setting with this clock without verifying the actual implementation.
+   The agent cannot disarm/extend either guard, and verifier loss must not remove them.
+6. Recheck grant freshness, revocation and both deadlines before the trusted launch
+   gate permits native execution. Refusal/unavailability means no native execution.
+   A successful response returns the captured binding, not permission for the runner
+   to launch another process itself. Test pause/snapshot/clock-step recovery; the old
+   user primitive's CLOCK_MONOTONIC evidence does not cover this path.
 
-An identical retry returns the original binding/deadline. A new request_id does not
-renew a lease. Conflicting fences, invocations or terminal-run replay are quarantined
-or refused, never re-armed. Uncertain launch is recovered by observation, not resubmission.
+An identical retry returns the original outcome/binding/deadline, without a second
+creation. A new request_id does not renew a lease. Conflicting fences, invocations or
+terminal-run replay are quarantined or refused. Uncertain launch is recovered by
+observation, not resubmission. An empty delegated user cgroup is never accepted as
+this system-run binding.
 
 ## Stop and recovery
 
-A valid stop can only affect the unit derived from that admitted run, under the configured
-account. The root helper uses fixed argv and fixed configuration, never caller-selected
+A valid stop can only affect the system unit and root-owned cgroup bound to that admitted
+run. Stop uses the kernel cgroup.kill interface on the trusted tracked cgroup, reconciles
+the system-manager state and verifies no populated descendants. This does not depend on
+the agent's user manager cooperating. The root helper uses fixed argv/configuration,
+never caller-selected
 units, wildcards, daemon names, PIDs or filesystem paths. It never kills a shared Happier
 daemon or changes a parent user manager's permissions/delegation.
 
@@ -118,11 +151,13 @@ is separate, authenticated and audited, and cannot override the need to prove te
 ## Acceptance before activation
 
 Tests must cover socket peer spoofing, frame/size/type limits, role/key separation, grant
-and fence substitution, cross-box/UID/unit targeting, duplicate arm/replay, immutable
-retry deadlines, off/preemption, verifier loss, network loss, restart/reboot, unit reuse,
-unreadable/populated cgroups, detached/resistant descendants and actual daemon-home
-isolation. Demonstrate that the autonomous UID cannot stop the root timer/service or
-read the verifier key, without attempting broader security engagement.
+and fence substitution, cross-box/UID/unit targeting, duplicate start/replay, local gate
+races despite conflicting server grants, immutable retry deadlines, off/preemption,
+verifier loss, network loss, restart/reboot, unit reuse, unreadable/populated cgroups,
+detached/resistant descendants and actual daemon-home isolation. Demonstrate that the
+autonomous UID cannot migrate its tracked PID into a sibling/delegated cgroup, stop the
+root guards/service or read the verifier key. Prove common-ancestor ownership and verify
+CLOCK_BOOTTIME plus UTC-cutoff behavior, without broader security engagement.
 
 Remote effects and work explicitly brokered into unrelated local services remain outside
 this tracked-unit boundary. No arbitrary-command/root execution interface is authorized.

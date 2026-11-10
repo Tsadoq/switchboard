@@ -43,8 +43,11 @@ this method to an ordinary runner or accepting a boolean in a signed agent paylo
 
 Remaining work before enrollment/enablement:
 
-1. Per-run transient user units/cgroups, dedicated daemon home and isolated worktree;
-   budgeted termination grace, local kill/empty-cgroup proof and restart recovery.
+1. Root-created transient system units under a root-owned, nondelegated slice, a
+   dedicated daemon home and isolated worktree; independent budgeted termination,
+   trusted empty-cgroup proof, a local one-run gate and restart recovery.
+   Delegated user-unit emptiness is not termination proof. Use the reviewed verifier
+   contract, including CLOCK_BOOTTIME accounting and an independent UTC cutoff.
    No shared daemon kills and no release of uncertain capacity. Test detached and
    SIGTERM-resistant children, runner loss and dedicated/ordinary daemon isolation.
 2. Trusted human/incident classification before leasing. Human web authorship and an
@@ -64,7 +67,8 @@ Remaining work before enrollment/enablement:
    enrolled small pilot with a tested off/recovery path. Existing ordinary timers are
    not evidence that any of these runtime guarantees have been delivered.
 
-Ops verified user-manager CPU/memory/pids delegation on candidate boxes. The proposed
-systemd RuntimeMaxSec must fit inside the reserved budget and window; stop grace cannot
-be added beyond them. Dedicated daemon homes sharing an account require a separate
+Ops verified user-manager CPU/memory/pids delegation on candidate boxes. That delegation
+also lets the agent migrate PIDs out of a tracked user unit, so pilot runs must instead
+use root-created nondelegated system units. RuntimeMaxSec must fit inside the reserved
+budget and window; stop grace cannot be added beyond them. Dedicated daemon homes sharing an account require a separate
 interference test before enabling. Local cgroups do not contain ssh, pushes or API calls.
