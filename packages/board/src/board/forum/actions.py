@@ -1,4 +1,6 @@
+import base64
 import json
+import math
 import re
 import sqlite3
 import time
@@ -19,6 +21,7 @@ from board.forum.entities import (
     Profile,
     Subforum,
     SubforumActivity,
+    SubforumPage,
     SubforumTarget,
     Target,
     Thread,
@@ -254,13 +257,27 @@ class Forum:
         def read(conn: sqlite3.Connection) -> list[Thread]:
             _require_target(conn, SubforumTarget(subforum))
             rows = conn.execute(
-                f"{_THREAD_SELECT} WHERE t.subforum = ? GROUP BY t.id HAVING last_post_at >= ? "
-                "ORDER BY last_post_at DESC, t.id DESC",
+                f"{_THREAD_SELECT} WHERE t.subforum = ? GROUP BY t.id HAVING MAX(p.created_at) >= ? "
+                "ORDER BY MAX(p.created_at) DESC, t.id DESC",
                 (subforum, active_since),
             )
             return [_thread(row) for row in rows]
 
         return await self._db.read(read)
+
+    async def subforum(self, slug: str) -> Subforum:
+        return await self._db.read(lambda conn: _find_subforum(conn, slug))
+
+    async def subforum_page(
+        self, slug: str, *, before: str | None = None, after: str | None = None, limit: int = 50
+    ) -> SubforumPage:
+        if before is not None and after is not None:
+            raise Refused("bad_payload", "cursor")
+        if not 1 <= limit <= THREAD_PAGE_MAX:
+            raise Refused("bad_payload", "limit")
+        token = before if before is not None else after
+        key = _index_cursor(token) if token is not None else None
+        return await self._db.read(lambda conn: _subforum_page(conn, slug, key, after is not None, limit))
 
     async def thread(self, thread_id: int) -> tuple[Thread, list[Post]]:
         def read(conn: sqlite3.Connection) -> tuple[Thread, list[Post]]:
@@ -314,7 +331,8 @@ class Forum:
 
         def read(conn: sqlite3.Connection) -> ThreadPage:
             row = conn.execute(
-                "SELECT t.*, (SELECT MAX(created_at) FROM posts WHERE thread_id = t.id) AS last_post_at "
+                "SELECT t.id, t.subforum, t.title, t.kind, t.created_by, t.created_at, "
+                "(SELECT MAX(created_at) FROM posts WHERE thread_id = t.id) AS last_post_at "
                 "FROM threads t WHERE t.id = ?",
                 (thread_id,),
             ).fetchone()
@@ -594,6 +612,66 @@ def _bounded_line(payload: Mapping[str, Any], field: str, maximum: int, *, requi
     if (required and not value) or len(value) > maximum or any(ch in value for ch in "\r\n"):
         raise Refused("bad_payload", field)
     return value
+
+
+def _find_subforum(conn: sqlite3.Connection, slug: str) -> Subforum:
+    row = conn.execute(f"SELECT {_SUBFORUM_COLUMNS} FROM subforums WHERE slug = ?", (slug,)).fetchone()
+    if row is None:
+        raise Refused("no_such_subforum")
+    return _subforum(row)
+
+
+def _subforum_page(
+    conn: sqlite3.Connection, slug: str, key: tuple[float, int] | None, newer: bool, limit: int
+) -> SubforumPage:
+    subforum = _find_subforum(conn, slug)
+    where = "subforum = ? AND last_post_at >= 0"
+    order = "ASC" if newer else "DESC"
+    comparison = ">" if newer else "<"
+    bound = f" AND (last_post_at, id) {comparison} (?, ?)" if key is not None else ""
+    rows = conn.execute(
+        "SELECT id, subforum, title, kind, created_by, created_at, last_post_at FROM threads "
+        f"WHERE {where}{bound} ORDER BY last_post_at {order}, id {order} LIMIT ?",
+        (slug, *(key or ()), limit),
+    )
+    threads = tuple(_thread(row) for row in rows)
+    if newer:
+        threads = tuple(reversed(threads))
+    total = conn.execute(f"SELECT COUNT(*) FROM threads WHERE {where}", (slug,)).fetchone()[0]
+
+    def exists(thread: Thread, operator: str) -> bool:
+        return bool(
+            conn.execute(
+                f"SELECT EXISTS(SELECT 1 FROM threads WHERE {where} AND (last_post_at, id) {operator} (?, ?))",
+                (slug, thread.last_post_at, thread.id),
+            ).fetchone()[0]
+        )
+
+    older = _encode_index_cursor(threads[-1]) if threads and exists(threads[-1], "<") else None
+    previous = _encode_index_cursor(threads[0]) if threads and exists(threads[0], ">") else None
+    return SubforumPage(subforum, threads, total, older, previous)
+
+
+def _encode_index_cursor(thread: Thread) -> str:
+    raw = json.dumps([thread.last_post_at, thread.id], separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _index_cursor(token: str) -> tuple[float, int]:
+    try:
+        if not 1 <= len(token) <= 512:
+            raise ValueError
+        values = json.loads(base64.b64decode(token + "=" * (-len(token) % 4), altchars=b"-_", validate=True))
+        if not isinstance(values, list) or len(values) != 2:
+            raise ValueError
+        moment, thread_id = values
+        if type(moment) not in (int, float) or not math.isfinite(moment) or moment < 0:
+            raise ValueError
+        if type(thread_id) is not int or not 1 <= thread_id <= 2**63 - 1:
+            raise ValueError
+        return float(moment), thread_id
+    except (ValueError, TypeError, OverflowError):
+        raise Refused("bad_payload", "cursor") from None
 
 
 def _subforum(row: sqlite3.Row) -> Subforum:

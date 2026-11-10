@@ -1327,6 +1327,153 @@ def test_file_page_queries_are_bounded_and_indexed(
             assert not any("TEMP B-TREE" in row[3] for row in plan), plan
 
 
+def _seed_index_threads(settings: Settings, count: int) -> list[int]:
+    ids: list[int] = []
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        for number in range(count):
+            thread_id = conn.execute(
+                "INSERT INTO threads (subforum, title, kind, created_by, created_at) "
+                "VALUES ('general', ?, 'discussion', 'human', 1000)",
+                (f"Discussion {number:03}",),
+            ).lastrowid
+            assert thread_id is not None
+            conn.execute(
+                "INSERT INTO posts (thread_id, author, author_kind, body, created_at) "
+                "VALUES (?, 'human', 'human', 'Opening', 1000)",
+                (thread_id,),
+            )
+            ids.append(thread_id)
+    return ids
+
+
+def test_forum_index_pages_bound_activity_ties_and_preserve_api(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    ids = _seed_index_threads(settings, 105)
+    expected = list(reversed(ids))
+    seen: list[str] = []
+    path = "/f/general"
+    for count in (50, 50, 5):
+        html = _page(browser, path)
+        shown = re.findall(r'<tr id="thread-(\d+)"', html)
+        assert len(shown) == count and "105 threads" in html
+        seen.extend(shown)
+        older = re.search(r'href="([^"]+)"[^>]*>Older threads', html)
+        if count == 5:
+            assert older is None
+        else:
+            assert older is not None
+            path = unescape(older[1])
+    assert seen == [str(i) for i in expected]
+    newer = re.search(r'href="([^"]+)"[^>]*>Newer threads', html)
+    assert newer is not None
+    middle = _page(browser, unescape(newer[1]))
+    assert re.findall(r'<tr id="thread-(\d+)"', middle) == [str(i) for i in expected[50:100]]
+    assert [thread["id"] for thread in _read(browser, "/api/subforums/general/threads")] == expected
+
+
+def test_forum_index_new_activity_and_deleted_boundary_do_not_break_cursors(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    ids = _seed_index_threads(settings, 51)
+    first = _page(browser, "/f/general")
+    older = re.search(r'href="([^"]+)"[^>]*>Older threads', first)
+    assert older is not None
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.execute("DELETE FROM posts WHERE thread_id = ?", (ids[1],))
+        conn.execute("DELETE FROM threads WHERE id = ?", (ids[1],))
+        conn.execute(
+            "INSERT INTO posts (thread_id, author, author_kind, body, created_at) "
+            "VALUES (?, 'human', 'human', 'Recent reply', 2000)",
+            (ids[2],),
+        )
+    tail = _page(browser, unescape(older[1]))
+    assert re.findall(r'<tr id="thread-(\d+)"', tail) == [str(ids[0])]
+    assert "50 threads" in tail
+    latest = _page(browser, "/f/general")
+    assert re.findall(r'<tr id="thread-(\d+)"', latest)[0] == str(ids[2])
+    for path in ("/f/general?before=invalid", "/f/general?before=x&after=y"):
+        response = browser.get(path)
+        assert response.status_code == 400 and 'role="alert"' in response.text
+        assert response.headers["content-type"].startswith("text/html")
+    empty = _page(browser, "/f/introductions")
+    assert "0 threads" in empty and "No threads" in empty and ">Latest</a>" in empty
+
+
+def test_forum_index_queries_are_bounded_and_indexed(
+    browser: TestClient, human_password: str, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from board import db
+
+    _log_in(browser, human_password)
+    _seed_index_threads(settings, 105)
+    statements: list[str] = []
+    original = db.connect
+
+    def traced(path: Path) -> sqlite3.Connection:
+        conn = original(path)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(db, "connect", traced)
+    _page(browser, "/f/general")
+    reads = [sql for sql in statements if sql.startswith("SELECT id, subforum, title")]
+    assert len(reads) == 1 and "LIMIT 50" in reads[0] and "JOIN posts" not in reads[0]
+    assert not any("FROM subforums ORDER BY rowid" in sql for sql in statements)
+    with closing(sqlite3.connect(settings.db_path)) as conn:
+        for order in ("ASC", "DESC"):
+            plan = conn.execute(
+                "EXPLAIN QUERY PLAN SELECT id FROM threads WHERE subforum = ? AND last_post_at >= 0 "
+                f"AND (last_post_at, id) < (?, ?) ORDER BY last_post_at {order}, id {order} LIMIT 50",
+                ("general", 2000, 1000),
+            ).fetchall()
+            assert any("threads_subforum_activity" in row[3] for row in plan), plan
+            assert not any("TEMP B-TREE" in row[3] for row in plan), plan
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        [],
+        [True, 1],
+        [float("nan"), 1],
+        [float("inf"), 1],
+        [-1, 1],
+        [1, True],
+        [1, "2"],
+        [1, 0],
+        [1, 2**63],
+    ],
+)
+def test_forum_index_rejects_invalid_cursor_payloads(
+    browser: TestClient, human_password: str, value: object
+) -> None:
+    import base64
+    import json
+
+    _log_in(browser, human_password)
+    token = base64.urlsafe_b64encode(json.dumps(value).encode()).decode()
+    response = browser.get("/f/general", params={"before": token})
+    assert response.status_code == 400 and 'role="alert"' in response.text
+    assert browser.get("/f/does-not-exist").status_code == 404
+
+
+def test_legacy_thread_index_uses_post_aggregate_not_cached_column(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    ids = _seed_index_threads(settings, 2)
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.execute("UPDATE threads SET last_post_at = -1 WHERE id = ?", (ids[0],))
+        conn.execute("UPDATE threads SET last_post_at = 3000 WHERE id = ?", (ids[1],))
+    found = _read(browser, "/api/subforums/general/threads")
+    assert [thread["id"] for thread in found] == list(reversed(ids))
+    assert _read(browser, "/api/subforums/general/threads?since=1970-01-01T00:33:20Z") == []
+
+
 def test_reply_permalink_preserves_preceding_conversation(
     browser: TestClient, human_password: str, settings: Settings
 ) -> None:

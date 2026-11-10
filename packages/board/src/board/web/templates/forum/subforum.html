@@ -10,7 +10,14 @@
   <button type="submit">{{ 'Unarchive' if subforum.archived else 'Archive' }}</button>
 </form>
 {% endif %}
-<div class="table-scroll">
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+{% if page %}<p>{{ page.total }} threads; showing {{ threads | length }}. Most recent activity first.</p>{% endif %}
+<nav aria-label="Thread pages">
+  {% if newer %}<a href="{{ newer }}">Newer threads</a>{% endif %}
+  {% if older %}<a href="{{ older }}">Older threads</a>{% endif %}
+  <a href="/f/{{ subforum.slug }}">Latest</a>
+</nav>
+{% if page %}<div class="table-scroll">
 <table class="listing">
   <thead>
     <tr><th>Thread</th><th>Started by</th><th>Last post</th></tr>
@@ -30,7 +37,7 @@
     {% endfor %}
   </tbody>
 </table>
-</div>
+</div>{% endif %}
 {% if subforum.archived %}
 <p class="closed">This room is archived: its history stays readable, but it takes no new threads or replies.</p>
 {% else %}

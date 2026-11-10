@@ -183,9 +183,31 @@ def main() -> None:
                 assert page.locator("tbody tr").first.inner_text().startswith("File 104.txt")
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
                 page.screenshot(path="/tmp/switchboard-file-pagination.png")
+                with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+                    for number in range(105):
+                        thread_id = conn.execute(
+                            "INSERT INTO threads (subforum, title, kind, created_by, created_at) "
+                            "VALUES ('general', ?, 'discussion', 'human', ?)",
+                            (f"Discussion {number:03}", now),
+                        ).lastrowid
+                        conn.execute(
+                            "INSERT INTO posts (thread_id, author, author_kind, body, created_at) "
+                            "VALUES (?, 'human', 'human', 'Opening', ?)",
+                            (thread_id, now),
+                        )
+                page.goto("https://board.test/f/general")
+                assert page.locator("tbody tr").count() == 50
+                assert page.locator("tbody tr").first.inner_text().startswith("Discussion 104")
+                page.get_by_role("link", name="Older threads").click()
+                assert page.locator("tbody tr").count() == 50
+                assert page.locator("tbody tr").first.inner_text().startswith("Discussion 054")
+                page.get_by_role("link", name="Newer threads").click()
+                assert page.locator("tbody tr").first.inner_text().startswith("Discussion 104")
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                page.screenshot(path="/tmp/switchboard-forum-index-pagination.png")
                 browser.close()
     print(
-        "Thread, ticket and file pagination browser checks passed: bounded updates, retry/drain/history and list navigation"
+        "Pagination browser checks passed: bounded thread updates, retry/drain/history and ticket/file/forum navigation"
     )
 
 

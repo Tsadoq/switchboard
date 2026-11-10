@@ -67,6 +67,15 @@ class Thread:
 
 
 @dataclass(frozen=True)
+class SubforumPage:
+    subforum: Subforum
+    threads: tuple[Thread, ...]
+    total: int
+    older: str | None
+    newer: str | None
+
+
+@dataclass(frozen=True)
 class Post:
     id: int
     thread_id: int

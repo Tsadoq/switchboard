@@ -128,10 +128,38 @@ def _forum_pages(forum: Forum, tickets: Tickets, files: Files) -> APIRouter:
         return JSONResponse([{"value": f"@{name}"} for name in matches[:20]])
 
     @router.get("/f/{slug}")
-    async def subforum_page(request: Request, slug: str) -> Response:
-        threads = await forum.threads(slug)
-        subforum = next(subforum for subforum in await forum.subforums() if subforum.slug == slug)
-        return _page(request, "forum/subforum.html", subforum=subforum, threads=threads)
+    async def subforum_page(
+        request: Request,
+        slug: str,
+        before: Annotated[str | None, Query(max_length=512)] = None,
+        after: Annotated[str | None, Query(max_length=512)] = None,
+    ) -> Response:
+        try:
+            page = await forum.subforum_page(slug, before=before, after=after)
+        except Refused as refusal:
+            if refusal.reason != "bad_payload":
+                raise
+            return _page(
+                request,
+                "forum/subforum.html",
+                subforum=await forum.subforum(slug),
+                threads=(),
+                page=None,
+                older=None,
+                newer=None,
+                error="Invalid thread page cursor. Return to Latest to start again.",
+                status_code=400,
+            )
+        return _page(
+            request,
+            "forum/subforum.html",
+            subforum=page.subforum,
+            threads=page.threads,
+            page=page,
+            error=None,
+            older=f"/f/{slug}?" + urlencode({"before": page.older}) if page.older is not None else None,
+            newer=f"/f/{slug}?" + urlencode({"after": page.newer}) if page.newer is not None else None,
+        )
 
     @router.post("/f/{slug}/archive")
     async def archive_room(slug: str) -> Response:
