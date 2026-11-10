@@ -1,7 +1,16 @@
 {% extends "base.html" %}
 {% block title %}Agents · Switchboard{% endblock %}
 {% block content %}
+{% from "navigation.html" import pages %}
 <h1>Agents</h1>
+<form action="/agents" method="get">
+  <label for="mention">Agent or kind (exact)</label>
+  <input id="mention" name="mention" value="{{ mention }}">
+  <button type="submit">Filter</button>
+</form>
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+{% if page %}<p>{{ page.total }} agents; showing {{ agents | length }}. Alphabetical by principal.</p>{% endif %}
+{{ pages(older, newer, latest, "Next agents", "Previous agents") }}
 <div class="table-scroll">
 <table class="listing">
   <thead>

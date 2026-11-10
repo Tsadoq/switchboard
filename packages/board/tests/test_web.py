@@ -1474,6 +1474,124 @@ def test_legacy_thread_index_uses_post_aggregate_not_cached_column(
     assert _read(browser, "/api/subforums/general/threads?since=1970-01-01T00:33:20Z") == []
 
 
+def test_root_room_inventory_is_bounded_and_bidirectional(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    names = [f"room-{i:03}" for i in range(105)]
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.executemany(
+            "INSERT INTO subforums (slug, title, description, created_by, created_at, archived_at) "
+            "VALUES (?, ?, 'History', 'human', 1000, 2000)",
+            [(name, name) for name in names],
+        )
+    expected = sorted(["general", "introductions", "tickets", *names])
+    seen: list[str] = []
+    path = "/"
+    for count in (50, 50, 8):
+        html = _page(browser, path)
+        shown = re.findall(r'<li id="subforum-([^"]+)"', html)
+        assert len(shown) == count and "108 rooms" in html
+        seen.extend(shown)
+        next_link = re.search(r'href="([^"]+)"[^>]*>Next rooms', html)
+        if count != 8:
+            assert next_link is not None
+            path = unescape(next_link[1])
+    assert seen == expected
+    previous = re.search(r'href="([^"]+)"[^>]*>Previous rooms', html)
+    assert previous is not None
+    middle = _page(browser, unescape(previous[1]))
+    assert re.findall(r'<li id="subforum-([^"]+)"', middle) == expected[50:100]
+    assert len(_read(browser, "/api/subforums")) == 108
+
+
+def test_agent_pages_preserve_kind_filter_and_complete_api(
+    browser: TestClient, human_password: str, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from board.identity.registry import Registry
+
+    _log_in(browser, human_password)
+    names = [f"worker@box{i:03}" for i in range(105)]
+    monkeypatch.setattr(Registry, "principals", lambda self: set(names))
+    first = _page(browser, "/agents?mention=worker")
+    assert len(re.findall(r'<tr id="agent-', first)) == 50 and "105 agents" in first
+    next_link = re.search(r'href="([^"]+)"[^>]*>Next agents', first)
+    assert next_link is not None and "mention=worker" in next_link[1]
+    middle = _page(browser, unescape(next_link[1]))
+    assert re.findall(r'<tr id="agent-([^"]+)"', middle) == names[50:100]
+    previous = re.search(r'href="([^"]+)"[^>]*>Previous agents', middle)
+    assert previous is not None
+    assert re.findall(r'<tr id="agent-([^"]+)"', _page(browser, unescape(previous[1]))) == names[:50]
+    assert len(_read(browser, "/api/agents")) == 105
+    assert "0 agents" in _page(browser, "/agents?mention=absent")
+
+
+def test_mentions_have_newer_latest_and_filtered_totals(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    ids = _seed_index_threads(settings, 105)
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.execute("INSERT INTO mentions SELECT id, 'human' FROM posts")
+    first = _page(browser, "/mentions")
+    older = re.search(r'href="([^"]+)"[^>]*>Older mentions', first)
+    assert older is not None
+    middle = _page(browser, unescape(older[1]))
+    assert "105 matching mentions; showing 50" in middle
+    newer = re.search(r'href="([^"]+)"[^>]*>Newer mentions', middle)
+    assert newer is not None and ">Latest</a>" in middle
+    assert re.findall(r'id="post-(\d+)"', _page(browser, unescape(newer[1]))) == [
+        str(i) for i in reversed(ids[55:])
+    ]
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.execute("INSERT INTO mention_reads SELECT id, 'human', 2000 FROM posts")
+    archived = _page(browser, "/mentions?archived=true")
+    older = re.search(r'href="([^"]+)"[^>]*>Older mentions', archived)
+    assert older is not None and "archived=true" in older[1]
+    middle = _page(browser, unescape(older[1]))
+    newer = re.search(r'href="([^"]+)"[^>]*>Newer mentions', middle)
+    assert newer is not None and "archived=true" in newer[1]
+
+
+def test_remaining_lists_use_bounded_sql_and_targeted_metadata(
+    browser: TestClient, human_password: str, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from board import db
+    from board.identity.registry import Registry
+
+    _log_in(browser, human_password)
+    _seed_index_threads(settings, 1)
+    names = {f"worker@box{i:03}" for i in range(105)}
+    monkeypatch.setattr(Registry, "principals", lambda self: names.copy())
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.execute("INSERT INTO mentions SELECT id, 'human' FROM posts")
+        conn.execute(
+            "INSERT INTO profiles (principal, display_name, specialities) VALUES ('worker@box000', 'Worker', '[]')"
+        )
+    statements: list[str] = []
+    original = db.connect
+
+    def traced(path: Path) -> sqlite3.Connection:
+        conn = original(path)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(db, "connect", traced)
+    for path in ("/", "/agents?mention=worker", "/mentions", "/t/1", "/mention-options?q=worker"):
+        response = browser.get(path)
+        assert response.status_code == 200
+        if path.startswith("/agents"):
+            assert "Worker" in response.text
+    assert any("FROM subforums ORDER BY slug ASC LIMIT 50" in sql for sql in statements)
+    assert any("candidates AS" in sql and "LIMIT 50" in sql for sql in statements)
+    assert any("SELECT p.*, t.title FROM mentions" in sql and "LIMIT 50" in sql for sql in statements)
+    assert any("SELECT value FROM json_each" in sql and "LIMIT 20" in sql for sql in statements)
+    assert not any("FROM profiles" in sql or "FROM subforums ORDER BY rowid" in sql for sql in statements)
+    for path in ("/?before=x&after=y", "/agents?before=x&after=y", "/mentions?before=1&after=2"):
+        response = browser.get(path)
+        assert response.status_code == 400 and 'role="alert"' in response.text
+
+
 def test_reply_permalink_preserves_preceding_conversation(
     browser: TestClient, human_password: str, settings: Settings
 ) -> None:

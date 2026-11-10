@@ -1,6 +1,6 @@
 import hashlib
 from collections.abc import AsyncIterator, Awaitable
-from typing import Annotated, Any
+from typing import Annotated, Any, TypedDict
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, FastAPI, File, Form, Path, Query, Request, UploadFile
@@ -11,7 +11,7 @@ from starlette.responses import Response
 from board.constants import HUMAN
 from board.files import Declaration, FileEntry, Files
 from board.forum.actions import Forum, Refused
-from board.forum.entities import Post, SubforumTarget, Thread, ThreadTarget
+from board.forum.entities import ListPage, Post, SubforumTarget, Thread, ThreadTarget
 from board.tickets import COLUMNS
 from board.tickets.actions import Conflict, NoSuchTicket, Tickets
 from board.web import STATIC_DIR, templates
@@ -82,25 +82,66 @@ def _forum_pages(forum: Forum, tickets: Tickets, files: Files) -> APIRouter:
     router = APIRouter(dependencies=[Depends(same_origin), Depends(current_human)])
 
     @router.get("/")
-    async def forum_page(request: Request) -> Response:
-        return _page(request, "forum/index.html", subforums=await forum.activity())
+    async def forum_page(
+        request: Request,
+        before: Annotated[str | None, Query(max_length=200)] = None,
+        after: Annotated[str | None, Query(max_length=200)] = None,
+    ) -> Response:
+        try:
+            page = await forum.activity_page(before=before, after=after)
+        except Refused:
+            return _page(
+                request,
+                "forum/index.html",
+                page=None,
+                subforums=(),
+                error="Invalid room page cursor.",
+                status_code=400,
+                **_list_navigation("/", None, ascending=True),
+            )
+        return _page(
+            request,
+            "forum/index.html",
+            page=page,
+            subforums=page.items,
+            error=None,
+            **_list_navigation("/", page, ascending=True),
+        )
 
     @router.get("/mentions")
     async def mentions_page(
         request: Request,
-        before: Annotated[int, Query(ge=0)] = 0,
+        before: Annotated[int | None, Query(ge=0, le=2**63 - 1)] = None,
+        after: Annotated[int | None, Query(ge=0, le=2**63 - 1)] = None,
         archived: bool = False,
     ) -> Response:
-        through, unread_count = await forum.unread_mention_snapshot(HUMAN)
-        found = await forum.mentioned_posts(HUMAN, before, archived=archived)
+        filters = {"archived": "true"} if archived else {}
+        try:
+            snapshot = await forum.mention_page(HUMAN, before=before, after=after, archived=archived)
+        except Refused:
+            through, unread_count = await forum.unread_mention_snapshot(HUMAN)
+            return _page(
+                request,
+                "forum/mentions.html",
+                page=None,
+                mentions=(),
+                archived=archived,
+                through=through,
+                unread_count=unread_count,
+                error="Use only one mention page cursor.",
+                status_code=400,
+                **_list_navigation("/mentions", None, filters=filters),
+            )
         return _page(
             request,
             "forum/mentions.html",
-            mentions=found[:50],
+            page=snapshot.page,
+            mentions=snapshot.page.items,
             archived=archived,
-            through=through,
-            unread_count=unread_count,
-            next_before=found[49][1].id if len(found) > 50 else None,
+            through=snapshot.through,
+            unread_count=snapshot.unread_count,
+            error=None,
+            **_list_navigation("/mentions", snapshot.page, filters=filters),
         )
 
     @router.post("/mentions/read-all")
@@ -120,12 +161,7 @@ def _forum_pages(forum: Forum, tickets: Tickets, files: Files) -> APIRouter:
 
     @router.get("/mention-options")
     async def mention_options(q: Annotated[str, Query(max_length=100)] = "") -> Response:
-        agents = await forum.agents()
-        names = {agent.principal for agent in agents}
-        names.update(principal.partition("@")[0] for principal in tuple(names))
-        names.update({"human", "all"})
-        matches = sorted(name for name in names if name.casefold().startswith(q.casefold()))
-        return JSONResponse([{"value": f"@{name}"} for name in matches[:20]])
+        return JSONResponse([{"value": f"@{name}"} for name in await forum.mention_options(q)])
 
     @router.get("/f/{slug}")
     async def subforum_page(
@@ -193,9 +229,7 @@ def _forum_pages(forum: Forum, tickets: Tickets, files: Files) -> APIRouter:
         thread, posts = page.thread, list(page.posts)
         closed = await _is_closed(tickets, thread)
         attached = await _attached(files, posts)
-        room_archived = any(
-            room.slug == thread.subforum and room.archived for room in await forum.subforums()
-        )
+        room_archived = (await forum.subforum(thread.subforum)).archived
         return _page(
             request,
             "forum/thread.html",
@@ -380,17 +414,61 @@ def _agent_pages(forum: Forum) -> APIRouter:
     router = APIRouter(dependencies=[Depends(same_origin), Depends(current_human)])
 
     @router.get("/agents")
-    async def agents_page(request: Request, mention: str = "") -> Response:
-        agents = await forum.agents()
-        if mention:
-            agents = [
-                agent
-                for agent in agents
-                if agent.principal == mention or agent.principal.partition("@")[0] == mention
-            ]
-        return _page(request, "agents/index.html", agents=agents)
+    async def agents_page(
+        request: Request,
+        mention: Annotated[str, Query(max_length=200)] = "",
+        before: Annotated[str | None, Query(max_length=200)] = None,
+        after: Annotated[str | None, Query(max_length=200)] = None,
+    ) -> Response:
+        filters = {"mention": mention} if mention else {}
+        try:
+            page = await forum.agent_page(mention=mention, before=before, after=after)
+        except Refused:
+            return _page(
+                request,
+                "agents/index.html",
+                page=None,
+                agents=(),
+                mention=mention,
+                error="Invalid agent page cursor.",
+                status_code=400,
+                **_list_navigation("/agents", None, ascending=True, filters=filters),
+            )
+        return _page(
+            request,
+            "agents/index.html",
+            page=page,
+            agents=page.items,
+            mention=mention,
+            error=None,
+            **_list_navigation("/agents", page, ascending=True, filters=filters),
+        )
 
     return router
+
+
+class _Navigation(TypedDict):
+    latest: str
+    older: str | None
+    newer: str | None
+
+
+def _list_navigation(
+    path: str, page: ListPage[Any] | None, *, ascending: bool = False, filters: dict[str, str] | None = None
+) -> _Navigation:
+    def link(**cursor: str) -> str:
+        query = urlencode(cursor | (filters or {}))
+        return path + (f"?{query}" if query else "")
+
+    return {
+        "latest": link(),
+        "older": link(**{"after" if ascending else "before": page.older})
+        if page and page.older is not None
+        else None,
+        "newer": link(**{"before" if ascending else "after": page.newer})
+        if page and page.newer is not None
+        else None,
+    }
 
 
 def _page(request: Request, name: str, status_code: int = 200, **context: Any) -> Response:

@@ -4,19 +4,21 @@ import math
 import re
 import sqlite3
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from board.db import Database
 from board.events import EventHub
-from board.forum import fanout, mentions
+from board.forum import fanout, listing, mentions
 from board.forum.entities import (
     SEED_SUBFORUMS,
     Agent,
     AuthorKind,
     Follow,
     LatestPost,
+    ListPage,
+    MentionSnapshot,
     Post,
     Profile,
     Subforum,
@@ -377,6 +379,18 @@ class Forum:
 
         return await self._db.read(read)
 
+    async def mention_page(
+        self, principal: str, *, before: int | None = None, after: int | None = None, archived: bool = False
+    ) -> MentionSnapshot:
+        def read(conn: sqlite3.Connection) -> MentionSnapshot:
+            page = listing.mentions(conn, principal, before, after, archived).map(
+                lambda row: (row["title"], _post(row, ()))
+            )
+            through, unread = _unread_snapshot(conn, principal)
+            return MentionSnapshot(page, through, unread)
+
+        return await self._list_read(read)
+
     async def mentioned_posts(
         self, principal: str, before: int = 0, *, archived: bool = False
     ) -> list[tuple[str, Post]]:
@@ -394,16 +408,7 @@ class Forum:
         return await self._db.read(read)
 
     async def unread_mention_snapshot(self, principal: str) -> tuple[int, int]:
-        def read(conn: sqlite3.Connection) -> tuple[int, int]:
-            row = conn.execute(
-                "SELECT COALESCE(MAX(m.post_id), 0), COUNT(*) FROM mentions m "
-                "LEFT JOIN mention_reads r ON r.post_id = m.post_id AND r.principal = m.principal "
-                "WHERE m.principal = ? AND r.post_id IS NULL",
-                (principal,),
-            ).fetchone()
-            return row[0], row[1]
-
-        return await self._db.read(read)
+        return await self._db.read(lambda conn: _unread_snapshot(conn, principal))
 
     async def read_all_mentions(self, principal: str, through: int) -> None:
         def write(conn: sqlite3.Connection) -> None:
@@ -433,6 +438,38 @@ class Forum:
 
         await self._db.transact(write)
 
+    async def agent_page(
+        self, *, mention: str = "", before: str | None = None, after: str | None = None
+    ) -> ListPage[Agent]:
+        def read(conn: sqlite3.Connection) -> ListPage[Agent]:
+            roster = json.dumps(tuple(self._registry.principals()))
+            now = time.time()
+            return listing.agents(conn, roster, mention, before, after).map(
+                lambda row: _agent(
+                    row["principal"],
+                    row if row["display_name"] is not None else None,
+                    Presence(row["last_seen_at"], row["last_poll_at"]),
+                    now,
+                )
+            )
+
+        return await self._list_read(read)
+
+    async def mention_options(self, query: str) -> list[str]:
+        def read(conn: sqlite3.Connection) -> list[str]:
+            names = self._registry.principals()
+            names.update(principal.partition("@")[0] for principal in tuple(names))
+            names.update({"human", "all"})
+            prefix = query.casefold()
+            rows = conn.execute(
+                "SELECT value FROM json_each(?) WHERE substr(lower(value), 1, length(?)) = ? "
+                "ORDER BY value LIMIT 20",
+                (json.dumps(tuple(names)), prefix, prefix),
+            )
+            return [row[0] for row in rows]
+
+        return await self._db.read(read)
+
     async def agents(self) -> list[Agent]:
         def read(conn: sqlite3.Connection) -> list[Agent]:
             now = time.time()
@@ -449,6 +486,19 @@ class Forum:
             ]
 
         return await self._db.read(read)
+
+    async def activity_page(
+        self, *, before: str | None = None, after: str | None = None
+    ) -> ListPage[SubforumActivity]:
+        return await self._list_read(
+            lambda conn: listing.rooms(conn, before, after).map(lambda row: _room_activity(conn, row))
+        )
+
+    async def _list_read[T](self, read: Callable[[sqlite3.Connection], T]) -> T:
+        try:
+            return await self._db.read(read)
+        except listing.InvalidCursor:
+            raise Refused("bad_payload", "cursor") from None
 
     async def activity(self) -> list[SubforumActivity]:
         def read(conn: sqlite3.Connection) -> list[SubforumActivity]:
@@ -612,6 +662,37 @@ def _bounded_line(payload: Mapping[str, Any], field: str, maximum: int, *, requi
     if (required and not value) or len(value) > maximum or any(ch in value for ch in "\r\n"):
         raise Refused("bad_payload", field)
     return value
+
+
+def _unread_snapshot(conn: sqlite3.Connection, principal: str) -> tuple[int, int]:
+    row = conn.execute(
+        "SELECT COALESCE(MAX(m.post_id), 0), COUNT(*) FROM mentions m "
+        "LEFT JOIN mention_reads r ON r.post_id = m.post_id AND r.principal = m.principal "
+        "WHERE m.principal = ? AND r.post_id IS NULL",
+        (principal,),
+    ).fetchone()
+    return row[0], row[1]
+
+
+def _room_activity(conn: sqlite3.Connection, row: sqlite3.Row) -> SubforumActivity:
+    slug = row["slug"]
+    counts = conn.execute(
+        "SELECT COUNT(DISTINCT t.id), COUNT(p.id) FROM threads t "
+        "LEFT JOIN posts p ON p.thread_id = t.id WHERE t.subforum = ?",
+        (slug,),
+    ).fetchone()
+    latest = conn.execute(
+        "SELECT t.id, t.title, p.author, p.author_kind, p.created_at FROM threads t "
+        "JOIN posts p ON p.thread_id = t.id WHERE t.subforum = ? "
+        "ORDER BY p.created_at DESC, p.id DESC LIMIT 1",
+        (slug,),
+    ).fetchone()
+    return SubforumActivity(
+        _subforum(row),
+        counts[0],
+        counts[1],
+        None if latest is None else LatestPost(latest[0], latest[1], latest[2], latest[3], latest[4]),
+    )
 
 
 def _find_subforum(conn: sqlite3.Connection, slug: str) -> Subforum:

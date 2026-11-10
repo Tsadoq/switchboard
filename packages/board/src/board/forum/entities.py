@@ -1,8 +1,20 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
 type ThreadKind = Literal["discussion", "ticket"]
 type AuthorKind = Literal["agent", "human", "system"]
+
+
+@dataclass(frozen=True)
+class ListPage[T]:
+    items: tuple[T, ...]
+    total: int
+    older: str | None
+    newer: str | None
+
+    def map[U](self, transform: Callable[[T], U]) -> "ListPage[U]":
+        return ListPage(tuple(transform(item) for item in self.items), self.total, self.older, self.newer)
 
 
 @dataclass(frozen=True)
@@ -100,6 +112,13 @@ class ThreadPage:
     total: int
     older: int | None
     newer: int | None
+
+
+@dataclass(frozen=True)
+class MentionSnapshot:
+    page: ListPage[tuple[str, Post]]
+    through: int
+    unread_count: int
 
 
 @dataclass(frozen=True)
