@@ -129,9 +129,35 @@ def main() -> None:
                 assert page.locator("article.post").first.get_attribute("id") == "post-31"
                 page.evaluate("window.scrollTo(0, 0)")
                 page.screenshot(path="/tmp/switchboard-thread-pagination.png")
+                with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+                    for number in range(105):
+                        thread_id = conn.execute(
+                            "INSERT INTO threads (subforum, title, kind, created_by, created_at) "
+                            "VALUES ('tickets', ?, 'ticket', 'human', ?)",
+                            (f"Ticket {number:03}", number),
+                        ).lastrowid
+                        conn.execute(
+                            'INSERT INTO tickets (title, "column", thread_id, created_by, created_at, updated_at) '
+                            "VALUES (?, 'done', ?, 'human', ?, ?)",
+                            (f"Ticket {number:03}", thread_id, number, number),
+                        )
+                page.goto("https://board.test/tickets")
+                assert page.locator("article.ticket").count() == 20
+                assert page.locator("#column-done .count").inner_text() == "105"
+                page.get_by_role("link", name="View all done").click()
+                assert page.locator("article.ticket").count() == 50
+                assert page.locator("article.ticket").first.get_attribute("id") == "ticket-105"
+                page.get_by_role("link", name="Older tickets").click()
+                assert page.locator("article.ticket").first.get_attribute("id") == "ticket-55"
+                assert "column=done" in page.url
+                page.get_by_role("link", name="Newer tickets").click()
+                assert page.locator("article.ticket").first.get_attribute("id") == "ticket-105"
+                page.set_viewport_size({"width": 390, "height": 844})
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                page.screenshot(path="/tmp/switchboard-ticket-pagination.png")
                 browser.close()
     print(
-        "Thread pagination browser checks passed: bounded DOM, retries, batch draining, stop, older pages and legacy history"
+        "Thread and ticket pagination browser checks passed: bounded updates, retry/drain/history and filtered ticket navigation"
     )
 
 

@@ -19,26 +19,12 @@
 </details>
 <div id="columns" class="kanban" hx-get="/tickets/columns" hx-trigger="every 10s" hx-swap="innerHTML">
 {% block columns %}
-  {% for column, column_tickets in board.items() %}
+  {% from "tickets/card.html" import card %}
+  {% for column, page in board.items() %}
   <section class="column" id="column-{{ column }}">
-    <h2>{{ column }} <span class="count">{{ column_tickets | length }}</span></h2>
-    {% for ticket in column_tickets %}
-    <article class="ticket" id="ticket-{{ ticket.id }}">
-      <a href="/t/{{ ticket.thread_id }}">#{{ ticket.id }} {{ ticket.title }}</a>
-      <p class="assignee">{{ ticket.assignee or "unassigned" }}</p>
-      {% if ticket.assignee %}
-      <form method="post" action="/tickets/{{ ticket.id }}/release"><button type="submit">Release</button></form>
-      {% else %}
-      <form method="post" action="/tickets/{{ ticket.id }}/claim"><button type="submit">Claim</button></form>
-      {% endif %}
-      <form class="move" method="post" action="/tickets/{{ ticket.id }}/move">
-        <select name="column" aria-label="Move #{{ ticket.id }} to">
-          {% for target in board if target != column %}<option value="{{ target }}">{{ target }}</option>{% endfor %}
-        </select>
-        <button type="submit">Move</button>
-      </form>
-    </article>
-    {% endfor %}
+    <h2>{{ column }} <span class="count">{{ page.total }}</span></h2>
+    <p>Showing {{ page.tickets | length }} of {{ page.total }}. <a href="/tickets/list?column={{ column }}">View all {{ column }}</a></p>
+    {% for ticket in page.tickets %}{{ card(ticket, board) }}{% endfor %}
   </section>
   {% endfor %}
 {% endblock %}

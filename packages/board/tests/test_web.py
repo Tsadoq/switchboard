@@ -6,6 +6,7 @@ import time
 from collections.abc import Iterator
 from contextlib import closing
 from datetime import datetime, timedelta
+from html import unescape
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1026,6 +1027,128 @@ def test_web_post_permalink_contains_target(
         assert shown == (ids[-50:] if post_id in ids[-50:] else [i for i in ids if i <= post_id][-50:])
     assert browser.get("/p/999999").status_code == 404
     assert 'src="/static/thread.js"' in _page(browser, f"/t/{thread_id}")
+
+
+def _seed_tickets(settings: Settings, count: int, column: str = "done") -> list[int]:
+    ids = []
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        for number in range(count):
+            title = f"{column} item {number:03}"
+            thread_id = conn.execute(
+                "INSERT INTO threads (subforum, title, kind, created_by, created_at) "
+                "VALUES ('tickets', ?, 'ticket', 'human', ?)",
+                (title, number),
+            ).lastrowid
+            conn.execute(
+                "INSERT INTO posts (thread_id, author, author_kind, body, created_at) "
+                "VALUES (?, 'human', 'human', 'description', ?)",
+                (thread_id, number),
+            )
+            ticket_id = conn.execute(
+                'INSERT INTO tickets (title, "column", assignee, thread_id, created_by, created_at, updated_at) '
+                "VALUES (?, ?, ?, ?, 'human', ?, ?)",
+                (title, column, "pi@testbox" if number % 2 else None, thread_id, number, number),
+            ).lastrowid
+            assert ticket_id is not None
+            ids.append(ticket_id)
+    return ids
+
+
+def test_ticket_board_bounds_every_column_and_shows_full_counts(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    _seed_tickets(settings, 23, "doing")
+    _seed_tickets(settings, 23, "done")
+    for path in ("/tickets", "/tickets/columns"):
+        html = _page(browser, path)
+        assert len(re.findall(r'<article class="ticket"', html)) == 40
+        assert 'doing <span class="count">23</span>' in html
+        assert 'done <span class="count">23</span>' in html
+        assert "doing item 000" not in html and "done item 000" not in html
+        assert 'href="/tickets/list?column=doing"' in html
+        assert 'href="/tickets/list?column=done"' in html
+
+
+def test_ticket_history_pages_preserve_filters_and_direction(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    ids = _seed_tickets(settings, 105)
+    _seed_tickets(settings, 4, "doing")
+    page = _page(browser, "/tickets/list?column=done&assignee=pi%40testbox")
+    expected = list(reversed(ids[1::2]))
+    assert re.findall(r'<article class="ticket" id="ticket-(\d+)"', page) == [str(i) for i in expected[:50]]
+    older = re.search(r'href="([^"]+)"[^>]*>Older tickets', page)
+    assert older is not None
+    older_url = unescape(older[1])
+    assert "column=done" in older_url and "assignee=pi%40testbox" in older_url
+    tail = _page(browser, older_url)
+    assert re.findall(r'<article class="ticket" id="ticket-(\d+)"', tail) == [str(i) for i in expected[50:]]
+    newer = re.search(r'href="([^"]+)"[^>]*>Newer tickets', tail)
+    assert newer is not None
+    assert re.findall(r'<article class="ticket" id="ticket-(\d+)"', _page(browser, unescape(newer[1]))) == [
+        str(i) for i in expected[:50]
+    ]
+    assert 'hx-trigger="every 10s"' not in page
+
+
+def test_ticket_history_preserves_legacy_api_and_validates_bounds(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    ids = _seed_tickets(settings, 51)
+    assert [ticket["id"] for ticket in _read(browser, "/api/tickets")] == ids
+    assert browser.get("/tickets/list?before=-1").status_code == 422
+    assert browser.get("/tickets/list?before=1&after=2").status_code == 400
+    assert browser.get("/tickets/list?column=unknown").status_code == 400
+    empty = _page(browser, "/tickets/list?before=0&column=done")
+    assert "Latest" in empty and "No tickets" in empty
+
+
+def test_ticket_older_page_is_not_shifted_by_new_tickets(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    ids = _seed_tickets(settings, 51)
+    first = _page(browser, "/tickets/list?column=done")
+    older = re.search(r'href="([^"]+)"[^>]*>Older tickets', first)
+    assert older is not None
+    _seed_tickets(settings, 3)
+    tail = _page(browser, unescape(older[1]))
+    assert re.findall(r'<article class="ticket" id="ticket-(\d+)"', tail) == [str(ids[0])]
+    assert "54 matching tickets" in tail
+
+
+def test_ticket_preview_queries_are_bounded_and_indexed(
+    browser: TestClient, human_password: str, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from board import db
+
+    _log_in(browser, human_password)
+    _seed_tickets(settings, 60)
+    statements: list[str] = []
+    original = db.connect
+
+    def traced(path: Path) -> sqlite3.Connection:
+        conn = original(path)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(db, "connect", traced)
+    _page(browser, "/tickets/columns")
+    reads = [sql for sql in statements if sql.startswith('SELECT id, title, "column"')]
+    assert len(reads) == 5 and all("LIMIT 20" in sql for sql in reads)
+    with closing(sqlite3.connect(settings.db_path)) as conn:
+        for predicate, args, index in [
+            ('"column" = ?', ("done",), "tickets_column_id"),
+            ("assignee = ?", ("pi@testbox",), "tickets_assignee_id"),
+            ('"column" = ? AND assignee = ?', ("done", "pi@testbox"), "tickets_column_assignee_id"),
+        ]:
+            plan = conn.execute(
+                f"EXPLAIN QUERY PLAN SELECT id FROM tickets WHERE {predicate} ORDER BY id DESC LIMIT 20", args
+            ).fetchall()
+            assert any(index in row[3] for row in plan), plan
 
 
 def test_reply_permalink_preserves_preceding_conversation(

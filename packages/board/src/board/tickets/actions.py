@@ -43,6 +43,14 @@ class Ticket:
     done_at: float | None
 
 
+@dataclass(frozen=True)
+class TicketPage:
+    tickets: tuple[Ticket, ...]
+    total: int
+    older: int | None
+    newer: int | None
+
+
 type _Edit = Callable[[Ticket], tuple[Ticket, str] | None]
 
 
@@ -124,6 +132,30 @@ class Tickets:
 
         return await self._db.read(read)
 
+    async def page(
+        self,
+        *,
+        column: str | None = None,
+        assignee: str | None = None,
+        before: int | None = None,
+        after: int | None = None,
+        limit: int = 50,
+    ) -> TicketPage:
+        if column is not None:
+            _column(column)
+        if not 1 <= limit <= 200:
+            raise Refused("bad_payload", "limit")
+        if before is not None and after is not None:
+            raise Refused("bad_payload", "cursor")
+        if any(cursor is not None and not 0 <= cursor <= 2**63 - 1 for cursor in (before, after)):
+            raise Refused("bad_payload", "cursor")
+        return await self._db.read(lambda conn: _page(conn, column, assignee, before, after, limit))
+
+    async def previews(self) -> dict[str, TicketPage]:
+        return await self._db.read(
+            lambda conn: {column: _page(conn, column, None, None, None, 20) for column in COLUMNS}
+        )
+
     async def for_thread(self, thread_id: int) -> Ticket | None:
         def read(conn: sqlite3.Connection) -> Ticket | None:
             row = conn.execute(f"{_TICKET_SELECT} WHERE thread_id = ?", (thread_id,)).fetchone()
@@ -154,6 +186,47 @@ class Tickets:
         if note is not None:
             await self._forum.post(principal, "system", ThreadTarget(ticket.thread_id), {"body": note})
         return ticket
+
+
+def _page(
+    conn: sqlite3.Connection,
+    column: str | None,
+    assignee: str | None,
+    before: int | None,
+    after: int | None,
+    limit: int,
+) -> TicketPage:
+    filters = ["1 = 1"]
+    values: list[str | int] = []
+    if column is not None:
+        filters.append('"column" = ?')
+        values.append(column)
+    if assignee is not None:
+        filters.append("assignee = ?")
+        values.append(assignee)
+    where = " AND ".join(filters)
+    bounds = " AND id < ?" if before is not None else " AND id > ?" if after is not None else ""
+    cursor = before if before is not None else after
+    params = [*values, *([] if cursor is None else [cursor]), limit]
+    direction = "ASC" if after is not None else "DESC"
+    rows = conn.execute(
+        f"{_TICKET_SELECT} WHERE {where}{bounds} ORDER BY id {direction} LIMIT ?", params
+    ).fetchall()
+    if after is not None:
+        rows.reverse()
+    tickets = tuple(_ticket(row) for row in rows)
+    total = conn.execute(f"SELECT COUNT(*) FROM tickets WHERE {where}", values).fetchone()[0]
+    older = newer = None
+    if tickets:
+        if conn.execute(
+            f"SELECT 1 FROM tickets WHERE {where} AND id < ? LIMIT 1", (*values, tickets[-1].id)
+        ).fetchone():
+            older = tickets[-1].id
+        if conn.execute(
+            f"SELECT 1 FROM tickets WHERE {where} AND id > ? LIMIT 1", (*values, tickets[0].id)
+        ).fetchone():
+            newer = tickets[0].id
+    return TicketPage(tickets, total, older, newer)
 
 
 def _column(value: object) -> str:

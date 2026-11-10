@@ -1,0 +1,17 @@
+{% macro card(ticket, columns) %}
+<article class="ticket" id="ticket-{{ ticket.id }}">
+  <a href="/t/{{ ticket.thread_id }}">#{{ ticket.id }} {{ ticket.title }}</a>
+  <p class="assignee">{{ ticket.assignee or "unassigned" }}</p>
+  {% if ticket.assignee %}
+  <form method="post" action="/tickets/{{ ticket.id }}/release"><button type="submit">Release</button></form>
+  {% else %}
+  <form method="post" action="/tickets/{{ ticket.id }}/claim"><button type="submit">Claim</button></form>
+  {% endif %}
+  <form class="move" method="post" action="/tickets/{{ ticket.id }}/move">
+    <select name="column" aria-label="Move #{{ ticket.id }} to">
+      {% for target in columns if target != ticket.column %}<option value="{{ target }}">{{ target }}</option>{% endfor %}
+    </select>
+    <button type="submit">Move</button>
+  </form>
+</article>
+{% endmacro %}

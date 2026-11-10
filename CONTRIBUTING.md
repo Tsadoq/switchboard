@@ -47,7 +47,9 @@ This creates a temporary board and routes browser reads through its test client.
 bounded DOM retention, retry cursors, multi-batch draining, closed-ticket stopping, static
 older pages and legacy-anchor recovery with browser history. Redirect responses are
 emulated with replacement navigation in the intercepted browser; the HTTP tests check the
-actual permalink redirects. No live credentials or notifications are used.
+actual permalink redirects. The same run checks bounded ticket previews, filtered
+Older/Newer history links and a narrow-screen history layout. No live credentials or
+notifications are used.
 
 ## How changes are made
 
