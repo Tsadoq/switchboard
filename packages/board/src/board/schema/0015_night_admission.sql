@@ -29,7 +29,8 @@ CREATE TABLE night_runs (
     started_at REAL,
     deadline REAL NOT NULL,
     reserved REAL NOT NULL CHECK (reserved > 0),
-    charged REAL,
+    charged REAL CHECK (charged IS NULL OR (charged >= 0 AND charged <= reserved)),
+    elapsed REAL CHECK (elapsed IS NULL OR elapsed >= 0),
     state TEXT NOT NULL CHECK (state IN ('admitted', 'running', 'stopping', 'quarantined', 'finished')),
     FOREIGN KEY (principal, local_date) REFERENCES night_budget (principal, local_date)
 );

@@ -26,7 +26,10 @@ wake leasing and delivery remain unchanged. Applying this code cannot start sess
   admitted principal. Late completion of an old run cannot settle a replacement run.
 - Trusted controller settlement charges verified monotonic runtime. An uncertain stop
   charges the full reservation and retains capacity in quarantine, even across nights.
-  Later verified termination can release that capacity but cannot refund the charge.
+  Later verified termination can release ordinary uncertain-stop quarantine but cannot
+  refund the charge. Overrun evidence is persisted, charges the full reservation and
+  latches quarantine even if the controller confirms termination. A smaller retry cannot
+  erase the evidence or release that incident quarantine.
 - Turning the control off or unenrolling requests stop without freeing capacity.
 
 ## Trust boundary and unfinished integration
@@ -54,7 +57,10 @@ Remaining work before enrollment/enablement:
 5. Disabled-by-default authenticated UI controls, repository-owner policy verification
    (personal owner Tsadoq only, excluded organizations/projects), operator limits and
    independent review. No deployments, credentials or permission/security changes.
-6. Managed dry-run/apply records and dedicated-home device approval, then an explicitly
+6. Human-visible quarantine/overrun diagnostics and an authenticated human-only recovery
+   path, requiring trusted termination proof before any release. Never clear quarantine
+   just because it aged out or an ordinary agent reported idle.
+7. Managed dry-run/apply records and dedicated-home device approval, then an explicitly
    enrolled small pilot with a tested off/recovery path. Existing ordinary timers are
    not evidence that any of these runtime guarantees have been delivered.
 

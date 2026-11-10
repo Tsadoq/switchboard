@@ -59,6 +59,7 @@ class Run:
     started_at: float | None
     deadline: float
     reserved: float
+    elapsed: float | None
     state: str
 
 
@@ -163,20 +164,23 @@ class NightAdmission:
     async def settle(self, principal: str, run_id: str, fence: str, *, elapsed: float, stopped: bool) -> Run:
         def write(conn: sqlite3.Connection) -> Run:
             run = _fenced(conn, principal, run_id, fence)
-            if not math.isfinite(elapsed) or not 0 <= elapsed <= run.reserved:
+            if not math.isfinite(elapsed) or elapsed < 0:
                 raise AdmissionDenied("invalid_elapsed")
             if run.state == "finished":
                 return run
+            measured = max(elapsed, run.elapsed or 0)
+            overran = measured > run.reserved
             charged = conn.execute("SELECT charged FROM night_runs WHERE id = ?", (run_id,)).fetchone()[0]
             if charged is None:
-                charged = elapsed if stopped else run.reserved
+                charged = measured if stopped and not overran else run.reserved
                 conn.execute(
                     "UPDATE night_budget SET reserved = reserved - ?, spent = spent + ? WHERE principal = ? AND local_date = ?",
                     (run.reserved, charged, principal, run.local_date),
                 )
-            state = "finished" if stopped else "quarantined"
+            state = "finished" if stopped and not overran else "quarantined"
             conn.execute(
-                "UPDATE night_runs SET charged = ?, state = ? WHERE id = ?", (charged, state, run_id)
+                "UPDATE night_runs SET charged = ?, elapsed = ?, state = ? WHERE id = ?",
+                (charged, measured, state, run_id),
             )
             return _find(conn, run_id)
 
@@ -260,5 +264,6 @@ def _run(row: sqlite3.Row) -> Run:
         row["started_at"],
         row["deadline"],
         row["reserved"],
+        row["elapsed"],
         row["state"],
     )

@@ -144,7 +144,36 @@ async def test_restart_and_late_completion_cannot_release_another_run(
     with pytest.raises(AdmissionDenied, match="capacity"):
         await restarted.admit("claude@dev", now + 201)
     with pytest.raises(AdmissionDenied, match="invalid_elapsed"):
-        await restarted.settle(second.principal, second.id, second.fence, elapsed=1201, stopped=True)
+        await restarted.settle(second.principal, second.id, second.fence, elapsed=-1, stopped=True)
+
+
+@pytest.mark.parametrize("stopped", [False, True])
+async def test_overrun_is_recorded_and_quarantine_cannot_be_cleared_by_a_retry(
+    admission: NightAdmission, tmp_path: Path, stopped: bool
+) -> None:
+    await enable(admission, "pi@dev", "claude@dev")
+    now = instant("2026-11-11T00:30:00+00:00")
+    run = await admission.admit("pi@dev", now)
+    overrun = await admission.settle(run.principal, run.id, run.fence, elapsed=1201, stopped=stopped)
+    assert overrun.state == "quarantined" and overrun.elapsed == 1201
+    retry = await admission.settle(run.principal, run.id, run.fence, elapsed=0, stopped=True)
+    assert retry == overrun
+    with closing(connect(tmp_path / "board.db")) as conn:
+        budget = conn.execute("SELECT spent, reserved FROM night_budget").fetchone()
+        assert tuple(budget) == (1200, 0)
+    with pytest.raises(AdmissionDenied, match="capacity"):
+        await admission.admit("claude@dev", now + 1300)
+
+
+@pytest.mark.parametrize("elapsed", [float("nan"), float("inf"), float("-inf"), -1])
+async def test_invalid_elapsed_never_changes_or_releases_a_run(
+    admission: NightAdmission, elapsed: float
+) -> None:
+    await enable(admission, "pi@dev")
+    run = await admission.admit("pi@dev", instant("2026-11-11T00:30:00+00:00"))
+    with pytest.raises(AdmissionDenied, match="invalid_elapsed"):
+        await admission.settle(run.principal, run.id, run.fence, elapsed=elapsed, stopped=True)
+    assert await admission.run(run.id) == run
 
 
 async def test_initial_outbox_and_claim_roll_back_together(admission: NightAdmission, tmp_path: Path) -> None:
