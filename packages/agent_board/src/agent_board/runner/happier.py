@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 SESSION_NOT_FOUND = "session_not_found"
+SESSION_ARCHIVED = "session_archived"
+_SESSION_GONE = (SESSION_NOT_FOUND, SESSION_ARCHIVED)
 HOME_DIR_ENV = "HAPPIER_HOME_DIR"
 TIMEOUT_SECONDS = 60
 _REDACTED = "<redacted>"
@@ -100,6 +102,25 @@ class Happier:
 
     def send(self, session_id: str, message: str, model: str | None = None) -> None:
         self._envelope("session", "send", session_id, _Body(message), *_model_flag(model), "--json")
+
+    def archive(self, session_id: str) -> None:
+        try:
+            self._envelope("session", "archive", session_id, "--json")
+        except HappierError as error:
+            if error.code not in _SESSION_GONE:
+                raise
+
+    def idle(self, session_id: str, timeout: int = 3) -> bool:
+        """`status` cannot see a running turn (probe 5), so only `wait` can answer this."""
+        try:
+            data = self._envelope("session", "wait", session_id, "--timeout", str(timeout), "--json")
+        except HappierError as error:
+            if error.code == "timeout":
+                return False
+            if error.code in _SESSION_GONE:
+                return True
+            raise
+        return isinstance(data, dict) and data.get("idle") is True
 
     def notify(self, title: str, message: str) -> None:
         completed = self._run("notify", "-p", _Body(message), "-t", title)

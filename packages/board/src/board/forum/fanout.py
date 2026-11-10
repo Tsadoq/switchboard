@@ -8,6 +8,8 @@ class WakeRequest:
     reason: str
     source_ref: str
     summary: str
+    thread_id: int | None = None
+    topic_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -20,6 +22,7 @@ class ForumEvent:
     author: str
     post_id: int
     thread_id: int
+    topic_id: int
     thread_title: str
     subforum: str
     mentioned: frozenset[str]
@@ -32,8 +35,20 @@ def wake_requests(event: ForumEvent, followers: AbstractSet[str]) -> list[WakeRe
     following = sorted(followers - event.mentioned - {event.author})
     return [
         *(
-            WakeRequest(p, "mention", source_ref, f"{event.author} mentioned you in {where}")
+            WakeRequest(
+                p,
+                "mention",
+                source_ref,
+                f"{event.author} mentioned you in {where}",
+                event.thread_id,
+                event.topic_id,
+            )
             for p in mentioned
         ),
-        *(WakeRequest(p, "follow", source_ref, f"{event.author} posted in {where}") for p in following),
+        *(
+            WakeRequest(
+                p, "follow", source_ref, f"{event.author} posted in {where}", event.thread_id, event.topic_id
+            )
+            for p in following
+        ),
     ]

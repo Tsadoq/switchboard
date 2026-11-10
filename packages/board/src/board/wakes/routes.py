@@ -60,4 +60,6 @@ def _wake_json(wake: Wake) -> dict[str, Any]:
         "summary": wake.summary,
         "created_at": rfc3339(wake.created_at),
         "leased_until": rfc3339(wake.leased_until),
+        "thread_id": wake.thread_id,
+        "topic_id": wake.topic_id,
     }

@@ -1,28 +1,28 @@
-import json
 import logging
 import queue
 import re
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import datetime
 from typing import Any, Final, Literal, NoReturn
 
 from agent_board.client import BoardError, BoardUnreachable, Client
-from agent_board.identity import Identity, ensure_state_dir, state_dir
-from agent_board.runner import remote_control
-from agent_board.runner.config import REMOTE_CONTROL, KindConfig, RunnerConfig
-from agent_board.runner.happier import TIMEOUT_SECONDS, Happier, HappierError, Session
+from agent_board.identity import Identity, ensure_state_dir
+from agent_board.runner.config import KindConfig, RunnerConfig
+from agent_board.runner.happier import TIMEOUT_SECONDS, Happier, HappierError
 from agent_board.runner.remote_control import RemoteControlError
+from agent_board.runner.sessions import KIND_KEY, NOTIFY_TITLE, SessionPool, topic_key, warn_human
 from agent_board.runner.weekly import WeeklyClock
 
-SESSION_FILE = "runner-session.json"
-NOTIFY_TITLE = "agent board"
 MY_INBOX: Final = "me"
 HUMAN_INBOX: Final = "human"
 TIMER_REASON: Final = "timer"
 WEEKLY_REASON: Final = "weekly"
 WEEKLY_FILE = "runner-weekly.json"
+HOUSEKEEP_SECONDS = 60
+_THREAD_SCOPE = "thread"
+_SCHEDULED_REASONS = (TIMER_REASON, WEEKLY_REASON)
 _MODEL_PRIORITY = (WEEKLY_REASON, "mention", "follow", TIMER_REASON)
 _ALREADY_ACKED = (
     "The runner has already acknowledged these wakes, so `agent-board inbox` will not list them "
@@ -51,7 +51,9 @@ logger = logging.getLogger(__name__)
 
 type Wake = dict[str, Any]
 type InboxPrincipal = Literal["me", "human"]
-type Deliver = Callable[[list[Wake]], Sequence[int | None]]
+# Yields each group's ids once delivered, or [] for a group left leased, so the inbox can stop at the
+# lease deadline between any two groups.
+type Deliver = Callable[[list[Wake]], Iterator[list[int | None]]]
 
 
 def prompt_for(wakes: Sequence[Wake]) -> str:
@@ -62,6 +64,18 @@ def prompt_for(wakes: Sequence[Wake]) -> str:
     if any(wake["reason"] == WEEKLY_REASON for wake in wakes):
         sentences.append(_WEEKLY_REVIEW)
     return " ".join(sentences)
+
+
+def session_key(wake: Wake, scope: str) -> str | None:
+    """The `SessionPool` key a wake is delivered under; None means a one-shot session."""
+    if scope != _THREAD_SCOPE:
+        return KIND_KEY
+    if wake["reason"] in _SCHEDULED_REASONS:
+        return None
+    if (topic := wake.get("topic_id")) is not None:
+        return topic_key(topic)
+    thread = _thread_in(wake["summary"])
+    return None if thread is None else topic_key(thread)
 
 
 def model_for(wakes: Sequence[Wake], models: Mapping[str, str]) -> str | None:
@@ -92,23 +106,6 @@ def run_forever(cfg: RunnerConfig, clients: Mapping[Identity, Client], happier: 
     raise failures.get()
 
 
-def open_session(
-    settings: KindConfig, me: Identity, happier: Happier, prompt: str, model: str | None = None
-) -> Session:
-    session = happier.create(
-        backend=settings.backend,
-        path=settings.workdir,
-        tag=f"board-{me.kind}",
-        title=f"agent board: {me.principal}",
-        prompt=prompt,
-        permission_mode=settings.permission_mode,
-        model=model,
-    )
-    (ensure_state_dir(me.kind) / SESSION_FILE).write_text(json.dumps({"session_id": session.id}))
-    logger.info("%s: opened session %s", me.principal, session.id)
-    return session
-
-
 class _Inbox:
     def __init__(
         self,
@@ -118,6 +115,7 @@ class _Inbox:
         deliver: Deliver,
         coalesce_seconds: float = 0,
         scheduled: Callable[[], list[Wake]] | None = None,
+        housekeep: Callable[[], None] | None = None,
     ) -> None:
         self.label = label
         self._client = client
@@ -125,23 +123,36 @@ class _Inbox:
         self._deliver = deliver
         self._coalesce_seconds = coalesce_seconds
         self._scheduled = scheduled
+        self._housekeep = housekeep
+        self._housekept_at: float | None = None
 
     def drain(self) -> None:
         wakes: list[Wake] = []
         while leased := self._poll(0):
             wakes += leased
-        self._deliver_then_ack(wakes)
+        self._deliver_then_ack(wakes, deadline=float("inf"))
 
     def serve(self, poll_wait: float) -> NoReturn:
         while True:
             try:
-                self._deliver_then_ack(self._gather(poll_wait))
+                self._housekeep_when_due()
+                wakes = self._gather(poll_wait)
+                self._deliver_then_ack(wakes, _delivery_deadline(wakes))
             except (BoardError, BoardUnreachable) as error:
                 logger.warning("%s: %s; retrying in %ds", self.label, error, _RETRY_SECONDS)
                 time.sleep(_RETRY_SECONDS)
             except Exception:
                 logger.exception("%s: unexpected failure; retrying in %ds", self.label, _RETRY_SECONDS)
                 time.sleep(_RETRY_SECONDS)
+
+    def _housekeep_when_due(self) -> None:
+        if self._housekeep is None:
+            return
+        now = time.monotonic()
+        if self._housekept_at is not None and now - self._housekept_at < HOUSEKEEP_SECONDS:
+            return
+        self._housekept_at = now
+        self._housekeep()
 
     def _gather(self, poll_wait: float) -> list[Wake]:
         wakes = self._poll(poll_wait)
@@ -154,21 +165,26 @@ class _Inbox:
         leased: list[Wake] = self._client.get("/api/wakes", wait=wait, principal=self._principal)
         return leased
 
-    def _deliver_then_ack(self, wakes: list[Wake]) -> None:
+    def _deliver_then_ack(self, wakes: list[Wake], deadline: float) -> None:
+        """Ack each delivered group at once; past `deadline` (monotonic) the remaining groups stay leased."""
         if self._scheduled is not None:
             wakes = wakes + self._scheduled()
         if not wakes:
             return
-        delivered = [wake_id for wake_id in self._deliver(wakes) if wake_id is not None]
-        if delivered:
-            self._client.post("/api/wakes/ack", {"ids": delivered, "principal": self._principal})
+        for group in self._deliver(wakes):
+            delivered = [wake_id for wake_id in group if wake_id is not None]
+            if delivered:
+                self._client.post("/api/wakes/ack", {"ids": delivered, "principal": self._principal})
+            if time.monotonic() > deadline:
+                return
 
 
 class _AgentWaker:
-    def __init__(self, settings: KindConfig, me: Identity, happier: Happier) -> None:
+    def __init__(self, settings: KindConfig, me: Identity, happier: Happier, sessions: SessionPool) -> None:
         self._settings = settings
         self._me = me
         self._happier = happier
+        self._sessions = sessions
         self._weekly = (
             None
             if settings.weekly is None
@@ -180,46 +196,28 @@ class _AgentWaker:
             return []
         return [{"id": None, "reason": WEEKLY_REASON, "summary": _WEEKLY_SUMMARY}]
 
-    def __call__(self, wakes: list[Wake]) -> list[int]:
-        try:
-            delivered = self._deliver(prompt_for(wakes), model_for(wakes, self._settings.models))
-        except (HappierError, RemoteControlError) as error:
-            _warn_human(
-                self._happier,
-                f"could not wake {self._me.principal} ({error}); {len(wakes)} wake(s) left leased for redelivery",
-            )
-            return []
-        if not delivered:
-            return []
-        if self._weekly is not None and any(wake["reason"] == WEEKLY_REASON for wake in wakes):
-            self._weekly.mark(time.time())
-        return [wake["id"] for wake in wakes]
+    def __call__(self, wakes: list[Wake]) -> Iterator[list[int | None]]:
+        wall_clock_deadline = _wall_clock_deadline(wakes)
+        groups: dict[str | None, list[Wake]] = {}
+        for wake in wakes:
+            groups.setdefault(session_key(wake, self._settings.session_scope), []).append(wake)
+        for key, group in groups.items():
+            yield [wake["id"] for wake in group] if self._deliver(key, group, wall_clock_deadline) else []
 
-    def _deliver(self, prompt: str, model: str | None) -> bool:
-        recorded = _recorded_session(self._me.kind)
-        state = None if recorded is None else self._happier.status(recorded)
-        if recorded is not None and state is not None and state.active:
-            if state.busy:
-                logger.info(
-                    "%s: session %s is busy; wakes left leased for redelivery", self._me.principal, recorded
-                )
-                return False
-            self._happier.send(recorded, prompt, model)
-            logger.info(
-                "%s: sent wakes to session %s (model %s)", self._me.principal, recorded, model or "default"
-            )
-            return True
+    def _deliver(self, key: str | None, group: list[Wake], wall_clock_deadline: float) -> bool:
         try:
-            open_session(self._settings, self._me, self._happier, prompt, model)
-        except HappierError as error:
-            fallback_allowed = model is None and self._settings.fallback == REMOTE_CONTROL
-            if not fallback_allowed or not remote_control.serves(self._me.kind):
-                raise
-            logger.warning(
-                "%s: create failed (%s); falling back to remote control", self._me.principal, error
+            delivered = self._sessions.deliver(
+                key, prompt_for(group), model_for(group, self._settings.models), wall_clock_deadline
             )
-            remote_control.start(self._settings.workdir, f"board-{self._me.kind}", prompt)
-        return True
+        except (HappierError, RemoteControlError) as error:
+            warn_human(
+                self._happier,
+                f"could not wake {self._me.principal} ({error}); {len(group)} wake(s) left leased for redelivery",
+            )
+            return False
+        if delivered and self._weekly is not None and any(wake["reason"] == WEEKLY_REASON for wake in group):
+            self._weekly.mark(time.time())
+        return delivered
 
 
 class _HumanNotifier:
@@ -227,20 +225,20 @@ class _HumanNotifier:
         self._happier = happier
         self._board_url = board_url.rstrip("/")
 
-    def __call__(self, wakes: list[Wake]) -> list[int]:
+    def __call__(self, wakes: list[Wake]) -> Iterator[list[int | None]]:
         try:
             self._happier.notify(NOTIFY_TITLE, human_digest(wakes, self._board_url))
         except HappierError as error:
             logger.warning("could not notify the human of %d wake(s): %s", len(wakes), error)
-            return []
-        return [wake["id"] for wake in wakes]
+            return
+        yield [wake["id"] for wake in wakes]
 
 
 def human_digest(wakes: Sequence[Wake], board_url: str) -> str:
     if len(wakes) == 1:
         (wake,) = wakes
-        found = _SUMMARY.match(wake["summary"])
-        link = f"{board_url}/t/{found['thread']}" if found else f"{board_url}/mentions"
+        thread = _thread_in(wake["summary"])
+        link = f"{board_url}/t/{thread}" if thread else f"{board_url}/mentions"
         return f"{_fit(wake['summary'])}\n{link}"
     authors_by_thread: dict[str, list[str]] = {}
     count_by_thread: dict[str, int] = {}
@@ -262,6 +260,11 @@ def human_digest(wakes: Sequence[Wake], board_url: str) -> str:
     return f"{_fit(f'{len(wakes)} {noun}s: {", ".join(places)}')}\n{board_url}/mentions"
 
 
+def _thread_in(summary: str) -> str | None:
+    found = _SUMMARY.match(summary)
+    return None if found is None else found["thread"]
+
+
 def _fit(text: str) -> str:
     encoded = text.encode()
     if len(encoded) <= _DIGEST_BYTES:
@@ -277,8 +280,20 @@ def _names(authors: list[str]) -> str:
 def _inboxes(cfg: RunnerConfig, clients: Mapping[Identity, Client], happier: Happier) -> list[_Inbox]:
     inboxes = []
     for me, client in clients.items():
-        waker = _AgentWaker(cfg.kinds[me.kind], me, happier)
-        inboxes.append(_Inbox(me.principal, client, MY_INBOX, waker, cfg.coalesce_seconds, waker.scheduled))
+        settings = cfg.kinds[me.kind]
+        sessions = SessionPool(settings, me, happier)
+        waker = _AgentWaker(settings, me, happier, sessions)
+        inboxes.append(
+            _Inbox(
+                me.principal,
+                client,
+                MY_INBOX,
+                waker,
+                cfg.coalesce_seconds,
+                waker.scheduled,
+                sessions.housekeep,
+            )
+        )
     if cfg.notify_human and clients:
         # The board lets any agent's token lease and ack the human inbox, so the first kind relays it.
         relay_client = next(iter(clients.values()))
@@ -288,10 +303,14 @@ def _inboxes(cfg: RunnerConfig, clients: Mapping[Identity, Client], happier: Hap
 
 
 def _delivery_deadline(wakes: Sequence[Wake]) -> float:
+    """`_wall_clock_deadline` on the `time.monotonic` timebase the inbox waits on."""
+    return time.monotonic() + _wall_clock_deadline(wakes) - time.time()
+
+
+def _wall_clock_deadline(wakes: Sequence[Wake]) -> float:
+    """The `time.time` after which delivering `wakes` may outlast their leases (`SessionPool`'s timebase)."""
     lease_ends = [ends for wake in wakes if (ends := _lease_end(wake)) is not None]
-    if not lease_ends:
-        return float("inf")
-    return time.monotonic() + min(lease_ends) - time.time() - DELIVERY_BUDGET_SECONDS
+    return min(lease_ends, default=float("inf")) - DELIVERY_BUDGET_SECONDS
 
 
 def _lease_end(wake: Wake) -> float | None:
@@ -299,19 +318,3 @@ def _lease_end(wake: Wake) -> float | None:
         return datetime.fromisoformat(wake["leased_until"]).timestamp()
     except (KeyError, TypeError, ValueError):
         return None
-
-
-def _recorded_session(kind: str) -> str | None:
-    try:
-        session_id = json.loads((state_dir(kind) / SESSION_FILE).read_text())["session_id"]
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-    return session_id if isinstance(session_id, str) and session_id else None
-
-
-def _warn_human(happier: Happier, message: str) -> None:
-    logger.warning("%s", message)
-    try:
-        happier.notify(NOTIFY_TITLE, message)
-    except HappierError as error:
-        logger.warning("could not notify the human: %s", error)

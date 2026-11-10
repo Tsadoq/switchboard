@@ -4,6 +4,7 @@ import sqlite3
 import time
 from collections.abc import AsyncIterator, MutableMapping
 from contextlib import asynccontextmanager, closing
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import anyio
@@ -11,6 +12,7 @@ import httpx2
 import pytest
 from board.app import create_app
 from board.constants import HUMAN
+from board.db import SCHEMA_DIR, connect, migrate
 from board.forum.fanout import WakeRequest
 from board.settings import Settings
 from board.wakes import scheduler
@@ -399,6 +401,118 @@ async def test_timer_tick_failure_for_one_principal_does_not_skip_others(
     assert [wake["reason"] for wake in wakes] == ["timer"], (
         f"later principal skipped after a failure: {wakes}"
     )
+
+
+def _insert_threads(settings: Settings, *thread_ids: int) -> None:
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.executemany(
+            "INSERT INTO threads (id, subforum, title, kind, created_by, created_at) "
+            "VALUES (?, 'general', ?, 'discussion', 'claude@testbox', 0)",
+            [(thread_id, f"Thread {thread_id}") for thread_id in thread_ids],
+        )
+
+
+async def _mention_in_thread(
+    client: httpx2.AsyncClient, author: "Signer", thread_id: int, mentioned: "Signer"
+) -> None:
+    r = await _send(client, author, "post", f"thread:{thread_id}", {"body": f"@{mentioned.principal} look"})
+    assert r.status_code == 201, f"post rejected: {r.status_code} {r.text}"
+
+
+async def test_forum_wake_carries_its_thread_and_topic(settings: Settings, signer: "SignerFactory") -> None:
+    claude, pi = signer("claude@testbox"), signer("pi@testbox")
+    async with _running_board(settings) as (app, client):
+        _register(app, claude, pi)
+        headers = await _bearer(client, pi)
+        _insert_threads(settings, 7)
+
+        await _mention_in_thread(client, claude, 7, pi)
+
+        (wake,) = await _poll(client, headers)
+    assert (wake["thread_id"], wake["topic_id"]) == (7, 7), f"wake lost its thread or topic: {wake}"
+
+
+async def test_wake_from_a_new_thread_names_that_thread_as_its_topic(
+    settings: Settings, signer: "SignerFactory"
+) -> None:
+    claude, pi = signer("claude@testbox"), signer("pi@testbox")
+    async with _running_board(settings) as (app, client):
+        _register(app, claude, pi)
+        headers = await _bearer(client, pi)
+        _insert_threads(settings, 7)
+
+        r = await _send(
+            client, claude, "post", "subforum:general", {"title": "Fresh", "body": f"@{pi.principal} look"}
+        )
+
+        assert r.status_code == 201, f"post rejected: {r.status_code} {r.text}"
+        (wake,) = await _poll(client, headers)
+    thread_id = r.json()["thread_id"]
+    assert (wake["thread_id"], wake["topic_id"]) == (thread_id, thread_id), (
+        f"new thread {thread_id} is not its own topic: {wake}"
+    )
+
+
+async def test_wake_topic_follows_the_threads_topic(settings: Settings, signer: "SignerFactory") -> None:
+    claude, pi = signer("claude@testbox"), signer("pi@testbox")
+    async with _running_board(settings) as (app, client):
+        _register(app, claude, pi)
+        headers = await _bearer(client, pi)
+        _insert_threads(settings, 3, 7)
+        with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+            conn.execute("UPDATE threads SET topic_id = 3 WHERE id = 7")
+
+        await _mention_in_thread(client, claude, 7, pi)
+
+        (wake,) = await _poll(client, headers)
+    assert (wake["thread_id"], wake["topic_id"]) == (7, 3), f"wake ignored the thread's topic: {wake}"
+
+
+async def test_timer_wake_has_no_thread_or_topic(settings: Settings, signer: "SignerFactory") -> None:
+    pi = signer("pi@testbox")
+    async with _running_board(settings) as (app, client):
+        _register(app, pi)
+        headers = await _bearer(client, pi)
+        profile = {"display_name": "pi on testbox", "specialities": ["shell"], "wake_every": "PT1H"}
+        r = await _send(client, pi, "introduce", "", profile)
+        assert r.status_code == 200, f"introduce refused: {r.status_code} {r.text}"
+        now = time.time()
+        with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+            conn.execute(
+                "UPDATE profiles SET last_timer_wake_at = ? WHERE principal = ?",
+                (now - 2 * 3600, pi.principal),
+            )
+        await scheduler.tick(app.state.db, _bus(app), now)
+
+        (wake,) = await _poll(client, headers)
+    assert (wake["thread_id"], wake["topic_id"]) == (None, None), f"timer wake named a thread: {wake}"
+
+
+def test_migration_backfills_unacked_post_wakes(tmp_path: Path) -> None:
+    old_schema = tmp_path / "schema"
+    old_schema.mkdir()
+    for script in SCHEMA_DIR.glob("000[1-7]_*.sql"):
+        (old_schema / script.name).write_text(script.read_text())
+    with closing(connect(tmp_path / "board.sqlite3")) as conn:
+        migrate(conn, old_schema)
+        conn.execute("INSERT INTO subforums (slug, title, description) VALUES ('general', 'General', '')")
+        conn.execute("INSERT INTO threads VALUES (7, 'general', 'Old thread', 'discussion', 'alice', 1)")
+        conn.execute(
+            "INSERT INTO posts (id, thread_id, author, author_kind, body, created_at) "
+            "VALUES (40, 7, 'alice', 'agent', '', 1)"
+        )
+        conn.executemany(
+            "INSERT INTO wakes (id, principal, reason, source_ref, summary, created_at) VALUES (?, 'bob', ?, ?, '', 1)",
+            [(1, "mention", "post:40"), (2, "timer", "profile:bob")],
+        )
+
+        migrate(conn)
+
+        rows = {
+            row["id"]: (row["thread_id"], row["topic_id"])
+            for row in conn.execute("SELECT id, thread_id, topic_id FROM wakes")
+        }
+    assert rows == {1: (7, 7), 2: (None, None)}, f"backfill missed or overreached: {rows}"
 
 
 def test_runner_poll_wait_cap_matches_board_cap() -> None:

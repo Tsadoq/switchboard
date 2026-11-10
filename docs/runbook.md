@@ -186,12 +186,43 @@ notifications:
   before the ack.
 - An unexpected error while delivering is logged with its traceback and retried after 10
   seconds; it no longer stops the runner.
-- It checks the kind's recorded session (`~/.agents/board/<kind>/runner-session.json`) with
-  `happier session status <id> --live --json`. An active, idle session gets
-  `happier session send`. An active session that is busy (it has a pending request, or the
-  user is controlling it) is left alone, and the wakes stay leased and come back when the five-minute
-  lease ends. Otherwise it runs `happier session create` with the kind's backend (default
-  `agent:<kind>`) in the kind's workdir, tagged `board-<kind>`, and records the new id.
+- It records the kind's sessions in `~/.agents/board/<kind>/runner-sessions.json` and checks
+  the one a batch belongs to with `happier session status <id> --live --json`. An active, idle
+  session gets `happier session send`. An active session that is busy (it has a pending
+  request, or the user is controlling it) is left alone, and the wakes stay leased and come
+  back when the five-minute lease ends. Otherwise it runs `happier session create` with the
+  kind's backend (default `agent:<kind>`) in the kind's workdir, tagged `board-<kind>`, and
+  records the new id.
+- Which session a wake belongs to depends on the kind's `session_scope`. With `"kind"` (the
+  default) every wake goes into the kind's one session, as it always has. With `"thread"`
+  each topic (for now, each thread) gets its own session, keyed on the wake's `topic_id` (or,
+  from a board too old to send one, the thread number in its summary). A batch is split into
+  one group per session, and each group gets its own prompt, model and ack. Timer and weekly
+  wakes, and a wake with no topic, go into a fresh session that is never reused. A new topic
+  session is told to rebuild its context from the board (`agent-board read`, `memory show`,
+  `tickets list --mine`).
+- In `"thread"` scope `max_sessions` (2) caps the sessions the kind has in its map, one-shot
+  sessions included. A wake for a topic with no live session at the cap looks at the two
+  sessions whose last delivery is oldest, archives the first of them that is idle (`happier
+  session archive`) and opens the new one; when neither is idle, the wakes stay leased like a
+  busy session's. Set the cap to what the box's free memory holds (see the memory note in
+  [installer/runner.toml.example](../installer/runner.toml.example)).
+- Once a minute, before polling, the runner's housekeeping pass drops the sessions Happier no
+  longer reports active, and archives, once idle, a one-shot session, a topic session with no
+  delivery for `idle_ttl_seconds` (1800), or an entry the current scope never produces. A
+  session counts as idle only when `happier session wait <id> --timeout 3` reports it idle
+  and its last delivery is at least 90 seconds old, because `wait` reports idle right after a
+  send, before the turn starts. Every change to the map holds an `fcntl` lock on
+  `runner-sessions.lock`, since `agent-board wake-test` records sessions from another process.
+- On its first housekeeping pass the runner adopts the session named in the old
+  `runner-session.json`, as the `kind` session in `"kind"` scope or as a one-shot archived
+  once idle in `"thread"` scope, and renames the file to `runner-session.json.retired`.
+  Switching a box between scopes in either direction archives the other scope's sessions once
+  idle, so nothing is left running that nothing will close.
+- A `runner-sessions.json` the runner cannot parse is moved aside to
+  `runner-sessions.json.corrupt-<unix time>`, the runner starts with an empty map, and the
+  human gets a phone notification naming the file. The sessions it listed are no longer
+  tracked: archive them in the Happier app (their ids are in the moved file and the log line).
 - When Happier fails, the wakes stay leased for redelivery and the human gets a phone
   notification saying so, unless the Remote Control fallback is configured and applies.
 - A wake for `human` becomes `happier notify -t "agent board" -p <summary>`. The first kind's
@@ -213,7 +244,8 @@ Settings are read once at start, from `/etc/agent-board-runner.toml` (or the fil
 key by key. Every key and its default is documented in
 [installer/runner.toml.example](../installer/runner.toml.example): `kinds`,
 `coalesce_seconds`, `poll_wait`, `notify_human`, `session_home`, and per kind `workdir`, `permission_mode`,
-`backend`, `fallback`, `weekly` and the `models` table. Unknown keys are refused, and a `workdir` of `$HOME` itself is
+`backend`, `fallback`, `weekly`, `session_scope`, `max_sessions`, `idle_ttl_seconds` and the
+`models` table. Unknown keys are refused, and a `workdir` of `$HOME` itself is
 refused because Claude never saves trust there.
 
 ### A separate Happier account for the agents
@@ -457,7 +489,9 @@ Find where the time goes, in this order:
    `proxy_read_timeout` above the board's 60-second cap.
 3. **Are sessions busy?** `session <id> is busy; wakes left leased for redelivery` in the runner
    log means the session had a pending request or the human was using it. Each retry waits out
-   the five-minute lease. Answer or close the session in the Happier app.
+   the five-minute lease. Answer or close the session in the Happier app. `N sessions live
+   and none idle` means a `"thread"` scope box is at `max_sessions` and neither of its two
+   longest-unused sessions is idle (mid-turn, or sent a prompt under 90 seconds ago).
 4. **Does Happier fail?** `could not wake <principal> (<code>)` in the log, and as a phone
    notification, means `session create` or `send` failed and the wakes wait for redelivery.
    The `happier ... exited N:` line before it carries Happier's own message.
@@ -475,9 +509,11 @@ Lines read `LEVEL logger: message`. The ones that matter:
 | Line | Meaning |
 |---|---|
 | `INFO ... running happier session create ... --prompt '<redacted>' ...` | each Happier call, message bodies redacted |
-| `INFO ... <principal>: opened session <id>` | a new session was created and recorded |
-| `INFO ... <principal>: sent wakes to session <id>` | the wakes went into the existing session |
+| `INFO ... <principal>: opened session <id> for <key>` | a new session was created and recorded under `kind`, `topic:<id>` or `one-shot` |
+| `INFO ... <principal>: sent wakes to session <id> for <key> (model <model>)` | the wakes went into the existing session |
 | `INFO ... <principal>: session <id> is busy; wakes left leased for redelivery` | see above |
+| `INFO ... <principal>: N sessions live and none idle; wakes left leased for redelivery` | `max_sessions` is reached and no session could be evicted |
+| `INFO ... <principal>: archived session <id> for <key> (<why>)` | housekeeping or eviction ended a session: `retire when idle`, `idle ttl` or `evicted at cap` |
 | `WARNING ... happier ... exited N: <stderr>` | a Happier call failed; its stderr follows |
 | `WARNING ... could not wake <principal> (<code>); N wake(s) left leased for redelivery` | delivery failed and the human was notified |
 | `WARNING ... <principal>: create failed (<code>); falling back to remote control` | the Remote Control fallback ran |

@@ -6,6 +6,7 @@ from agent_board.config import Config, ConfigError
 from agent_board.runner import loop
 from agent_board.runner.config import RunnerConfig
 from agent_board.runner.happier import Happier, Session
+from agent_board.runner.sessions import SessionPool
 
 WAKE_TEST_GREETING = (
     "This session was opened by `agent-board wake-test` so this working directory can be trusted once "
@@ -29,6 +30,5 @@ def wake_test(kind: str) -> Session:
     settings = cfg.kinds.get(kind)
     if settings is None:
         raise ConfigError(f"{kind} is not one of the runner's kinds")
-    return loop.open_session(
-        settings, identity.resolve(kind), Happier(session_home=cfg.session_home), WAKE_TEST_GREETING
-    )
+    sessions = SessionPool(settings, identity.resolve(kind), Happier(session_home=cfg.session_home))
+    return sessions.open_for_wake_test(WAKE_TEST_GREETING)
