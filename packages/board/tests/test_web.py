@@ -61,7 +61,7 @@ def test_human_mentions_are_persistent_and_do_not_consume_wakes(
 ) -> None:
     alice = signer("claude@testbox")
     _register(browser, alice)
-    thread_id = _open_thread(browser, alice, title="Needs a decision", body="@human **please decide**")
+    _open_thread(browser, alice, title="Needs a decision", body="@human **please decide**")
     _open_thread(browser, alice, title="Not for human", body="@claude@testbox internal")
     _log_in(browser, human_password)
     with closing(sqlite3.connect(settings.db_path)) as conn:
@@ -70,7 +70,7 @@ def test_human_mentions_are_persistent_and_do_not_consume_wakes(
         html = _page(browser, "/mentions")
         assert "Needs a decision" in html
         assert "<strong>please decide</strong>" in html
-        assert f"/t/{thread_id}#post-" in html
+        assert re.search(r'href="/p/\d+"', html)
         assert "Not for human" not in html
     with closing(sqlite3.connect(settings.db_path)) as conn:
         assert conn.execute("SELECT id, leased_until, acked_at FROM wakes").fetchall() == before
@@ -404,7 +404,7 @@ def test_index_and_thread_pages_render(
     assert "Rotate the TLS cert" in thread, f"thread title missing: {thread}"
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in thread, "post body not escaped"
     assert "<script>alert(1)" not in thread, "post body rendered as markup"
-    assert f'hx-get="/t/{thread_id}/posts"' in thread and 'hx-trigger="every 10s"' in thread, (
+    assert 'data-live="true"' in thread and 'src="/static/thread.js"' in thread, (
         f"open thread does not poll: {thread}"
     )
 
@@ -952,3 +952,160 @@ def test_stylesheet_declares(rule: str) -> None:
     css = (STATIC / "board.css").read_text()
 
     assert rule in css, f"board.css lacks {rule!r}"
+
+
+def _long_thread(browser: TestClient, settings: Settings, count: int = 76) -> tuple[int, list[int]]:
+    _submit(browser, "/f/general/threads", title="Long thread", body="first")
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        thread_id = conn.execute("SELECT MAX(id) FROM threads").fetchone()[0]
+        conn.executemany(
+            "INSERT INTO posts (thread_id, author, author_kind, body, created_at) VALUES (?, 'human', 'human', ?, ?)",
+            [(thread_id, f"message {number}", number) for number in range(1, count)],
+        )
+        ids = [
+            row[0]
+            for row in conn.execute("SELECT id FROM posts WHERE thread_id = ? ORDER BY id", (thread_id,))
+        ]
+    return thread_id, ids
+
+
+def test_web_thread_pages_and_latest_escape(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    thread_id, ids = _long_thread(browser, settings)
+    html = _page(browser, f"/t/{thread_id}")
+    assert re.findall(r'<article[^>]+id="post-(\d+)"', html) == [str(i) for i in ids[-50:]]
+    assert f'href="/t/{thread_id}?before={ids[-50]}"' in html
+    assert 'data-live="true"' in html
+    older = _page(browser, f"/t/{thread_id}?before={ids[-50]}")
+    assert re.findall(r'<article[^>]+id="post-(\d+)"', older) == [str(i) for i in ids[:-50]]
+    assert f'href="/t/{thread_id}?after={ids[-51]}"' in older
+    assert 'data-live="false"' in older
+    empty = _page(browser, f"/t/{thread_id}?before=0")
+    assert f'href="/t/{thread_id}"' in empty and "Latest" in empty
+
+
+def test_web_poll_drains_bounded_batches(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    thread_id, ids = _long_thread(browser, settings, 121)
+    cursor = ids[0]
+    found: list[int] = []
+    for size in (50, 50, 20, 0):
+        response = browser.get(f"/t/{thread_id}/posts?after={cursor}")
+        assert response.status_code == 200
+        batch = [int(i) for i in re.findall(r'<article[^>]+id="post-(\d+)"', response.text)]
+        assert len(batch) == size
+        assert response.headers["X-Has-More"] == ("true" if size == 50 else "false")
+        found.extend(batch)
+        assert int(response.headers["X-Next-After"]) == (batch[-1] if batch else cursor)
+        if batch:
+            cursor = batch[-1]
+    assert found == ids[1:]
+
+
+def test_web_post_permalink_contains_target(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    thread_id, ids = _long_thread(browser, settings)
+    for post_id in (ids[0], ids[40], ids[-1]):
+        response = browser.get(f"/p/{post_id}", follow_redirects=False)
+        assert response.status_code == 303
+        expected = (
+            f"/t/{thread_id}#post-{post_id}"
+            if post_id in ids[-50:]
+            else f"/t/{thread_id}?before={post_id + 1}#post-{post_id}"
+        )
+        assert response.headers["location"] == expected
+        page = browser.get(response.headers["location"])
+        assert f'id="post-{post_id}"' in page.text
+        shown = [int(i) for i in re.findall(r'<article[^>]+id="post-(\d+)"', page.text)]
+        assert shown == (ids[-50:] if post_id in ids[-50:] else [i for i in ids if i <= post_id][-50:])
+    assert browser.get("/p/999999").status_code == 404
+    assert 'src="/static/thread.js"' in _page(browser, f"/t/{thread_id}")
+
+
+def test_reply_permalink_preserves_preceding_conversation(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    thread_id, ids = _long_thread(browser, settings)
+    reply = _submit(browser, f"/t/{thread_id}/reply", body="My reply")
+    response = browser.get(reply.headers["location"])
+    shown = [int(i) for i in re.findall(r'<article[^>]+id="post-(\d+)"', response.text)]
+    assert len(shown) == 50
+    assert shown[:-1] == ids[-49:]
+    assert "My reply" in response.text
+    assert 'data-live="true"' in response.text
+
+
+def test_closed_web_poll_drains_before_stopping(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    _submit(browser, "/tickets", title="Long closed ticket", body="start")
+    [ticket] = _read(browser, "/api/tickets")
+    thread_id = ticket["thread_id"]
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.executemany(
+            "INSERT INTO posts (thread_id, author, author_kind, body, created_at) "
+            "VALUES (?, 'human', 'human', 'update', ?)",
+            [(thread_id, i) for i in range(110)],
+        )
+    _submit(browser, f"/tickets/{ticket['id']}/move", column="done")
+    cursor = 0
+    collected: list[int] = []
+    for expected_status in (200, 200, 286):
+        response = browser.get(f"/t/{thread_id}/posts?after={cursor}")
+        assert response.status_code == expected_status
+        batch = [int(i) for i in re.findall(r'<article[^>]+id="post-(\d+)"', response.text)]
+        collected.extend(batch)
+        cursor = int(response.headers["X-Next-After"])
+    assert len(collected) == len(set(collected)) == 112
+    assert 'data-live="false"' in _page(browser, f"/t/{thread_id}")
+
+
+def test_web_thread_uses_targeted_ticket_and_file_lookups(
+    browser: TestClient, human_password: str, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from board import db
+
+    _log_in(browser, human_password)
+    _submit(browser, "/tickets", title="Lookup test", body="start")
+    [ticket] = _read(browser, "/api/tickets")
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        post_id = conn.execute("SELECT MAX(id) FROM posts").fetchone()[0]
+        conn.execute(
+            "INSERT INTO files (id, name, content_type, size, sha256, uploaded_by, created_at, expires_at) "
+            "VALUES ('attached', 'notes.txt', 'text/plain', 1, '00', 'human', ?, ?)",
+            (time.time(), time.time() + 3600),
+        )
+        conn.execute("INSERT INTO post_files VALUES (?, 'attached')", (post_id,))
+    statements: list[str] = []
+    original = db.connect
+
+    def traced(path: Path) -> sqlite3.Connection:
+        conn = original(path)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(db, "connect", traced)
+    html = _page(browser, f"/t/{ticket['thread_id']}")
+    assert "notes.txt" in html
+    ticket_reads = [sql for sql in statements if "FROM tickets" in sql]
+    assert len(ticket_reads) == 1 and "WHERE thread_id =" in ticket_reads[0]
+    file_reads = [sql for sql in statements if "FROM files" in sql]
+    assert len(file_reads) == 1 and "WHERE id IN ('attached')" in file_reads[0]
+
+
+def test_web_thread_rejects_conflicting_or_overflow_cursors(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    thread_id, _ = _long_thread(browser, settings, 2)
+    for suffix, status in [("?before=1&after=2", 400), ("?after=9223372036854775808", 422)]:
+        assert browser.get(f"/t/{thread_id}{suffix}").status_code == status
+        assert browser.get(f"/t/{thread_id}/posts{suffix}").status_code in (400, 422)

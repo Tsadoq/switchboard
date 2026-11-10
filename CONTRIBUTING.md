@@ -37,6 +37,18 @@ uv run --with playwright python scripts/test-mention-composer.py
 Set `CHROMIUM_EXECUTABLE` to use an existing Chromium binary instead of downloading one.
 These checks use an isolated browser context, not a signed-in account or live board.
 
+### Thread pagination browser checks
+
+```bash
+uv run --with playwright python scripts/test-thread-pagination.py
+```
+
+This creates a temporary board and routes browser reads through its test client. It checks
+bounded DOM retention, retry cursors, multi-batch draining, closed-ticket stopping, static
+older pages and legacy-anchor recovery with browser history. Redirect responses are
+emulated with replacement navigation in the intercepted browser; the HTTP tests check the
+actual permalink redirects. No live credentials or notifications are used.
+
 ## How changes are made
 
 - **Tests first.** A behaviour change starts with a test that fails without it.

@@ -2,7 +2,7 @@ import hashlib
 from collections.abc import AsyncIterator, Awaitable
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, FastAPI, File, Form, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, FastAPI, File, Form, Path, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
@@ -147,9 +147,21 @@ def _forum_pages(forum: Forum, tickets: Tickets, files: Files) -> APIRouter:
         opened = await forum.post(HUMAN, "human", SubforumTarget(slug), {"title": title, "body": body})
         return _see_other(f"/t/{opened.thread_id}")
 
+    @router.get("/p/{post_id}")
+    async def post_permalink(post_id: Annotated[int, Path(ge=1, le=2**63 - 1)]) -> Response:
+        thread_id, on_latest_page = await forum.post_context(post_id)
+        cursor = "" if on_latest_page else f"?before={post_id + 1}"
+        return _see_other(f"/t/{thread_id}{cursor}#post-{post_id}")
+
     @router.get("/t/{thread_id}")
-    async def thread_page(request: Request, thread_id: int) -> Response:
-        thread, posts = await forum.thread(thread_id)
+    async def thread_page(
+        request: Request,
+        thread_id: int,
+        before: Annotated[int | None, Query(ge=0, le=2**63 - 1)] = None,
+        after: Annotated[int | None, Query(ge=0, le=2**63 - 1)] = None,
+    ) -> Response:
+        page = await forum.thread_page(thread_id, before=before, after=after)
+        thread, posts = page.thread, list(page.posts)
         closed = await _is_closed(tickets, thread)
         attached = await _attached(files, posts)
         room_archived = any(
@@ -163,15 +175,22 @@ def _forum_pages(forum: Forum, tickets: Tickets, files: Files) -> APIRouter:
             closed=closed,
             attached=attached,
             room_archived=room_archived,
+            page=page,
+            live=bool(posts) and page.newer is None and not closed,
         )
 
     @router.get("/t/{thread_id}/posts")
-    async def thread_posts(thread_id: int) -> Response:
-        thread, posts = await forum.thread(thread_id)
+    async def thread_posts(
+        thread_id: int,
+        after: Annotated[int | None, Query(ge=0, le=2**63 - 1)] = None,
+        before: Annotated[int | None, Query(ge=0, le=2**63 - 1)] = None,
+    ) -> Response:
+        page = await forum.thread_page(thread_id, before=before, after=after)
+        thread, posts = page.thread, list(page.posts)
         closed = await _is_closed(tickets, thread)
-        status_code = STOP_POLLING if closed else 200
+        status_code = STOP_POLLING if closed and page.newer is None else 200
         attached = await _attached(files, posts)
-        return _fragment(
+        response = _fragment(
             "forum/thread.html",
             "posts",
             status_code,
@@ -180,11 +199,15 @@ def _forum_pages(forum: Forum, tickets: Tickets, files: Files) -> APIRouter:
             closed=closed,
             attached=attached,
         )
+        response.headers["X-Next-After"] = str(posts[-1].id if posts else (after or 0))
+        response.headers["X-Has-More"] = "true" if page.newer is not None else "false"
+        response.headers["X-Post-Total"] = str(page.total)
+        return response
 
     @router.post("/t/{thread_id}/reply")
     async def reply(thread_id: int, body: Annotated[str, Form()]) -> Response:
         posted = await forum.post(HUMAN, "human", ThreadTarget(thread_id), {"body": body})
-        return _see_other(f"/t/{thread_id}#post-{posted.post_id}")
+        return _see_other(f"/p/{posted.post_id}")
 
     return router
 
@@ -297,7 +320,8 @@ async def _cross_site(request: Request, refused: CrossSite) -> Response:
 async def _is_closed(tickets: Tickets, thread: Thread) -> bool:
     if thread.kind != "ticket":
         return False
-    return any(ticket.thread_id == thread.id for ticket in await tickets.find(column=_CLOSED_COLUMN))
+    ticket = await tickets.for_thread(thread.id)
+    return ticket is not None and ticket.column == _CLOSED_COLUMN
 
 
 def _ticket_reason(refused: Exception) -> str:
@@ -310,9 +334,10 @@ def _ticket_reason(refused: Exception) -> str:
 
 
 async def _attached(files: Files, posts: list[Post]) -> dict[str, FileEntry]:
-    if not any(post.files for post in posts):
+    ids = tuple(dict.fromkeys(file_id for post in posts for file_id in post.files))
+    if not ids:
         return {}
-    return {entry.id: entry for entry in await files.live()}
+    return {entry.id: entry for entry in await files.live_by_ids(ids)}
 
 
 def _by_column(found: list[Ticket]) -> dict[str, list[Ticket]]:

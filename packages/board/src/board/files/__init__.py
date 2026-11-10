@@ -110,6 +110,22 @@ class Files:
 
         return await self._db.read(read)
 
+    async def live_by_ids(self, ids: tuple[str, ...]) -> list[FileEntry]:
+        def read(conn: sqlite3.Connection) -> list[FileEntry]:
+            entries: list[FileEntry] = []
+            now = time.time()
+            for start in range(0, len(ids), 500):
+                batch = ids[start : start + 500]
+                placeholders = ",".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"SELECT {_ENTRY_COLUMNS} FROM files WHERE id IN ({placeholders}) AND {LIVE_CONDITION}",
+                    (*batch, now),
+                )
+                entries.extend(_entry(row) for row in rows)
+            return entries
+
+        return await self._db.read(read)
+
     async def open(self, file_id: str) -> tuple[FileEntry, BinaryIO]:
         def read(conn: sqlite3.Connection) -> FileEntry | None:
             row = conn.execute(

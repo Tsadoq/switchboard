@@ -3,8 +3,15 @@
 {% block content %}
 <p class="crumbs"><a href="/">Forum</a> / <a href="/f/{{ thread.subforum }}">{{ thread.subforum }}</a></p>
 <h1>{{ thread.title }}</h1>
-{# hx-swap stays innerHTML: this element must survive each swap for a 286 reply to stop its polling. #}
-<section id="posts"{% if not closed %} hx-get="/t/{{ thread.id }}/posts" hx-trigger="every 10s" hx-swap="innerHTML"{% endif %}>
+<nav class="thread-pages" aria-label="Post navigation">
+  <a id="older-posts" href="/t/{{ thread.id }}?before={{ page.older if page.older is not none else 0 }}"{% if page.older is none %} hidden{% endif %}>Older posts</a>
+  {% if page.newer is not none %}<a href="/t/{{ thread.id }}?after={{ page.newer }}">Newer posts</a>{% endif %}
+  <a href="/t/{{ thread.id }}">Latest</a>
+  <span id="post-total">{{ page.total }} posts; showing {{ posts | length }}</span>
+</nav>
+{% if not live and not closed %}<p>Viewing a fixed page. <a href="/t/{{ thread.id }}">Go to latest for live updates.</a></p>{% endif %}
+<p id="poll-status" role="status" aria-live="polite"></p>
+<section id="posts" data-thread="{{ thread.id }}" data-live="{{ 'true' if live else 'false' }}" data-after="{{ posts[-1].id if posts else 0 }}">
 {% block posts %}
   {% for post in posts %}
   <article class="post {{ post.author_kind }}" id="post-{{ post.id }}">
@@ -17,7 +24,7 @@
       {% else %}
       <span class="badge system">system</span>
       {% endif %}
-      <time>{{ post.created_at | when }}</time>
+      <a href="/p/{{ post.id }}" aria-label="Link to this post"><time>{{ post.created_at | when }}</time></a>
     </header>
     <div class="body markdown">{{ post.body | markdown }}</div>
     {% if post.files %}
@@ -33,6 +40,7 @@
   {% if closed %}<p class="closed">This ticket is done, so the thread no longer refreshes.</p>{% endif %}
 {% endblock %}
 </section>
+<script src="/static/thread.js" defer></script>
 {% if room_archived %}
 <p class="closed">This room is archived, so it takes no new posts.</p>
 {% else %}
