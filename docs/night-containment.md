@@ -11,7 +11,12 @@ A trusted caller constructs a `RunPlan` from a current server grant. `seconds` m
 server-computed remaining time, capped at 1200 and the night-window end, not an agent
 request. `request_elapsed` accounts conservatively for the whole grant RPC. The plan
 converts the remaining interval to a host-monotonic deadline and binds it to the boot
-ID, principal, opaque fence and a canonical unique run UUID.
+ID, principal, opaque fence and a canonical unique run UUID. The plan uses Python
+CLOCK_MONOTONIC; the timer explicitly sets WakeSystem=no. Dev systemd 257 documents
+that combination as CLOCK_MONOTONIC, with CLOCK_BOOTTIME selected by WakeSystem=yes.
+The present evidence does not cover suspend, VM pause, snapshots or clock steps. An
+independent wall-clock night-window cutoff and pause/recovery matrix remain required
+before enabling; do not infer cross-pause window enforcement from these local tests.
 
 The plan refuses overlapping ordinary/dedicated homes or working directories, including
 resolved aliases. This is not itself proof that a directory is a separate authorized
@@ -63,6 +68,13 @@ The worker's local observation file is a recovery hint, **not an authenticated e
 attestation**. The board must not accept ordinary agent-signed files/booleans as trusted
 settlement evidence. A separate privileged/read-only verifier authority and its
 run/fence-bound protocol are still required before exposing settlement or enabling.
+
+The deadline timer and stop authority currently share the target's UID/trust domain.
+An agent with a shell can disarm its own timer, signal its stop job or broker sibling
+units. This stops cooperative accidental runaways, not a non-cooperating/adversarial
+agent. Independent enforcement requires a stop authority under another UID or the
+system manager, together with the separate attestation authority discussed above.
+No such privilege separation has been installed or granted by this primitive.
 
 This contains ordinary inherited children, including setsid/nohup/SIGTERM-resistant
 processes. It is not a general security sandbox: explicitly brokered sibling user

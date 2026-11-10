@@ -264,6 +264,7 @@ def deadline_argv(run: RunPlan) -> tuple[str, ...]:
         f"--on-boot={stop_at}s",
         "--timer-property=AccuracySec=1ms",
         "--timer-property=RandomizedDelaySec=0",
+        "--timer-property=WakeSystem=no",
         "--property=Type=oneshot",
         f"--property=TimeoutStartSec={STOP_GRACE + 2}",
         "--",

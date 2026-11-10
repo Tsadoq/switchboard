@@ -179,6 +179,7 @@ def test_worker_rechecks_deadline_and_arms_absolute_stop_before_exec(
     monkeypatch.setattr("agent_board.runner.night_containment.os.execvpe", execute)
     containment.worker(journal, run.unit)
     assert len(calls) == 1 and "--on-boot=1293.75s" in calls[0]
+    assert "--timer-property=WakeSystem=no" in calls[0]
     assert calls[0][-4:] == ("/usr/bin/systemctl", "--user", "stop", run.unit)
     assert executed[0][1] == run.command
     assert executed[0][2]["HAPPIER_HOME_DIR"] == str(run.home)
