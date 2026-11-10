@@ -29,15 +29,18 @@ def aggregates(conn: sqlite3.Connection, cursors: dict[str, tuple[str | None, st
     now = time.time()
     first = datetime.fromtimestamp(now, UTC).date() - timedelta(days=queries.WINDOW_DAYS - 1)
     cutoff = datetime(first.year, first.month, first.day, tzinfo=UTC).timestamp()
-    authors = _keys(conn, "posts", "author", "created_at >= ?", cutoff, *cursors["posts"])
-    uploaders = _keys(conn, "files", "uploaded_by", "expires_at > ?", now, *cursors["files"])
+    ceiling = cutoff + queries.WINDOW_DAYS * 86400
+    authors = _keys(
+        conn, "posts", "author", "created_at >= ? AND created_at < ?", (cutoff, ceiling), *cursors["posts"]
+    )
+    uploaders = _keys(conn, "files", "uploaded_by", "expires_at > ?", (now,), *cursors["files"])
     days: dict[str, dict[str, int]] = {
         (first + timedelta(days=i)).isoformat(): {} for i in range(queries.WINDOW_DAYS)
     }
     rows = conn.execute(
         "SELECT date(created_at, 'unixepoch') AS day, author, COUNT(*) AS posts FROM posts "
-        "WHERE created_at >= ? AND author IN (SELECT value FROM json_each(?)) GROUP BY day, author",
-        (cutoff, json.dumps(authors.values)),
+        "WHERE created_at >= ? AND created_at < ? AND author IN (SELECT value FROM json_each(?)) GROUP BY day, author",
+        (cutoff, ceiling, json.dumps(authors.values)),
     )
     for row in rows:
         if row["day"] in days:
@@ -72,7 +75,7 @@ def _keys(
     table: str,
     column: str,
     where: str,
-    cutoff: float,
+    params: tuple[float, ...],
     before: str | None,
     after: str | None,
 ) -> Keys:
@@ -86,19 +89,17 @@ def _keys(
         for row in conn.execute(
             f"SELECT {column} FROM {table} WHERE {where}{bound} GROUP BY {column} "
             f"ORDER BY {column} {order} LIMIT 50",
-            (cutoff, *((key,) if key is not None else ())),
+            (*params, *((key,) if key is not None else ())),
         )
     )
     if before is not None:
         values = tuple(reversed(values))
-    total = conn.execute(f"SELECT COUNT(DISTINCT {column}) FROM {table} WHERE {where}", (cutoff,)).fetchone()[
-        0
-    ]
+    total = conn.execute(f"SELECT COUNT(DISTINCT {column}) FROM {table} WHERE {where}", params).fetchone()[0]
 
     def exists(value: str, comparison: str) -> bool:
         return (
             conn.execute(
-                f"SELECT 1 FROM {table} WHERE {where} AND {column} {comparison} ? LIMIT 1", (cutoff, value)
+                f"SELECT 1 FROM {table} WHERE {where} AND {column} {comparison} ? LIMIT 1", (*params, value)
             ).fetchone()
             is not None
         )

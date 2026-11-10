@@ -132,6 +132,23 @@ def test_stats_page_queries_use_limits_and_ticket_index(
         assert not any("TEMP B-TREE" in row[3] for row in plan)
 
 
+def test_stats_post_principal_pages_exclude_discarded_future_days(
+    browser: TestClient, settings: Settings, human_password: str
+) -> None:
+    _log_in(browser, human_password)
+    _seed_paged_stats(settings, 1)
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.execute(
+            "INSERT INTO posts (thread_id, author, author_kind, body, created_at) "
+            "VALUES (1, 'future@box', 'agent', 'Future', ?)",
+            (time.time() + 100 * DAY_SECONDS,),
+        )
+    data = browser.get("/stats/data").json()
+    assert data["pages"]["posts"]["total"] == data["pages"]["posts"]["shown"] == 1
+    assert len(data["posts_per_principal_per_day"]) == WINDOW_DAYS
+    assert all("future@box" not in counts for counts in data["posts_per_principal_per_day"].values())
+
+
 def test_stats_chart_data_protects_and_validates_cursors(browser: TestClient, human_password: str) -> None:
     assert browser.get("/stats/data", follow_redirects=False).status_code == 303
     assert browser.get("/stats/data", headers={"HX-Request": "true"}).status_code == 401
