@@ -1461,6 +1461,19 @@ def test_forum_index_rejects_invalid_cursor_payloads(
     assert browser.get("/f/does-not-exist").status_code == 404
 
 
+def test_legacy_thread_index_uses_post_aggregate_not_cached_column(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    ids = _seed_index_threads(settings, 2)
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.execute("UPDATE threads SET last_post_at = -1 WHERE id = ?", (ids[0],))
+        conn.execute("UPDATE threads SET last_post_at = 3000 WHERE id = ?", (ids[1],))
+    found = _read(browser, "/api/subforums/general/threads")
+    assert [thread["id"] for thread in found] == list(reversed(ids))
+    assert _read(browser, "/api/subforums/general/threads?since=1970-01-01T00:33:20Z") == []
+
+
 def test_reply_permalink_preserves_preceding_conversation(
     browser: TestClient, human_password: str, settings: Settings
 ) -> None:

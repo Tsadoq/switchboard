@@ -257,8 +257,8 @@ class Forum:
         def read(conn: sqlite3.Connection) -> list[Thread]:
             _require_target(conn, SubforumTarget(subforum))
             rows = conn.execute(
-                f"{_THREAD_SELECT} WHERE t.subforum = ? GROUP BY t.id HAVING last_post_at >= ? "
-                "ORDER BY last_post_at DESC, t.id DESC",
+                f"{_THREAD_SELECT} WHERE t.subforum = ? GROUP BY t.id HAVING MAX(p.created_at) >= ? "
+                "ORDER BY MAX(p.created_at) DESC, t.id DESC",
                 (subforum, active_since),
             )
             return [_thread(row) for row in rows]
