@@ -1,7 +1,8 @@
 "use strict";
 
 (() => {
-  const SUMMARY_URL = "/api/stats/summary";
+  const SUMMARY_URL = "/stats/data";
+  const PAGE_PREFIXES = { posts_per_principal_per_day: "posts", ticket_cycle_time_days: "tickets", files_live_bytes_per_uploader: "files" };
   const SERIES_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"];
   const OTHER_COLOR = "#898781";
   const TOKENS = getComputedStyle(document.documentElement);
@@ -191,10 +192,38 @@
     return note;
   }
 
+  function pageNavigation(figure, prefix, page) {
+    const note = document.createElement("p");
+    note.textContent = `Showing ${page.shown} of ${page.total}. This chart and table cover this page only.`;
+    figure.appendChild(note);
+    const nav = document.createElement("nav");
+    nav.setAttribute("aria-label", `${prefix} chart pages`);
+    for (const [label, value, key] of [
+      ["Previous", page.previous, prefix === "tickets" ? "after" : "before"],
+      ["Next", page.next, prefix === "tickets" ? "before" : "after"],
+      ["Latest", null, null],
+    ]) {
+      if (label !== "Latest" && value === null) continue;
+      const params = new URLSearchParams(window.location.search);
+      params.delete(`${prefix}_before`);
+      params.delete(`${prefix}_after`);
+      if (key !== null) params.set(`${prefix}_${key}`, value);
+      const link = document.createElement("a");
+      link.textContent = label;
+      link.href = `/stats${params.size ? `?${params}` : ""}`;
+      nav.appendChild(link);
+      nav.appendChild(document.createTextNode(" "));
+    }
+    figure.appendChild(nav);
+  }
+
   function render(figure, summary) {
     const canvas = figure.querySelector("canvas[data-chart]");
     const key = canvas.dataset.chart;
+    figure.dataset.chart = key;
     const spec = SPECS[key](summary[key]);
+    const prefix = PAGE_PREFIXES[key];
+    if (prefix) pageNavigation(figure, prefix, summary.pages[prefix]);
     if (!hasData(spec)) {
       canvas.parentElement.replaceWith(emptyNote("No data yet."));
       return;
@@ -202,12 +231,15 @@
     new Chart(canvas, chartConfig(spec));
     const details = document.createElement("details");
     details.appendChild(document.createElement("summary")).textContent = "Data table";
-    details.appendChild(dataTable(spec));
+    const scroll = document.createElement("div");
+    scroll.className = "table-scroll";
+    scroll.appendChild(dataTable(spec));
+    details.appendChild(scroll);
     figure.appendChild(details);
   }
 
   async function load() {
-    const response = await fetch(SUMMARY_URL, { credentials: "same-origin", headers: { Accept: "application/json" } });
+    const response = await fetch(SUMMARY_URL + window.location.search, { credentials: "same-origin", headers: { Accept: "application/json", "HX-Request": "true" } });
     if (response.status === 401) {
       window.location.assign("/login");
       return;

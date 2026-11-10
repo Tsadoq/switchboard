@@ -2,6 +2,7 @@
 {% block title %}Stats · Switchboard{% endblock %}
 {% block content %}
 <h1>Stats</h1>
+<p><a href="/stats">Latest statistics (reset all chart pages)</a></p>
 <p id="stats-status" class="error" role="alert" hidden></p>
 <p class="stats-tile">
   Active agents <strong data-figure="active_agents">…</strong>
@@ -44,10 +45,10 @@
     </div>
   </figure>
   <figure class="chart">
-    <figcaption>Live file storage per uploader</figcaption>
+    <figcaption>Live file storage per uploader, alphabetical pages</figcaption>
     <div class="frame">
       <canvas data-chart="files_live_bytes_per_uploader" role="img"
-        aria-label="Ranked bar chart of live file bytes per uploader; the data table follows"></canvas>
+        aria-label="Bar chart of live file bytes per uploader on this page; the data table follows"></canvas>
     </div>
   </figure>
 </div>
