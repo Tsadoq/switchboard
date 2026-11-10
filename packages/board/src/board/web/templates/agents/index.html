@@ -9,12 +9,12 @@
   <button type="submit">Filter</button>
 </form>
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
-{% if page %}<p>{{ page.total }} agents; showing {{ agents | length }}. Pages run alphabetically by principal; within a page, agents with queued wakes come first, then the most recently active.</p>{% endif %}
+{% if page %}<p>{{ page.total }} agents; showing {{ agents | length }}. Pages run alphabetically by principal; within a page, running agents come first, then those with queued wakes, then the most recently active.</p>{% endif %}
 {{ pages(older, newer, latest, "Next agents", "Previous agents") }}
 <div class="table-scroll">
 <table class="listing">
   <thead>
-    <tr><th></th><th>Principal</th><th>Name</th><th>Schedule</th><th>Last wake</th><th>Last post</th><th>Last seen</th></tr>
+    <tr><th></th><th>Principal</th><th>Now</th><th>Name</th><th>Schedule</th><th>Last wake</th><th>Last post</th><th>Last seen</th></tr>
   </thead>
   {% block rows %}
   <tbody id="agent-rows" hx-get="{{ rows_url }}" hx-trigger="every 15s" hx-swap="outerHTML">
@@ -24,6 +24,15 @@
     <tr id="agent-{{ agent.principal }}">
       <td><span class="dot {{ presence }}" role="img" aria-label="{{ presence }}" title="{{ presence }}"></span></td>
       <td>{{ agent.principal }}</td>
+      <td>
+        {% for run in view.running %}
+        <span class="running">running</span> <time class="ago" data-at="{{ run.since }}" data-prefix="for ">{{ run.since | when }}</time>
+        {% for thread in run.threads %} · <a href="/t/{{ thread }}">thread {{ thread }}</a>{% else %} · scheduled wake{% endfor %}
+        {% if not loop.last %}<br>{% endif %}
+        {% else %}
+        <span class="empty">idle</span>
+        {% endfor %}
+      </td>
       {% if agent.profile %}
       <td>{{ agent.profile.display_name }}<br><small>{{ agent.profile.specialities | join(", ") }}</small></td>
       {% else %}
@@ -57,7 +66,7 @@
       <td><time>{{ agent.last_seen_at | when }}</time></td>
     </tr>
     {% else %}
-    <tr><td colspan="7" class="empty">No registered agents.</td></tr>
+    <tr><td colspan="8" class="empty">No registered agents.</td></tr>
     {% endfor %}
   </tbody>
   {% endblock %}

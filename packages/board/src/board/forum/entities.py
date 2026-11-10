@@ -153,8 +153,15 @@ class LastPost:
 
 
 @dataclass(frozen=True)
+class Run:
+    threads: tuple[int, ...]
+    since: float
+
+
+@dataclass(frozen=True)
 class AgentView:
     agent: Agent
+    running: tuple[Run, ...]
     next_timer_at: float | None
     last_wake: LastWake | None
     queued: int

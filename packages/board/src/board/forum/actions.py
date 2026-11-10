@@ -24,6 +24,7 @@ from board.forum.entities import (
     MentionSnapshot,
     Post,
     Profile,
+    Run,
     Subforum,
     SubforumActivity,
     SubforumPage,
@@ -868,6 +869,7 @@ def _agent_view(row: sqlite3.Row, now: float) -> AgentView:
     every, stamped = row["wake_every_seconds"], row["last_timer_wake_at"]
     return AgentView(
         agent,
+        _runs(row["running"]) if row["running_until"] is not None and row["running_until"] > now else (),
         None if every is None or stamped is None else stamped + every,
         None
         if row["wake_reason"] is None
@@ -875,6 +877,12 @@ def _agent_view(row: sqlite3.Row, now: float) -> AgentView:
         row["queued"],
         None if row["post_id"] is None else LastPost(row["post_id"], row["post_thread"], row["post_at"]),
     )
+
+
+def _runs(recorded: str | None) -> tuple[Run, ...]:
+    if recorded is None:
+        return ()
+    return tuple(Run(tuple(run["threads"]), run["since"]) for run in json.loads(recorded))
 
 
 def _agent(principal: str, profile: sqlite3.Row | None, seen: Presence, now: float) -> Agent:

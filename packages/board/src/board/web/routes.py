@@ -464,12 +464,16 @@ async def _agents_context(
     }
 
 
-def _most_active_first(view: AgentView) -> tuple[bool, float]:
+def _most_active_first(view: AgentView) -> tuple[bool, bool, float]:
     moments = [
         view.last_wake.created_at if view.last_wake else None,
         view.last_post.created_at if view.last_post else None,
     ]
-    return view.queued == 0, -max((moment for moment in moments if moment is not None), default=0.0)
+    return (
+        not view.running,
+        view.queued == 0,
+        -max((moment for moment in moments if moment is not None), default=0.0),
+    )
 
 
 class _Navigation(TypedDict):
