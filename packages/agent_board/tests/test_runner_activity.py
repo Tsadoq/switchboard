@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Any
 
 from agent_board.client import BoardError, BoardUnreachable
@@ -32,9 +33,12 @@ class Sessions:
         self.busy: set[str] = set()
         self.failing: set[str] = set()
         self.probed: list[str] = []
+        self.during_probe: Callable[[], None] | None = None
 
     def idle(self, session_id: str, timeout: int = 3) -> bool:
         self.probed.append(session_id)
+        if self.during_probe is not None:
+            self.during_probe()
         if session_id in self.failing:
             raise HappierError("timeout_internal")
         return session_id not in self.busy
@@ -213,3 +217,33 @@ def test_threads_come_from_wake_fields_or_older_boards_summaries() -> None:
     ]
 
     assert threads_of(wakes) == (34, 41), threads_of(wakes)
+
+
+def test_a_delivery_during_an_idle_probe_keeps_the_new_turn_running() -> None:
+    rig = Rig()
+    reporter, clock, board, sessions = rig.reporter, rig.clock, rig.board, rig.sessions
+    reporter.delivered("s1", (34,))
+    reporter.probe()
+    clock.now += 20
+    sessions.during_probe = lambda: reporter.delivered("s1", (41,))
+
+    reporter.probe()
+
+    assert board.reports[-1]["running"] == [{"threads": [34, 41], "since": _START}], board.reports
+
+
+def test_reports_stay_within_the_boards_limits() -> None:
+    rig = Rig()
+    reporter, clock, board, sessions = rig.reporter, rig.clock, rig.board, rig.sessions
+    sessions.busy.update({"busy", *(f"s{index}" for index in range(16))})
+    reporter.delivered("busy", range(1, 22))
+    for index in range(16):
+        clock.now += 1
+        reporter.delivered(f"s{index}", (100 + index,))
+
+    reporter.probe()
+
+    running = board.reports[-1]["running"]
+    assert len(running) == 16, f"sent {len(running)} runs, the board accepts 16"
+    assert running[0]["threads"] == list(range(2, 22)), f"kept the wrong threads: {running[0]['threads']}"
+    assert all(len(run["threads"]) <= 20 for run in running), running

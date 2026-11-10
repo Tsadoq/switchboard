@@ -16,6 +16,8 @@ LONG_RUN_SECONDS = 300
 MAX_RUN_SECONDS = 2 * 3600
 MAX_PROBE_ERRORS = 3
 ROUTE_RETRY_SECONDS = 3600
+MAX_REPORTED_RUNS = 16
+MAX_REPORTED_THREADS = 20
 TTL_SECONDS = 90
 REFRESH_SECONDS = 30
 SETTLE_SECONDS = 15
@@ -37,9 +39,10 @@ class _Sessions(Protocol):
 class _Run:
     since: float
     delivered_at: float
-    threads: set[int] = field(default_factory=set)
+    threads: dict[int, None] = field(default_factory=dict)
     probed_at: float | None = None
     errors: int = 0
+    generation: int = 0
 
     def probe_due(self, now: float) -> bool:
         if now - self.delivered_at < SETTLE_SECONDS:
@@ -73,15 +76,18 @@ class ActivityReporter:
             run = self._runs.setdefault(session_id, _Run(since=now, delivered_at=now))
             run.delivered_at = now
             run.errors = 0
-            run.threads.update(threads)
+            run.generation += 1
+            for thread in threads:
+                run.threads.pop(thread, None)
+                run.threads[thread] = None
             self._dirty = True
 
     def probe(self) -> None:
         now = self._clock()
         if self._paused_until is not None and now < self._paused_until:
             return
-        for session_id in self._due(now):
-            self._check(session_id, now)
+        for session_id, generation in self._due(now):
+            self._check(session_id, generation, now)
         self._report_when_due()
 
     def serve(self, interval: float = PROBE_SECONDS) -> NoReturn:
@@ -92,11 +98,14 @@ class ActivityReporter:
                 logger.exception("activity report failed; retrying in %ds", interval)
             time.sleep(interval)
 
-    def _due(self, now: float) -> list[str]:
+    def _due(self, now: float) -> list[tuple[str, int]]:
         with self._lock:
-            return [session_id for session_id, run in self._runs.items() if run.probe_due(now)]
+            return [
+                (session_id, run.generation) for session_id, run in self._runs.items() if run.probe_due(now)
+            ]
 
-    def _check(self, session_id: str, now: float) -> None:
+    def _check(self, session_id: str, generation: int, now: float) -> None:
+        """A delivery that lands while `idle` runs starts a new turn, so that probe's answer is discarded."""
         try:
             idle = self._sessions.idle(session_id, timeout=_IDLE_TIMEOUT)
             failed = False
@@ -105,7 +114,7 @@ class ActivityReporter:
             idle, failed = False, True
         with self._lock:
             run = self._runs.get(session_id)
-            if run is None:
+            if run is None or run.generation != generation:
                 return
             run.probed_at = now
             run.errors = run.errors + 1 if failed else 0
@@ -133,10 +142,11 @@ class ActivityReporter:
             )
             if not (self._dirty or refresh_due):
                 return
+            longest_first = sorted(self._runs.values(), key=lambda run: run.since)[:MAX_REPORTED_RUNS]
             body = {
                 "running": [
-                    {"threads": sorted(run.threads), "since": run.since}
-                    for run in sorted(self._runs.values(), key=lambda run: run.since)
+                    {"threads": sorted(list(run.threads)[-MAX_REPORTED_THREADS:]), "since": run.since}
+                    for run in longest_first
                 ],
                 "ttl_seconds": TTL_SECONDS,
             }
