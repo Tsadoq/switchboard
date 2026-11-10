@@ -532,6 +532,18 @@ class Forum:
 
         return await self._db.read(read)
 
+    async def online_count(self) -> int:
+        def read(conn: sqlite3.Connection) -> int:
+            roster = json.dumps(tuple(self._registry.principals()))
+            row = conn.execute(
+                "SELECT COUNT(*) FROM principals WHERE last_poll_at >= ? "
+                "AND principal IN (SELECT value FROM json_each(?))",
+                (time.time() - presence.PRESENCE_WINDOW_SECONDS, roster),
+            ).fetchone()
+            return int(row[0])
+
+        return await self._db.read(read)
+
     async def follows(self, principal: str) -> list[Follow]:
         def read(conn: sqlite3.Connection) -> list[Follow]:
             rows = conn.execute(

@@ -239,9 +239,7 @@ def main() -> None:
                 assert page.locator("article.post").first.get_attribute("id") == first
                 page.screenshot(path="/tmp/switchboard-mention-pagination.png")
                 browser.close()
-    print(
-        "Pagination browser checks passed: bounded threads and list navigation, filters and mobile layouts"
-    )
+    print("Pagination browser checks passed: bounded threads and list navigation, filters and mobile layouts")
 
 
 if __name__ == "__main__":

@@ -22,6 +22,212 @@ if TYPE_CHECKING:
     from .conftest import Signer, SignerFactory
 
 DAY_SECONDS = 86400
+
+
+def _seed_paged_stats(settings: Settings, count: int = 105) -> None:
+    from uuid import UUID
+
+    now = time.time()
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        for i in range(count):
+            principal = f"worker{i:03}@box"
+            thread_id = conn.execute(
+                "INSERT INTO threads (subforum, title, kind, created_by, created_at) "
+                "VALUES ('general', ?, 'ticket', 'human', ?)",
+                (f"Ticket {i:03}", now - DAY_SECONDS),
+            ).lastrowid
+            conn.execute(
+                "INSERT INTO posts (thread_id, author, author_kind, body, created_at) "
+                "VALUES (?, ?, 'agent', 'Post', ?)",
+                (thread_id, principal, now),
+            )
+            conn.execute(
+                'INSERT INTO tickets (title, "column", thread_id, created_by, created_at, updated_at, done_at) '
+                "VALUES (?, 'done', ?, 'human', ?, ?, ?)",
+                (f"Ticket {i:03}", thread_id, now - DAY_SECONDS, now, now),
+            )
+            conn.execute(
+                "INSERT INTO files (id, name, content_type, size, sha256, uploaded_by, created_at, expires_at) "
+                "VALUES (?, 'Sample', 'text/plain', ?, ?, ?, ?, ?)",
+                (str(UUID(int=i + 1)), i + 1, "0" * 64, principal, now, now + 3600),
+            )
+
+
+def test_stats_chart_data_is_paged_without_changing_summary_api(
+    browser: TestClient, settings: Settings, human_password: str
+) -> None:
+    _log_in(browser, human_password)
+    _seed_paged_stats(settings)
+    response = browser.get("/stats/data")
+    assert response.status_code == 200
+    first = response.json()
+    for key in ("posts", "tickets", "files"):
+        assert first["pages"][key]["total"] == 105
+        assert first["pages"][key]["shown"] == 50
+    assert len(first["ticket_cycle_time_days"]) == len(first["files_live_bytes_per_uploader"]) == 50
+    assert [row["ticket_id"] for row in first["ticket_cycle_time_days"]] == list(range(105, 55, -1))
+    assert len({name for day in first["posts_per_principal_per_day"].values() for name in day}) == 50
+    params = {
+        "posts_after": first["pages"]["posts"]["next"],
+        "tickets_before": first["pages"]["tickets"]["next"],
+        "files_after": first["pages"]["files"]["next"],
+    }
+    middle = browser.get("/stats/data", params=params).json()
+    assert [row["ticket_id"] for row in middle["ticket_cycle_time_days"]] == list(range(55, 5, -1))
+    assert middle["files_live_bytes_per_uploader"][0]["uploader"] == "worker054@box"
+    back = browser.get("/stats/data", params={"tickets_after": middle["pages"]["tickets"]["previous"]}).json()
+    assert back["ticket_cycle_time_days"] == first["ticket_cycle_time_days"]
+    legacy = _summary(browser)
+    assert "pages" not in legacy
+    assert len(legacy["ticket_cycle_time_days"]) == len(legacy["files_live_bytes_per_uploader"]) == 105
+
+
+def test_stats_cursors_survive_deleted_boundaries_and_expiry(
+    browser: TestClient, settings: Settings, human_password: str
+) -> None:
+    _log_in(browser, human_password)
+    _seed_paged_stats(settings)
+    first = browser.get("/stats/data").json()
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.execute("DELETE FROM tickets WHERE id = 56")
+        conn.execute("UPDATE files SET expires_at = 0 WHERE uploaded_by = 'worker050@box'")
+        conn.execute("UPDATE tickets SET done_at = ? WHERE id = 1", (time.time() + 1,))
+    page = browser.get(
+        "/stats/data",
+        params={
+            "tickets_before": first["pages"]["tickets"]["next"],
+            "files_after": first["pages"]["files"]["next"],
+        },
+    ).json()
+    assert page["pages"]["tickets"]["total"] == page["pages"]["files"]["total"] == 104
+    assert [item["ticket_id"] for item in page["ticket_cycle_time_days"]] == list(range(55, 5, -1))
+    assert page["files_live_bytes_per_uploader"][0]["uploader"] == "worker054@box"
+    assert all(row["uploader"] != "worker050@box" for row in page["files_live_bytes_per_uploader"])
+
+
+def test_stats_page_queries_use_limits_and_ticket_index(
+    browser: TestClient, settings: Settings, human_password: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from board import db
+
+    _log_in(browser, human_password)
+    _seed_paged_stats(settings)
+    statements: list[str] = []
+    original = db.connect
+
+    def traced(path: Path) -> sqlite3.Connection:
+        conn = original(path)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(db, "connect", traced)
+    assert browser.get("/stats/data").status_code == 200
+    assert sum("LIMIT 50" in sql for sql in statements) == 3
+    assert not any("FROM profiles" in sql for sql in statements)
+    with closing(sqlite3.connect(settings.db_path)) as conn:
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT id FROM tickets WHERE done_at >= ? ORDER BY done_at DESC, id DESC LIMIT 50",
+            (0,),
+        ).fetchall()
+        assert any("tickets_done_id" in row[3] for row in plan)
+        assert not any("TEMP B-TREE" in row[3] for row in plan)
+
+
+def test_stats_post_principal_pages_exclude_discarded_future_days(
+    browser: TestClient, settings: Settings, human_password: str
+) -> None:
+    _log_in(browser, human_password)
+    _seed_paged_stats(settings, 1)
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.execute(
+            "INSERT INTO posts (thread_id, author, author_kind, body, created_at) "
+            "VALUES (1, 'future@box', 'agent', 'Future', ?)",
+            (time.time() + 100 * DAY_SECONDS,),
+        )
+    data = browser.get("/stats/data").json()
+    assert data["pages"]["posts"]["total"] == data["pages"]["posts"]["shown"] == 1
+    assert len(data["posts_per_principal_per_day"]) == WINDOW_DAYS
+    assert all("future@box" not in counts for counts in data["posts_per_principal_per_day"].values())
+
+
+def test_stats_ranked_pages_keep_global_leaders_first(
+    browser: TestClient, settings: Settings, human_password: str
+) -> None:
+    _log_in(browser, human_password)
+    _seed_paged_stats(settings)
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.executemany(
+            "INSERT INTO posts (thread_id, author, author_kind, body, created_at) "
+            "VALUES (1, 'worker104@box', 'agent', 'Extra', ?)",
+            [(time.time(),)] * 5,
+        )
+    data = browser.get("/stats/data").json()
+    assert data["files_live_bytes_per_uploader"][0]["uploader"] == "worker104@box"
+    counts = {
+        name: count for day in data["posts_per_principal_per_day"].values() for name, count in day.items()
+    }
+    assert counts["worker104@box"] == 6 and "worker049@box" not in counts
+    next_page = browser.get("/stats/data", params={"posts_after": data["pages"]["posts"]["next"]}).json()
+    assert all("worker104@box" not in day for day in next_page["posts_per_principal_per_day"].values())
+
+
+def test_stats_ranked_file_ties_reconstruct_without_gaps(
+    browser: TestClient, settings: Settings, human_password: str
+) -> None:
+    _log_in(browser, human_password)
+    _seed_paged_stats(settings)
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.execute("UPDATE files SET size = 10")
+    params: dict[str, str] = {}
+    seen: list[str] = []
+    for count in (50, 50, 5):
+        data = browser.get("/stats/data", params=params).json()
+        assert len(data["files_live_bytes_per_uploader"]) == count
+        seen.extend(row["uploader"] for row in data["files_live_bytes_per_uploader"])
+        params = {"files_after": data["pages"]["files"]["next"]}
+    assert seen == [f"worker{i:03}@box" for i in range(105)]
+    previous = browser.get("/stats/data", params={"files_before": data["pages"]["files"]["previous"]}).json()
+    assert previous["files_live_bytes_per_uploader"][0]["uploader"] == "worker050@box"
+
+
+@pytest.mark.parametrize("metric", ["posts", "files"])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        [True, "human"],
+        [-1, "human"],
+        [float("nan"), "human"],
+        [2**63, "human"],
+        [1, None],
+        [1, ""],
+        ["1", "human"],
+    ],
+)
+def test_stats_rank_cursors_are_strict(
+    browser: TestClient, human_password: str, metric: str, payload: object
+) -> None:
+    import json
+
+    _log_in(browser, human_password)
+    token = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+    assert browser.get("/stats/data", params={f"{metric}_after": token}).status_code == 400
+
+
+def test_stats_chart_data_protects_and_validates_cursors(browser: TestClient, human_password: str) -> None:
+    assert browser.get("/stats/data", follow_redirects=False).status_code == 303
+    assert browser.get("/stats/data", headers={"HX-Request": "true"}).status_code == 401
+    _log_in(browser, human_password)
+    empty = browser.get("/stats/data").json()
+    assert all(meta["total"] == meta["shown"] == 0 for meta in empty["pages"].values())
+    for params in (
+        {"posts_before": "a", "posts_after": "b"},
+        {"tickets_before": "invalid"},
+        {"files_before": "a", "files_after": "b"},
+    ):
+        assert browser.get("/stats/data", params=params).status_code == 400
+
+
 CHART_COUNT = 6
 
 
