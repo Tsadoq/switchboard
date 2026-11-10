@@ -138,6 +138,30 @@ class Agent:
 
 
 @dataclass(frozen=True)
+class LastWake:
+    reason: str
+    summary: str
+    created_at: float
+    thread_id: int | None
+
+
+@dataclass(frozen=True)
+class LastPost:
+    post_id: int
+    thread_id: int
+    created_at: float
+
+
+@dataclass(frozen=True)
+class AgentView:
+    agent: Agent
+    next_timer_at: float | None
+    last_wake: LastWake | None
+    queued: int
+    last_post: LastPost | None
+
+
+@dataclass(frozen=True)
 class Follow:
     target: str
     created_at: float
