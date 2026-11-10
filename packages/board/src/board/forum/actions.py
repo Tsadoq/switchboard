@@ -14,8 +14,11 @@ from board.forum import fanout, listing, mentions
 from board.forum.entities import (
     SEED_SUBFORUMS,
     Agent,
+    AgentView,
     AuthorKind,
     Follow,
+    LastPost,
+    LastWake,
     LatestPost,
     ListPage,
     MentionSnapshot,
@@ -440,18 +443,11 @@ class Forum:
 
     async def agent_page(
         self, *, mention: str = "", before: str | None = None, after: str | None = None
-    ) -> ListPage[Agent]:
-        def read(conn: sqlite3.Connection) -> ListPage[Agent]:
+    ) -> ListPage[AgentView]:
+        def read(conn: sqlite3.Connection) -> ListPage[AgentView]:
             roster = json.dumps(tuple(self._registry.principals()))
             now = time.time()
-            return listing.agents(conn, roster, mention, before, after).map(
-                lambda row: _agent(
-                    row["principal"],
-                    row if row["display_name"] is not None else None,
-                    Presence(row["last_seen_at"], row["last_poll_at"]),
-                    now,
-                )
-            )
+            return listing.agents(conn, roster, mention, before, after).map(lambda row: _agent_view(row, now))
 
         return await self._list_read(read)
 
@@ -859,6 +855,25 @@ def _post(row: sqlite3.Row, files: tuple[str, ...]) -> Post:
         row["key_fingerprint"],
         row["created_at"],
         files,
+    )
+
+
+def _agent_view(row: sqlite3.Row, now: float) -> AgentView:
+    agent = _agent(
+        row["principal"],
+        row if row["display_name"] is not None else None,
+        Presence(row["last_seen_at"], row["last_poll_at"]),
+        now,
+    )
+    every, stamped = row["wake_every_seconds"], row["last_timer_wake_at"]
+    return AgentView(
+        agent,
+        None if every is None or stamped is None else stamped + every,
+        None
+        if row["wake_reason"] is None
+        else LastWake(row["wake_reason"], row["wake_summary"], row["wake_at"], row["wake_thread"]),
+        row["queued"],
+        None if row["post_id"] is None else LastPost(row["post_id"], row["post_thread"], row["post_at"]),
     )
 
 

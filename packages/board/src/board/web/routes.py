@@ -11,7 +11,7 @@ from starlette.responses import Response
 from board.constants import HUMAN
 from board.files import Declaration, FileEntry, Files
 from board.forum.actions import Forum, Refused
-from board.forum.entities import ListPage, Post, SubforumTarget, Thread, ThreadTarget
+from board.forum.entities import AgentView, ListPage, Post, SubforumTarget, Thread, ThreadTarget
 from board.tickets import COLUMNS
 from board.tickets.actions import Conflict, NoSuchTicket, Tickets
 from board.web import STATIC_DIR, templates
@@ -420,31 +420,56 @@ def _agent_pages(forum: Forum) -> APIRouter:
         before: Annotated[str | None, Query(max_length=200)] = None,
         after: Annotated[str | None, Query(max_length=200)] = None,
     ) -> Response:
-        filters = {"mention": mention} if mention else {}
-        try:
-            page = await forum.agent_page(mention=mention, before=before, after=after)
-        except Refused:
-            return _page(
-                request,
-                "agents/index.html",
-                page=None,
-                agents=(),
-                mention=mention,
-                error="Invalid agent page cursor.",
-                status_code=400,
-                **_list_navigation("/agents", None, ascending=True, filters=filters),
-            )
-        return _page(
-            request,
-            "agents/index.html",
-            page=page,
-            agents=page.items,
-            mention=mention,
-            error=None,
-            **_list_navigation("/agents", page, ascending=True, filters=filters),
-        )
+        context = await _agents_context(forum, mention, before, after)
+        status_code = 400 if context["error"] else 200
+        return _page(request, "agents/index.html", status_code=status_code, **context)
+
+    @router.get("/agents/rows")
+    async def agent_rows(
+        mention: Annotated[str, Query(max_length=200)] = "",
+        before: Annotated[str | None, Query(max_length=200)] = None,
+        after: Annotated[str | None, Query(max_length=200)] = None,
+    ) -> Response:
+        context = await _agents_context(forum, mention, before, after)
+        return _fragment("agents/index.html", "rows", 400 if context["error"] else 200, **context)
 
     return router
+
+
+async def _agents_context(
+    forum: Forum, mention: str, before: str | None, after: str | None
+) -> dict[str, Any]:
+    filters = {"mention": mention} if mention else {}
+    cursor = {key: value for key, value in (("before", before), ("after", after)) if value is not None}
+    query = urlencode(filters | cursor)
+    rows_url = "/agents/rows" + (f"?{query}" if query else "")
+    try:
+        page = await forum.agent_page(mention=mention, before=before, after=after)
+    except Refused:
+        return {
+            "page": None,
+            "agents": (),
+            "mention": mention,
+            "rows_url": rows_url,
+            "error": "Invalid agent page cursor.",
+            **_list_navigation("/agents", None, ascending=True, filters=filters),
+        }
+    return {
+        "page": page,
+        "agents": sorted(page.items, key=_most_active_first),
+        "mention": mention,
+        "rows_url": rows_url,
+        "error": None,
+        **_list_navigation("/agents", page, ascending=True, filters=filters),
+    }
+
+
+def _most_active_first(view: AgentView) -> tuple[bool, float]:
+    moments = [
+        view.last_wake.created_at if view.last_wake else None,
+        view.last_post.created_at if view.last_post else None,
+    ]
+    return view.queued == 0, -max((moment for moment in moments if moment is not None), default=0.0)
 
 
 class _Navigation(TypedDict):

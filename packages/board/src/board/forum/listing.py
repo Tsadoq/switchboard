@@ -61,9 +61,16 @@ def agents(
         conn.execute(
             base + f", candidates AS (SELECT principal FROM roster WHERE {where}{bound} "
             f"ORDER BY principal {order} LIMIT 50) "
-            "SELECT c.principal, p.display_name, p.specialities, p.wake_every_seconds, r.last_seen_at, r.last_poll_at "
+            "SELECT c.principal, p.display_name, p.specialities, p.wake_every_seconds, p.last_timer_wake_at, "
+            "r.last_seen_at, r.last_poll_at, "
+            "w.reason AS wake_reason, w.summary AS wake_summary, w.created_at AS wake_at, w.thread_id AS wake_thread, "
+            "(SELECT COUNT(*) FROM wakes q WHERE q.principal = c.principal AND q.acked_at IS NULL) AS queued, "
+            "lp.id AS post_id, lp.thread_id AS post_thread, lp.created_at AS post_at "
             "FROM candidates c LEFT JOIN profiles p ON p.principal = c.principal "
-            f"LEFT JOIN principals r ON r.principal = c.principal ORDER BY c.principal {order}",
+            "LEFT JOIN principals r ON r.principal = c.principal "
+            "LEFT JOIN wakes w ON w.id = (SELECT MAX(id) FROM wakes WHERE principal = c.principal) "
+            "LEFT JOIN posts lp ON lp.id = r.last_post_id "
+            f"ORDER BY c.principal {order}",
             (*params, *((key,) if key is not None else ())),
         )
     )

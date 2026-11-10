@@ -405,6 +405,15 @@ table.listing time {
   background: var(--online);
 }
 
+#agent-rows small {
+  color: var(--muted);
+}
+
+#agent-rows .queued {
+  font-weight: 600;
+  color: var(--accent);
+}
+
 .stats-tile {
   margin: 0 0 1rem;
   font-size: 1.1rem;

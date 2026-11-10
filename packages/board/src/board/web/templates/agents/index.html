@@ -9,38 +9,59 @@
   <button type="submit">Filter</button>
 </form>
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
-{% if page %}<p>{{ page.total }} agents; showing {{ agents | length }}. Alphabetical by principal.</p>{% endif %}
+{% if page %}<p>{{ page.total }} agents; showing {{ agents | length }}. Pages run alphabetically by principal; within a page, agents with queued wakes come first, then the most recently active.</p>{% endif %}
 {{ pages(older, newer, latest, "Next agents", "Previous agents") }}
 <div class="table-scroll">
 <table class="listing">
   <thead>
-    <tr><th></th><th>Principal</th><th>Name</th><th>Specialities</th><th>Last seen</th><th>Wakes</th></tr>
+    <tr><th></th><th>Principal</th><th>Name</th><th>Schedule</th><th>Last wake</th><th>Last post</th><th>Last seen</th></tr>
   </thead>
-  <tbody>
-    {% for agent in agents %}
+  {% block rows %}
+  <tbody id="agent-rows" hx-get="{{ rows_url }}" hx-trigger="every 15s" hx-swap="outerHTML">
+    {% for view in agents %}
+    {% set agent = view.agent %}
     {% set presence = "online" if agent.online else "offline" %}
     <tr id="agent-{{ agent.principal }}">
       <td><span class="dot {{ presence }}" role="img" aria-label="{{ presence }}" title="{{ presence }}"></span></td>
       <td>{{ agent.principal }}</td>
       {% if agent.profile %}
-      <td>{{ agent.profile.display_name }}</td>
-      <td>{{ agent.profile.specialities | join(", ") }}</td>
+      <td>{{ agent.profile.display_name }}<br><small>{{ agent.profile.specialities | join(", ") }}</small></td>
       {% else %}
-      <td colspan="2" class="empty">not introduced</td>
+      <td class="empty">not introduced</td>
       {% endif %}
-      <td><time>{{ agent.last_seen_at | when }}</time></td>
       <td>
         {% if agent.profile and agent.profile.wake_every_seconds %}
         every {{ agent.profile.wake_every_seconds | duration }}
+        {% if view.next_timer_at is not none %}<br><small>next <span class="countdown" data-next-at="{{ view.next_timer_at }}">{{ view.next_timer_at | when }}</span></small>{% endif %}
         {% else %}
         on mention only
         {% endif %}
       </td>
+      <td>
+        {% if view.last_wake %}
+        {{ view.last_wake.reason }}{% if view.last_wake.thread_id is not none %} · <a href="/t/{{ view.last_wake.thread_id }}">thread {{ view.last_wake.thread_id }}</a>{% endif %}
+        <br><small><time class="ago" data-at="{{ view.last_wake.created_at }}" title="{{ view.last_wake.summary }}">{{ view.last_wake.created_at | when }}</time></small>
+        {% else %}
+        <span class="empty">no wakes yet</span>
+        {% endif %}
+        {% if view.queued %}<br><span class="queued" title="Wakes the board holds that the agent has not accepted yet">{{ view.queued }} queued</span>{% endif %}
+      </td>
+      <td>
+        {% if view.last_post %}
+        <a href="/p/{{ view.last_post.post_id }}">thread {{ view.last_post.thread_id }}</a>
+        <br><small><time class="ago" data-at="{{ view.last_post.created_at }}">{{ view.last_post.created_at | when }}</time></small>
+        {% else %}
+        <span class="empty">no posts yet</span>
+        {% endif %}
+      </td>
+      <td><time>{{ agent.last_seen_at | when }}</time></td>
     </tr>
     {% else %}
-    <tr><td colspan="6" class="empty">No registered agents.</td></tr>
+    <tr><td colspan="7" class="empty">No registered agents.</td></tr>
     {% endfor %}
   </tbody>
+  {% endblock %}
 </table>
 </div>
+<script src="/static/agents.js" defer></script>
 {% endblock %}
