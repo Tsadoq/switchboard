@@ -1,12 +1,12 @@
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import AwareDatetime
 from starlette.responses import Response
 
-from board.forum.actions import Forum, PostResult, RefusalReason, Refused, parse_target
+from board.forum.actions import THREAD_PAGE_MAX, Forum, PostResult, RefusalReason, Refused, parse_target
 from board.forum.entities import Agent, Follow, Post, Profile, Subforum, Thread
 from board.identity.routes import encode_envelope
 from board.identity.verifier import Verified, rfc3339
@@ -46,9 +46,20 @@ def _read_routes(forum: Forum, reader: Reader) -> APIRouter:
         return [_thread_json(thread) for thread in threads]
 
     @router.get("/threads/{thread_id}")
-    async def read_thread(thread_id: int) -> dict[str, Any]:
-        thread, posts = await forum.thread(thread_id)
-        return _thread_json(thread) | {"posts": [_post_json(post) for post in posts]}
+    async def read_thread(
+        thread_id: int,
+        before: Annotated[int | None, Query(ge=0, le=2**63 - 1)] = None,
+        after: Annotated[int | None, Query(ge=0, le=2**63 - 1)] = None,
+        limit: Annotated[int | None, Query(ge=1, le=THREAD_PAGE_MAX)] = None,
+    ) -> dict[str, Any]:
+        if before is None and after is None and limit is None:
+            thread, posts = await forum.thread(thread_id)
+            return _thread_json(thread) | {"posts": [_post_json(post) for post in posts]}
+        page = await forum.thread_page(thread_id, before=before, after=after, limit=limit or 50)
+        return _thread_json(page.thread) | {
+            "posts": [_post_json(post) for post in page.posts],
+            "page": {"total": page.total, "older": page.older, "newer": page.newer, "limit": limit or 50},
+        }
 
     @router.get("/agents")
     async def list_agents() -> list[dict[str, Any]]:

@@ -2,6 +2,7 @@ import base64
 import sqlite3
 import time
 from contextlib import closing
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx2
@@ -407,6 +408,8 @@ def test_post_links_live_files(client: TestClient, signer: "SignerFactory", sett
     assert r.status_code == 201, f"post with a live file refused: {r.status_code} {r.text}"
     post = _read(client, f"/api/threads/{r.json()['thread_id']}", headers)["posts"][0]
     assert post["files"] == ["live-file"], f"live file not attached to the post: {post}"
+    page = _read(client, f"/api/threads/{r.json()['thread_id']}?limit=1", headers)
+    assert page["posts"] == [post]
 
 
 def test_add_subforum_command_creates_a_subforum_the_board_lists(
@@ -449,3 +452,168 @@ def test_add_subforum_refuses_a_bad_slug(
         main(["add-subforum", slug])
 
     assert refused.value.code != 0, f"bad slug {slug!r} accepted"
+
+
+def _page_thread(client: TestClient, author: "Signer", count: int) -> tuple[int, list[int]]:
+    thread_id = _open_thread(client, author)
+    for number in range(1, count):
+        _portal(client).call(
+            _forum(client).post, HUMAN, "human", ThreadTarget(thread_id), {"body": f"post {number}"}
+        )
+    posts = _portal(client).call(_forum(client).thread, thread_id)[1]
+    return thread_id, [post.id for post in posts]
+
+
+@pytest.mark.parametrize("count", [1, 50, 51])
+def test_thread_page_defaults_to_latest_fifty(
+    client: TestClient, signer: "SignerFactory", count: int
+) -> None:
+    alice = signer()
+    _register(client, alice)
+    thread_id, ids = _page_thread(client, alice, count)
+    page = _read(client, f"/api/threads/{thread_id}?limit=50", _bearer(client, alice))
+    assert [post["id"] for post in page["posts"]] == ids[-50:]
+    assert page["page"] == {
+        "total": count,
+        "older": ids[-50] if count > 50 else None,
+        "newer": None,
+        "limit": 50,
+    }
+
+
+def test_thread_page_walks_both_directions_without_gaps(client: TestClient, signer: "SignerFactory") -> None:
+    alice = signer()
+    _register(client, alice)
+    thread_id, ids = _page_thread(client, alice, 23)
+    headers = _bearer(client, alice)
+    path = f"/api/threads/{thread_id}"
+    latest = _read(client, f"{path}?limit=10", headers)
+    middle = _read(client, f"{path}?limit=10&before={latest['page']['older']}", headers)
+    oldest = _read(client, f"{path}?limit=10&before={middle['page']['older']}", headers)
+    collected = [post["id"] for page in (oldest, middle, latest) for post in page["posts"]]
+    assert collected == ids
+    assert oldest["page"]["older"] is None
+    newer = _read(client, f"{path}?limit=10&after={oldest['page']['newer']}", headers)
+    assert newer["posts"] == middle["posts"]
+    assert newer["page"] == middle["page"]
+
+
+def test_thread_page_after_drains_new_posts_in_bounded_batches(
+    client: TestClient, signer: "SignerFactory"
+) -> None:
+    alice = signer()
+    _register(client, alice)
+    thread_id, ids = _page_thread(client, alice, 1)
+    cursor = ids[-1]
+    headers = _bearer(client, alice)
+    for number in range(13):
+        _portal(client).call(
+            _forum(client).post, HUMAN, "human", ThreadTarget(thread_id), {"body": f"new {number}"}
+        )
+    found: list[int] = []
+    for expected_size in (5, 5, 3, 0):
+        page = _read(client, f"/api/threads/{thread_id}?after={cursor}&limit=5", headers)
+        batch = [post["id"] for post in page["posts"]]
+        assert len(batch) == expected_size
+        found.extend(batch)
+        if batch:
+            cursor = batch[-1]
+    all_ids = [post.id for post in _portal(client).call(_forum(client).thread, thread_id)[1]]
+    assert found == all_ids[1:]
+
+
+def test_thread_page_older_cursor_survives_concurrent_append(
+    client: TestClient, signer: "SignerFactory"
+) -> None:
+    alice = signer()
+    _register(client, alice)
+    thread_id, ids = _page_thread(client, alice, 12)
+    headers = _bearer(client, alice)
+    latest = _read(client, f"/api/threads/{thread_id}?limit=5", headers)
+    _portal(client).call(_forum(client).post, HUMAN, "human", ThreadTarget(thread_id), {"body": "later"})
+    older = _read(client, f"/api/threads/{thread_id}?limit=5&before={latest['page']['older']}", headers)
+    assert [post["id"] for post in older["posts"]] == ids[2:7]
+    assert older["page"]["total"] == 13
+
+
+def test_thread_page_orders_by_immutable_ids_despite_clock_changes(
+    client: TestClient, signer: "SignerFactory", settings: Settings
+) -> None:
+    alice = signer()
+    _register(client, alice)
+    thread_id, ids = _page_thread(client, alice, 5)
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.execute("UPDATE posts SET created_at = 0 WHERE id = ?", (ids[-1],))
+    result = _read(client, f"/api/threads/{thread_id}?limit=3", _bearer(client, alice))
+    assert [post["id"] for post in result["posts"]] == ids[-3:]
+
+
+def test_thread_page_preserves_unparameterised_api_response(
+    client: TestClient, signer: "SignerFactory"
+) -> None:
+    alice = signer()
+    _register(client, alice)
+    thread_id, ids = _page_thread(client, alice, 51)
+    result = _read(client, f"/api/threads/{thread_id}", _bearer(client, alice))
+    assert "page" not in result
+    assert [post["id"] for post in result["posts"]] == ids
+
+
+@pytest.mark.parametrize(
+    "query,status",
+    [
+        ("limit=0", 422),
+        ("limit=201", 422),
+        ("before=-1", 422),
+        ("after=9223372036854775808", 422),
+        ("before=1&after=2", 400),
+    ],
+)
+def test_thread_page_rejects_invalid_bounds(
+    client: TestClient, signer: "SignerFactory", query: str, status: int
+) -> None:
+    alice = signer()
+    _register(client, alice)
+    thread_id = _open_thread(client, alice)
+    response = client.get(f"/api/threads/{thread_id}?{query}", headers=_bearer(client, alice))
+    assert response.status_code == status
+
+
+def test_thread_page_missing_thread_and_empty_interval(client: TestClient, signer: "SignerFactory") -> None:
+    alice = signer()
+    _register(client, alice)
+    headers = _bearer(client, alice)
+    missing = client.get("/api/threads/999999?limit=5", headers=headers)
+    assert missing.status_code == 404
+    thread_id, ids = _page_thread(client, alice, 1)
+    result = _read(client, f"/api/threads/{thread_id}?before={ids[0]}", headers)
+    assert result["posts"] == []
+    assert result["page"] == {"total": 1, "older": None, "newer": None, "limit": 50}
+
+
+def test_thread_page_only_hydrates_bounded_posts_and_attachment_ids(
+    client: TestClient, signer: "SignerFactory", monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from board import db
+
+    alice = signer()
+    _register(client, alice)
+    thread_id, ids = _page_thread(client, alice, 21)
+    headers = _bearer(client, alice)
+    statements: list[str] = []
+    original = db.connect
+
+    def traced(path: Path) -> sqlite3.Connection:
+        conn = original(path)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(db, "connect", traced)
+    result = _read(client, f"/api/threads/{thread_id}?limit=5", headers)
+    post_reads = [sql for sql in statements if sql.startswith("SELECT * FROM posts")]
+    assert len(post_reads) == 1
+    assert "ORDER BY id DESC LIMIT 5" in post_reads[0]
+    link_reads = [sql for sql in statements if "FROM post_files" in sql]
+    assert len(link_reads) == 1
+    assert f"post_id IN ({','.join(str(i) for i in ids[-5:])})" in link_reads[0]
+    assert len(result["posts"]) == 5

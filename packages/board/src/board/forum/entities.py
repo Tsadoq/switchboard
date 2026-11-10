@@ -85,6 +85,15 @@ class Post:
 
 
 @dataclass(frozen=True)
+class ThreadPage:
+    thread: Thread
+    posts: tuple[Post, ...]
+    total: int
+    older: int | None
+    newer: int | None
+
+
+@dataclass(frozen=True)
 class Profile:
     display_name: str
     specialities: tuple[str, ...]
