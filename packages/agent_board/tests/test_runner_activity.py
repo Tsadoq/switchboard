@@ -2,6 +2,7 @@ from typing import Any
 
 from agent_board.client import BoardError, BoardUnreachable
 from agent_board.runner.activity import REPORT_PATH, ActivityReporter, threads_of
+from agent_board.runner.happier import HappierError
 
 _START = 1_800_000_000.0
 
@@ -29,10 +30,13 @@ class Board:
 class Sessions:
     def __init__(self) -> None:
         self.busy: set[str] = set()
+        self.failing: set[str] = set()
         self.probed: list[str] = []
 
     def idle(self, session_id: str, timeout: int = 3) -> bool:
         self.probed.append(session_id)
+        if session_id in self.failing:
+            raise HappierError("timeout_internal")
         return session_id not in self.busy
 
 
@@ -107,7 +111,7 @@ def test_scheduled_wakes_run_with_no_threads() -> None:
     assert board.reports[-1]["running"] == [{"threads": [], "since": _START}], board.reports
 
 
-def test_a_board_without_the_activity_route_switches_reporting_off() -> None:
+def test_a_board_without_the_activity_route_pauses_reporting_then_tries_again() -> None:
     rig = Rig()
     reporter, clock, board = rig.reporter, rig.clock, rig.board
     board.failure = BoardError(404, "Not Found")
@@ -115,11 +119,74 @@ def test_a_board_without_the_activity_route_switches_reporting_off() -> None:
     reporter.probe()
     board.failure = None
 
-    clock.now += 60
-    reporter.delivered("s2", (35,))
+    clock.now += 600
+    reporter.probe()
+    paused = list(board.reports)
+    clock.now += 3000
     reporter.probe()
 
-    assert board.reports == [], f"kept reporting to a board that lacks the route: {board.reports}"
+    assert paused == [], f"reported during the pause: {paused}"
+    assert board.reports and board.reports[-1]["running"] == [], f"reporting did not resume: {board.reports}"
+
+
+def test_a_session_whose_probes_keep_failing_stops_showing_as_running() -> None:
+    rig = Rig()
+    reporter, clock, board, sessions = rig.reporter, rig.clock, rig.board, rig.sessions
+    sessions.failing.add("gone")
+    reporter.delivered("gone", (34,))
+    reporter.probe()
+
+    for _ in range(3):
+        clock.now += 20
+        reporter.probe()
+
+    assert board.reports[-1]["running"] == [], f"vanished session still reported running: {board.reports}"
+    assert len(sessions.probed) == 3, f"expected three failed probes before giving up: {sessions.probed}"
+
+
+def test_a_successful_probe_resets_the_failure_count() -> None:
+    rig = Rig()
+    reporter, clock, board, sessions = rig.reporter, rig.clock, rig.board, rig.sessions
+    sessions.busy.add("s1")
+    reporter.delivered("s1", (34,))
+    for failing in (True, True, False, True, True):
+        clock.now += 20
+        if failing:
+            sessions.failing.add("s1")
+        else:
+            sessions.failing.discard("s1")
+        reporter.probe()
+
+    assert board.reports[-1]["running"] != [], f"dropped after non-consecutive failures: {board.reports}"
+
+
+def test_a_run_past_the_maximum_age_stops_showing_as_running() -> None:
+    rig = Rig()
+    reporter, clock, board, sessions = rig.reporter, rig.clock, rig.board, rig.sessions
+    sessions.busy.add("s1")
+    reporter.delivered("s1", (34,))
+    reporter.probe()
+
+    clock.now += 2 * 3600
+    reporter.probe()
+
+    assert board.reports[-1]["running"] == [], f"two-hour run still reported: {board.reports}"
+
+
+def test_long_runs_are_probed_less_often() -> None:
+    rig = Rig()
+    reporter, clock, sessions = rig.reporter, rig.clock, rig.sessions
+    sessions.busy.add("s1")
+    reporter.delivered("s1", (34,))
+    clock.now += 300
+    reporter.probe()
+    early = len(sessions.probed)
+
+    for _ in range(3):
+        clock.now += 20
+        reporter.probe()
+
+    assert len(sessions.probed) - early == 1, f"long run probed every 20 s: {sessions.probed}"
 
 
 def test_an_unreachable_board_is_retried_on_the_next_probe() -> None:
