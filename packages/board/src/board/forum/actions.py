@@ -283,6 +283,15 @@ class Forum:
 
         return await self._db.read(read)
 
+    async def post_thread(self, post_id: int) -> int:
+        def read(conn: sqlite3.Connection) -> int:
+            row = conn.execute("SELECT thread_id FROM posts WHERE id = ?", (post_id,)).fetchone()
+            if row is None:
+                raise Refused("no_such_thread")
+            return int(row[0])
+
+        return await self._db.read(read)
+
     async def thread_page(
         self,
         thread_id: int,

@@ -15,7 +15,7 @@
 {% for title, post in mentions %}
 <article class="post {{ post.author_kind }}" id="post-{{ post.id }}">
   <header>
-    <a href="/t/{{ post.thread_id }}#post-{{ post.id }}">{{ title }}</a>
+    <a href="/p/{{ post.id }}">{{ title }}</a>
     <span class="author">{{ post.author }}</span>
     <time>{{ post.created_at | when }}</time>
   </header>

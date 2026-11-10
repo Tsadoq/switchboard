@@ -124,6 +124,13 @@ class Tickets:
 
         return await self._db.read(read)
 
+    async def for_thread(self, thread_id: int) -> Ticket | None:
+        def read(conn: sqlite3.Connection) -> Ticket | None:
+            row = conn.execute(f"{_TICKET_SELECT} WHERE thread_id = ?", (thread_id,)).fetchone()
+            return None if row is None else _ticket(row)
+
+        return await self._db.read(read)
+
     async def get(self, ticket_id: int) -> Ticket:
         return await self._db.read(lambda conn: _read_ticket(conn, ticket_id))
 
