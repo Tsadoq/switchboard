@@ -1,4 +1,12 @@
-# Disabled local night containment primitive
+# Superseded user-unit containment prototype
+
+Do not use this prototype for pilot launch or settlement. Review found that its cgroup
+lives in the agent's delegated user subtree: the agent can migrate PIDs to a sibling
+cgroup without brokering another service. An empty tracked user cgroup therefore does
+not prove the tracked work terminated. Root-owned timers alone do not fix that gap.
+The replacement contract is in night-verifier-protocol.md: root-created, nondelegated
+system units under a root-owned slice, with independent creation, deadline and stop.
+This module remains unwired; its earlier surrogate evidence is not system-unit proof.
 
 `agent_board.runner.night_containment` adds a local unit plan, startup guard and
 termination-observation predicate. Nothing imports it into ordinary runner dispatch.
@@ -53,10 +61,13 @@ extend the grant through a fresh relative RuntimeMaxSec. Stop timers run a fixed
 systemctl command against that run's unique unit, never a shared daemon. Timer/helper
 names are derived from the run UUID and must be cleaned up during trusted recovery.
 
-## Proof and trust limits
+## Observations and invalidated trust assumptions
 
-`verified_empty()` is an internal predicate over **trusted** manager observations and
-kernel cgroup.events. It requires the expected boot, unit identity, prior nonzero
+`verified_empty()` is a historical predicate over manager observations and kernel
+cgroup.events, not valid pilot termination proof for these delegated user units.
+Even independently trusted observations cannot prove that no process migrated out.
+The original observation checks below describe only whether the tracked user cgroup
+is currently empty. It requires the expected boot, unit identity, prior nonzero
 invocation, fence marker for loaded units, inactive/failed state, the exact tracked
 cgroup (or its absence), a readable v2 controller root and no populated descendants.
 An unloaded unit can count only after the verifier previously observed that unique
