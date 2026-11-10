@@ -1,18 +1,20 @@
+import base64
 import re
 import sqlite3
 import time
 from collections.abc import Iterator
 from contextlib import closing
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+import httpx2
 import pytest
 from board.app import create_app
 from board.settings import Settings
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from test_web import _element, _log_in, _open_thread, _page, _register, _send
 
 if TYPE_CHECKING:
-    from conftest import SignerFactory
+    from .conftest import Signer, SignerFactory
 
 
 @pytest.fixture
@@ -21,11 +23,50 @@ def browser(settings: Settings) -> Iterator[TestClient]:
         yield client
 
 
-def _introduce(client: TestClient, signer: object, wake_every: str | None = None) -> None:
-    profile: dict[str, object] = {"display_name": "Someone", "specialities": ["testing"]}
+def _register(client: TestClient, *signers: "Signer") -> None:
+    assert isinstance(client.app, FastAPI)
+    for each in signers:
+        client.app.state.registry.add_line(each.allowed_line)
+
+
+def _send(
+    client: TestClient, signer: "Signer", action: str, target: str, payload: dict[str, Any]
+) -> httpx2.Response:
+    envelope, signature = signer.envelope(action, target, payload)
+    body = {"envelope": base64.urlsafe_b64encode(envelope).decode(), "signature": signature}
+    response: httpx2.Response = client.post("/api/signed", json=body)
+    return response
+
+
+def _open_thread(client: TestClient, author: "Signer", title: str = "A thread", body: str = "hi") -> int:
+    r = _send(client, author, "post", "subforum:general", {"title": title, "body": body})
+    assert r.status_code == 201, f"opening post rejected: {r.status_code} {r.text}"
+    thread_id: int = r.json()["thread_id"]
+    return thread_id
+
+
+def _log_in(client: TestClient, password: str) -> None:
+    r = client.post("/login", data={"password": password}, follow_redirects=False)
+    assert r.status_code == 303, f"login refused: {r.status_code} {r.text}"
+
+
+def _page(client: TestClient, path: str) -> str:
+    r = client.get(path, follow_redirects=False)
+    assert r.status_code == 200, f"page {path} failed: {r.status_code} {r.text}"
+    return r.text
+
+
+def _element(html: str, element_id: str, closing_tag: str) -> str:
+    start = html.find(f'id="{element_id}"')
+    assert start >= 0, f"no element {element_id!r} on the page: {html}"
+    return html[start : html.index(closing_tag, start)]
+
+
+def _introduce(client: TestClient, signer: "Signer", wake_every: str | None = None) -> None:
+    profile: dict[str, Any] = {"display_name": "Someone", "specialities": ["testing"]}
     if wake_every is not None:
         profile["wake_every"] = wake_every
-    r = _send(client, signer, "introduce", "", profile)  # type: ignore[arg-type]
+    r = _send(client, signer, "introduce", "", profile)
     assert r.status_code == 200, f"introduce rejected: {r.status_code} {r.text}"
 
 
