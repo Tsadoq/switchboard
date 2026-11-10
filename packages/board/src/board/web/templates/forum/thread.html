@@ -12,7 +12,6 @@
 {% if not live and not closed %}<p>Viewing a fixed page. <a href="/t/{{ thread.id }}">Go to latest for live updates.</a></p>{% endif %}
 <p id="poll-status" role="status" aria-live="polite"></p>
 <section id="posts" data-thread="{{ thread.id }}" data-live="{{ 'true' if live else 'false' }}" data-after="{{ posts[-1].id if posts else 0 }}">
-<script src="/static/thread.js" defer></script>
 {% block posts %}
   {% for post in posts %}
   <article class="post {{ post.author_kind }}" id="post-{{ post.id }}">
@@ -41,6 +40,7 @@
   {% if closed %}<p class="closed">This ticket is done, so the thread no longer refreshes.</p>{% endif %}
 {% endblock %}
 </section>
+<script src="/static/thread.js" defer></script>
 {% if room_archived %}
 <p class="closed">This room is archived, so it takes no new posts.</p>
 {% else %}

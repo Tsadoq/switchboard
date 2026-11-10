@@ -1014,11 +1014,32 @@ def test_web_post_permalink_contains_target(
     for post_id in (ids[0], ids[40], ids[-1]):
         response = browser.get(f"/p/{post_id}", follow_redirects=False)
         assert response.status_code == 303
-        assert response.headers["location"] == f"/t/{thread_id}?after={post_id - 1}#post-{post_id}"
+        expected = (
+            f"/t/{thread_id}#post-{post_id}"
+            if post_id in ids[-50:]
+            else f"/t/{thread_id}?before={post_id + 1}#post-{post_id}"
+        )
+        assert response.headers["location"] == expected
         page = browser.get(response.headers["location"])
         assert f'id="post-{post_id}"' in page.text
+        shown = [int(i) for i in re.findall(r'<article[^>]+id="post-(\d+)"', page.text)]
+        assert shown == (ids[-50:] if post_id in ids[-50:] else [i for i in ids if i <= post_id][-50:])
     assert browser.get("/p/999999").status_code == 404
     assert 'src="/static/thread.js"' in _page(browser, f"/t/{thread_id}")
+
+
+def test_reply_permalink_preserves_preceding_conversation(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    thread_id, ids = _long_thread(browser, settings)
+    reply = _submit(browser, f"/t/{thread_id}/reply", body="My reply")
+    response = browser.get(reply.headers["location"])
+    shown = [int(i) for i in re.findall(r'<article[^>]+id="post-(\d+)"', response.text)]
+    assert len(shown) == 50
+    assert shown[:-1] == ids[-49:]
+    assert "My reply" in response.text
+    assert 'data-live="true"' in response.text
 
 
 def test_closed_web_poll_drains_before_stopping(

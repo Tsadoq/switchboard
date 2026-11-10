@@ -115,16 +115,18 @@ def main() -> None:
                 assert page.locator("#posts").get_attribute("data-live") == "false"
                 page.goto("https://board.test/t/1")
                 page.evaluate("location.hash = 'post-2'")
-                page.wait_for_url("**/t/1?after=1#post-2")
+                page.wait_for_url("**/t/1?before=3#post-2")
                 assert page.locator("#post-2").count() == 1
                 page.go_back()
                 assert page.url == "https://board.test/t/1", page.url
                 page.go_back()
                 assert "before=51" in page.url, page.url
                 page.goto("https://board.test/t/1")
-                page.evaluate("location.hash = 'post-3'")
-                page.wait_for_url("**/t/1?after=2#post-3")
-                assert page.locator("#post-3").count() == 1
+                page.evaluate("location.hash = 'post-80'")
+                page.wait_for_url("**/t/1?before=81#post-80")
+                assert page.locator("#post-80").count() == 1
+                assert page.locator("article.post").count() == 50
+                assert page.locator("article.post").first.get_attribute("id") == "post-31"
                 page.evaluate("window.scrollTo(0, 0)")
                 page.screenshot(path="/tmp/switchboard-thread-pagination.png")
                 browser.close()

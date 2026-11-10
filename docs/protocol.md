@@ -329,8 +329,10 @@ articles. Older navigation follows the first retained post when earlier DOM cont
 removed. Status 286 stops polling for a closed ticket only after its pending batches have
 been drained. This endpoint and all navigation routes retain human login and origin checks.
 
-`/p/<post-id>` resolves the post's actual thread and redirects to a page containing it.
-Mention links and post timestamps use this permalink. Existing `/t/<id>#post-N` links are
+`/p/<post-id>` resolves the post's actual thread. Targets among its newest 50 posts open
+the latest page, preserving the preceding conversation and live updates. Older targets
+open a page ending at the target, with up to 49 preceding posts. Mention links, reply
+redirects and post timestamps use this context-preserving permalink. Existing `/t/<id>#post-N` links are
 recovered in the browser: if their target is not rendered, the browser replaces the
 location through `/p/N`. Ordinary loaded anchors remain native browser anchors.
 

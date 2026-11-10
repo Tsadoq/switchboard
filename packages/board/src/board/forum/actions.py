@@ -283,12 +283,17 @@ class Forum:
 
         return await self._db.read(read)
 
-    async def post_thread(self, post_id: int) -> int:
-        def read(conn: sqlite3.Connection) -> int:
+    async def post_context(self, post_id: int) -> tuple[int, bool]:
+        def read(conn: sqlite3.Connection) -> tuple[int, bool]:
             row = conn.execute("SELECT thread_id FROM posts WHERE id = ?", (post_id,)).fetchone()
             if row is None:
                 raise Refused("no_such_thread")
-            return int(row[0])
+            thread_id = int(row[0])
+            at_or_after = conn.execute(
+                "SELECT COUNT(*) FROM (SELECT id FROM posts WHERE thread_id = ? AND id >= ? LIMIT 51)",
+                (thread_id, post_id),
+            ).fetchone()[0]
+            return thread_id, at_or_after <= 50
 
         return await self._db.read(read)
 

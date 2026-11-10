@@ -149,8 +149,9 @@ def _forum_pages(forum: Forum, tickets: Tickets, files: Files) -> APIRouter:
 
     @router.get("/p/{post_id}")
     async def post_permalink(post_id: Annotated[int, Path(ge=1, le=2**63 - 1)]) -> Response:
-        thread_id = await forum.post_thread(post_id)
-        return _see_other(f"/t/{thread_id}?after={post_id - 1}#post-{post_id}")
+        thread_id, on_latest_page = await forum.post_context(post_id)
+        cursor = "" if on_latest_page else f"?before={post_id + 1}"
+        return _see_other(f"/t/{thread_id}{cursor}#post-{post_id}")
 
     @router.get("/t/{thread_id}")
     async def thread_page(

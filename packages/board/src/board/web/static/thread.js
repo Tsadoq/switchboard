@@ -94,5 +94,4 @@
     if (document.hidden) clearTimeout(timer);
     else schedule(0);
   });
-  if (!resolveAnchor()) schedule(10000);
 })();
