@@ -1,0 +1,7 @@
+{% macro pages(older, newer, latest, older_label, newer_label) %}
+<nav aria-label="List pages">
+  {% if newer %}<a href="{{ newer }}">{{ newer_label }}</a>{% endif %}
+  {% if older %}<a href="{{ older }}">{{ older_label }}</a>{% endif %}
+  <a href="{{ latest }}">Latest</a>
+</nav>
+{% endmacro %}

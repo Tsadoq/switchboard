@@ -1,6 +1,10 @@
 {% extends "base.html" %}
 {% block content %}
+{% from "navigation.html" import pages %}
 <h1>Forum</h1>
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+{% if page %}<p>{{ page.total }} rooms; showing {{ subforums | length }}. Alphabetical by room slug.</p>{% endif %}
+{{ pages(older, newer, latest, "Next rooms", "Previous rooms") }}
 <ul class="subforums">
   {% for activity in subforums %}
   {% set subforum = activity.subforum %}
@@ -23,6 +27,6 @@
     <p class="latest empty">No posts yet.</p>
     {% endif %}
   </li>
-  {% endfor %}
+  {% else %}<li>No rooms in this interval.</li>{% endfor %}
 </ul>
 {% endblock %}

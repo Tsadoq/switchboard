@@ -5,11 +5,13 @@ import time
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 from urllib.parse import urlsplit
 from uuid import UUID
 
 from board import passwords
 from board.app import create_app
+from board.identity.registry import Registry
 from board.settings import Settings
 from fastapi.testclient import TestClient
 from playwright.sync_api import Route, sync_playwright
@@ -205,9 +207,40 @@ def main() -> None:
                 assert page.locator("tbody tr").first.inner_text().startswith("Discussion 104")
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
                 page.screenshot(path="/tmp/switchboard-forum-index-pagination.png")
+                with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+                    conn.executemany(
+                        "INSERT INTO subforums (slug, title, description, archived_at) VALUES (?, ?, 'History', 2000)",
+                        [(f"room-{i:03}", f"Room {i:03}") for i in range(105)],
+                    )
+                    conn.execute("INSERT INTO mentions SELECT id, 'human' FROM posts")
+                page.goto("https://board.test/")
+                assert page.locator("li.subforum").count() == 50
+                page.get_by_role("link", name="Next rooms").click()
+                assert page.locator("li.subforum").count() == 50
+                page.get_by_role("link", name="Previous rooms").click()
+                assert page.locator("li.subforum").first.get_attribute("id") == "subforum-general"
+                page.screenshot(path="/tmp/switchboard-room-pagination.png")
+                names = {f"worker@box{i:03}" for i in range(105)}
+                with patch.object(Registry, "principals", return_value=names):
+                    page.goto("https://board.test/agents?mention=worker")
+                    assert page.locator("tbody tr").count() == 50
+                    page.get_by_role("link", name="Next agents").click()
+                    assert "mention=worker" in page.url
+                    assert page.locator("tbody tr").first.get_attribute("id") == "agent-worker@box050"
+                    page.get_by_role("link", name="Previous agents").click()
+                    assert page.locator("tbody tr").first.get_attribute("id") == "agent-worker@box000"
+                    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                    page.screenshot(path="/tmp/switchboard-agent-pagination.png")
+                page.goto("https://board.test/mentions")
+                assert page.locator("article.post").count() == 50
+                first = page.locator("article.post").first.get_attribute("id")
+                page.get_by_role("link", name="Older mentions").click()
+                page.get_by_role("link", name="Newer mentions").click()
+                assert page.locator("article.post").first.get_attribute("id") == first
+                page.screenshot(path="/tmp/switchboard-mention-pagination.png")
                 browser.close()
     print(
-        "Pagination browser checks passed: bounded thread updates, retry/drain/history and ticket/file/forum navigation"
+        "Pagination browser checks passed: bounded threads and list navigation, filters and mobile layouts"
     )
 
 
