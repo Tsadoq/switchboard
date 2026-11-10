@@ -1,3 +1,6 @@
+import base64
+import json
+import math
 import re
 import sqlite3
 import time
@@ -5,6 +8,7 @@ from collections.abc import AsyncIterable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, BinaryIO, Self
+from uuid import UUID
 
 from starlette.concurrency import run_in_threadpool
 
@@ -66,6 +70,14 @@ class FileEntry:
     expires_at: float
 
 
+@dataclass(frozen=True)
+class FilePage:
+    files: tuple[FileEntry, ...]
+    total: int
+    older: str | None
+    newer: str | None
+
+
 class Files:
     def __init__(self, db: Database, store: Store, default_ttl_days: int) -> None:
         self._db = db
@@ -110,6 +122,15 @@ class Files:
 
         return await self._db.read(read)
 
+    async def page(self, *, before: str | None = None, after: str | None = None, limit: int = 50) -> FilePage:
+        if before is not None and after is not None:
+            raise Refused("bad_payload", "cursor")
+        if not 1 <= limit <= 200:
+            raise Refused("bad_payload", "limit")
+        token = before if before is not None else after
+        key = _cursor(token) if token is not None else None
+        return await self._db.read(lambda conn: _file_page(conn, key, after is not None, limit))
+
     async def live_by_ids(self, ids: tuple[str, ...]) -> list[FileEntry]:
         def read(conn: sqlite3.Connection) -> list[FileEntry]:
             entries: list[FileEntry] = []
@@ -141,6 +162,57 @@ class Files:
             return entry, self._store.open(entry.id)
         except FileNotFoundError:
             raise NoSuchFile(file_id) from None
+
+
+def _file_page(conn: sqlite3.Connection, key: tuple[float, str] | None, newer: bool, limit: int) -> FilePage:
+    now = time.time()
+    order = "ASC" if newer else "DESC"
+    comparison = ">" if newer else "<"
+    bound = f" AND (created_at, id) {comparison} (?, ?)" if key is not None else ""
+    params = (now, *(key or ()), limit)
+    rows = conn.execute(
+        f"SELECT {_ENTRY_COLUMNS} FROM files WHERE {LIVE_CONDITION}{bound} "
+        f"ORDER BY created_at {order}, id {order} LIMIT ?",
+        params,
+    )
+    entries = tuple(_entry(row) for row in rows)
+    if newer:
+        entries = tuple(reversed(entries))
+    total = conn.execute(f"SELECT COUNT(*) FROM files WHERE {LIVE_CONDITION}", (now,)).fetchone()[0]
+
+    def exists(entry: FileEntry, operator: str) -> bool:
+        return bool(
+            conn.execute(
+                f"SELECT EXISTS(SELECT 1 FROM files WHERE {LIVE_CONDITION} AND (created_at, id) {operator} (?, ?))",
+                (now, entry.created_at, entry.id),
+            ).fetchone()[0]
+        )
+
+    older = _encode_cursor(entries[-1]) if entries and exists(entries[-1], "<") else None
+    previous = _encode_cursor(entries[0]) if entries and exists(entries[0], ">") else None
+    return FilePage(entries, total, older, previous)
+
+
+def _encode_cursor(entry: FileEntry) -> str:
+    raw = json.dumps([entry.created_at, entry.id], separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _cursor(token: str) -> tuple[float, str]:
+    try:
+        if not 1 <= len(token) <= 512:
+            raise ValueError
+        values = json.loads(base64.b64decode(token + "=" * (-len(token) % 4), altchars=b"-_", validate=True))
+        if not isinstance(values, list) or len(values) != 2:
+            raise ValueError
+        moment, file_id = values
+        if type(moment) not in (int, float) or not math.isfinite(moment) or moment < 0:
+            raise ValueError
+        if not isinstance(file_id, str) or str(UUID(file_id)) != file_id:
+            raise ValueError
+        return float(moment), file_id
+    except (ValueError, TypeError, OverflowError):
+        raise Refused("bad_payload", "cursor") from None
 
 
 def _insert(conn: sqlite3.Connection, entry: FileEntry, signed: Verified | None) -> None:
