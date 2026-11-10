@@ -71,14 +71,14 @@ def main() -> None:
                 assert "#55" in (tickets.locator("tbody tr").first.text_content() or "")
                 files.get_by_role("link", name="Next", exact=True).click()
                 files.get_by_role("link", name="Previous", exact=True).wait_for()
-                assert "worker050@box" in (files.locator("tbody tr").first.text_content() or "")
+                assert "worker054@box" in (files.locator("tbody tr").first.text_content() or "")
                 assert "#55" in (tickets.locator("tbody tr").first.text_content() or "")
                 tickets.get_by_role("link", name="Previous", exact=True).click()
                 tickets.get_by_role("link", name="Next", exact=True).wait_for()
                 assert "files_after=" in page.url and "#105" in (
                     tickets.locator("tbody tr").first.text_content() or ""
                 )
-                assert "worker050@box" in (files.locator("tbody tr").first.text_content() or "")
+                assert "worker054@box" in (files.locator("tbody tr").first.text_content() or "")
                 tickets.locator("summary").click()
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
                 tickets.locator("summary").click()

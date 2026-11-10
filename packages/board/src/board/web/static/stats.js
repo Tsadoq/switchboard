@@ -71,7 +71,7 @@
     return value.toLocaleString(undefined, { maximumSignificantDigits: 3 });
   }
 
-  function postsPerPrincipal(byDay) {
+  function postsPerPrincipal(byDay, page) {
     const days = Object.keys(byDay);
     const totals = new Map();
     for (const counts of Object.values(byDay)) {
@@ -86,7 +86,7 @@
       .sort()
       .map((principal, slot) => ({ label: principal, members: [principal], color: SERIES_COLORS[slot] }));
     if (ranked.length > keptCount) {
-      groups.push({ label: "Other", members: ranked.slice(keptCount), color: OTHER_COLOR });
+      groups.push({ label: page.total > page.shown ? "Other on this page" : "Other", members: ranked.slice(keptCount), color: OTHER_COLOR });
     }
     const series = groups.map(({ label, members, color }) => ({
       label,
@@ -221,7 +221,7 @@
     const canvas = figure.querySelector("canvas[data-chart]");
     const key = canvas.dataset.chart;
     figure.dataset.chart = key;
-    const spec = SPECS[key](summary[key]);
+    const spec = SPECS[key](summary[key], summary.pages[PAGE_PREFIXES[key]]);
     const prefix = PAGE_PREFIXES[key];
     if (prefix) pageNavigation(figure, prefix, summary.pages[prefix]);
     if (!hasData(spec)) {

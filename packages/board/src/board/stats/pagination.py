@@ -49,7 +49,7 @@ def aggregates(conn: sqlite3.Connection, cursors: dict[str, tuple[str | None, st
         {"uploader": row["uploaded_by"], "bytes": row["bytes"]}
         for row in conn.execute(
             "SELECT uploaded_by, SUM(size) AS bytes FROM files WHERE expires_at > ? "
-            "AND uploaded_by IN (SELECT value FROM json_each(?)) GROUP BY uploaded_by ORDER BY uploaded_by",
+            "AND uploaded_by IN (SELECT value FROM json_each(?)) GROUP BY uploaded_by ORDER BY bytes DESC, uploaded_by",
             (now, json.dumps(uploaders.values)),
         )
     ]
@@ -80,33 +80,62 @@ def _keys(
     after: str | None,
 ) -> Keys:
     _validate(before, after)
-    key = before if before is not None else after
-    order = "DESC" if before is not None else "ASC"
-    operator = "<" if before is not None else ">"
-    bound = f" AND {column} {operator} ?" if key is not None else ""
-    values = tuple(
-        row[0]
-        for row in conn.execute(
-            f"SELECT {column} FROM {table} WHERE {where}{bound} GROUP BY {column} "
-            f"ORDER BY {column} {order} LIMIT 50",
-            (*params, *((key,) if key is not None else ())),
+    token = before if before is not None else after
+    key = _decode_rank(token) if token is not None else None
+    aggregate = "COUNT(*)" if table == "posts" else "SUM(size)"
+    base = f"WITH ranked AS (SELECT {column} AS name, {aggregate} AS score FROM {table} WHERE {where} GROUP BY {column}) "
+    score_order, name_order = ("ASC", "DESC") if before is not None else ("DESC", "ASC")
+    comparison, name_comparison = (">", "<") if before is not None else ("<", ">")
+    bound = (
+        f" WHERE score {comparison} ? OR (score = ? AND name {name_comparison} ?)" if key is not None else ""
+    )
+    values = () if key is None else (key[0], key[0], key[1])
+    rows = tuple(
+        conn.execute(
+            base
+            + f"SELECT name, score FROM ranked{bound} ORDER BY score {score_order}, name {name_order} LIMIT 50",
+            (*params, *values),
         )
     )
     if before is not None:
-        values = tuple(reversed(values))
+        rows = tuple(reversed(rows))
     total = conn.execute(f"SELECT COUNT(DISTINCT {column}) FROM {table} WHERE {where}", params).fetchone()[0]
 
-    def exists(value: str, comparison: str) -> bool:
+    def exists(row: sqlite3.Row, earlier: bool) -> bool:
+        comparison, name_comparison = (">", "<") if earlier else ("<", ">")
         return (
             conn.execute(
-                f"SELECT 1 FROM {table} WHERE {where} AND {column} {comparison} ? LIMIT 1", (*params, value)
+                base
+                + f"SELECT 1 FROM ranked WHERE score {comparison} ? OR (score = ? AND name {name_comparison} ?) LIMIT 1",
+                (*params, row["score"], row["score"], row["name"]),
             ).fetchone()
             is not None
         )
 
-    next_key = values[-1] if values and exists(values[-1], ">") else None
-    previous = values[0] if values and exists(values[0], "<") else None
-    return Keys(values, total, next_key, previous)
+    next_key = _encode_rank(rows[-1]) if rows and exists(rows[-1], False) else None
+    previous = _encode_rank(rows[0]) if rows and exists(rows[0], True) else None
+    return Keys(tuple(row["name"] for row in rows), total, next_key, previous)
+
+
+def _encode_rank(row: sqlite3.Row) -> str:
+    return base64.urlsafe_b64encode(json.dumps([row["score"], row["name"]]).encode()).decode().rstrip("=")
+
+
+def _decode_rank(token: str) -> tuple[int, str]:
+    try:
+        if len(token) > 512:
+            raise ValueError
+        values = json.loads(base64.b64decode(token + "=" * (-len(token) % 4), altchars=b"-_", validate=True))
+        if not isinstance(values, list) or len(values) != 2:
+            raise ValueError
+        score, name = values
+        if type(score) is not int or not 0 <= score <= 2**63 - 1:
+            raise ValueError
+        if not isinstance(name, str) or not 1 <= len(name) <= 200:
+            raise ValueError
+        return score, name
+    except (ValueError, TypeError, OverflowError):
+        raise InvalidCursor from None
 
 
 def _tickets(

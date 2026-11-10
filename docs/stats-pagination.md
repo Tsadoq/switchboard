@@ -3,19 +3,22 @@
 The human statistics view uses `/stats/data`, not the complete legacy summary API.
 It pages the three variable-size datasets before constructing chart and table data:
 
-- Posts: at most 50 distinct principals, alphabetically, over the existing 30-day window.
+- Posts: at most 50 distinct principals, ranked by total posts descending with an
+  alphabetical tie break, over the existing 30-day window.
   A page contains at most 30 daily buckets with counts for those 50 principals.
 - Ticket cycle times: at most 50 completed tickets, newest completion first, with an
   immutable ticket-id tie break. Composite cursors carry the completion timestamp and id.
-- Live file bytes: at most 50 uploaders, alphabetically, with all live bytes aggregated
-  for each selected uploader. The label explicitly describes alphabetical pages.
+- Live file bytes: at most 50 uploaders, ranked by live bytes descending with an
+  alphabetical tie break, with all live bytes aggregated for each selected uploader.
 
 Each chart has its own Previous/Next/Latest links and matching total/shown counts.
 Navigation preserves the other charts' cursors. The scope note says that the chart and
 its data table cover only the selected page. Latest resets only that chart. Empty
 intervals retain Latest. Data tables are horizontally scrollable at narrow widths.
 
-`posts_before`/`posts_after` and `files_before`/`files_after` are exclusive name cursors.
+`posts_before`/`posts_after` and `files_before`/`files_after` are exclusive opaque
+ranking-value/name cursors. The leading page retains global leaders. On partial pages,
+the post chart labels its folded tail "Other on this page", not a global Other total.
 `tickets_before`/`tickets_after` are exclusive opaque composite cursors. Neither member
 of a pair can be combined with the other. Invalid cursors produce a 400 JSON response,
 which the page reports as a load error. Fetch requests use the existing HX login-expiry

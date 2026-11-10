@@ -74,7 +74,7 @@ def test_stats_chart_data_is_paged_without_changing_summary_api(
     }
     middle = browser.get("/stats/data", params=params).json()
     assert [row["ticket_id"] for row in middle["ticket_cycle_time_days"]] == list(range(55, 5, -1))
-    assert middle["files_live_bytes_per_uploader"][0]["uploader"] == "worker050@box"
+    assert middle["files_live_bytes_per_uploader"][0]["uploader"] == "worker054@box"
     back = browser.get("/stats/data", params={"tickets_after": middle["pages"]["tickets"]["previous"]}).json()
     assert back["ticket_cycle_time_days"] == first["ticket_cycle_time_days"]
     legacy = _summary(browser)
@@ -101,7 +101,8 @@ def test_stats_cursors_survive_deleted_boundaries_and_expiry(
     ).json()
     assert page["pages"]["tickets"]["total"] == page["pages"]["files"]["total"] == 104
     assert [item["ticket_id"] for item in page["ticket_cycle_time_days"]] == list(range(55, 5, -1))
-    assert page["files_live_bytes_per_uploader"][0]["uploader"] == "worker051@box"
+    assert page["files_live_bytes_per_uploader"][0]["uploader"] == "worker054@box"
+    assert all(row["uploader"] != "worker050@box" for row in page["files_live_bytes_per_uploader"])
 
 
 def test_stats_page_queries_use_limits_and_ticket_index(
@@ -147,6 +148,70 @@ def test_stats_post_principal_pages_exclude_discarded_future_days(
     assert data["pages"]["posts"]["total"] == data["pages"]["posts"]["shown"] == 1
     assert len(data["posts_per_principal_per_day"]) == WINDOW_DAYS
     assert all("future@box" not in counts for counts in data["posts_per_principal_per_day"].values())
+
+
+def test_stats_ranked_pages_keep_global_leaders_first(
+    browser: TestClient, settings: Settings, human_password: str
+) -> None:
+    _log_in(browser, human_password)
+    _seed_paged_stats(settings)
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.executemany(
+            "INSERT INTO posts (thread_id, author, author_kind, body, created_at) "
+            "VALUES (1, 'worker104@box', 'agent', 'Extra', ?)",
+            [(time.time(),)] * 5,
+        )
+    data = browser.get("/stats/data").json()
+    assert data["files_live_bytes_per_uploader"][0]["uploader"] == "worker104@box"
+    counts = {
+        name: count for day in data["posts_per_principal_per_day"].values() for name, count in day.items()
+    }
+    assert counts["worker104@box"] == 6 and "worker049@box" not in counts
+    next_page = browser.get("/stats/data", params={"posts_after": data["pages"]["posts"]["next"]}).json()
+    assert all("worker104@box" not in day for day in next_page["posts_per_principal_per_day"].values())
+
+
+def test_stats_ranked_file_ties_reconstruct_without_gaps(
+    browser: TestClient, settings: Settings, human_password: str
+) -> None:
+    _log_in(browser, human_password)
+    _seed_paged_stats(settings)
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.execute("UPDATE files SET size = 10")
+    params: dict[str, str] = {}
+    seen: list[str] = []
+    for count in (50, 50, 5):
+        data = browser.get("/stats/data", params=params).json()
+        assert len(data["files_live_bytes_per_uploader"]) == count
+        seen.extend(row["uploader"] for row in data["files_live_bytes_per_uploader"])
+        params = {"files_after": data["pages"]["files"]["next"]}
+    assert seen == [f"worker{i:03}@box" for i in range(105)]
+    previous = browser.get("/stats/data", params={"files_before": data["pages"]["files"]["previous"]}).json()
+    assert previous["files_live_bytes_per_uploader"][0]["uploader"] == "worker050@box"
+
+
+@pytest.mark.parametrize("metric", ["posts", "files"])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        [True, "human"],
+        [-1, "human"],
+        [float("nan"), "human"],
+        [2**63, "human"],
+        [1, None],
+        [1, ""],
+        ["1", "human"],
+    ],
+)
+def test_stats_rank_cursors_are_strict(
+    browser: TestClient, human_password: str, metric: str, payload: object
+) -> None:
+    import json
+
+    _log_in(browser, human_password)
+    token = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+    assert browser.get("/stats/data", params={f"{metric}_after": token}).status_code == 400
 
 
 def test_stats_chart_data_protects_and_validates_cursors(browser: TestClient, human_password: str) -> None:

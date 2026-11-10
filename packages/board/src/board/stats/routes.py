@@ -40,10 +40,10 @@ def _stats_page(db: Database, forum: Forum) -> APIRouter:
 
     @router.get("/stats/data")
     async def paged_data(
-        posts_before: Annotated[str | None, Query(max_length=200)] = None,
-        posts_after: Annotated[str | None, Query(max_length=200)] = None,
-        files_before: Annotated[str | None, Query(max_length=200)] = None,
-        files_after: Annotated[str | None, Query(max_length=200)] = None,
+        posts_before: Annotated[str | None, Query(max_length=512)] = None,
+        posts_after: Annotated[str | None, Query(max_length=512)] = None,
+        files_before: Annotated[str | None, Query(max_length=512)] = None,
+        files_after: Annotated[str | None, Query(max_length=512)] = None,
         tickets_before: Annotated[str | None, Query(max_length=512)] = None,
         tickets_after: Annotated[str | None, Query(max_length=512)] = None,
     ) -> dict[str, Any]:
