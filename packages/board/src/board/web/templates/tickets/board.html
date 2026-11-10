@@ -23,7 +23,7 @@
   {% for column, page in board.items() %}
   <section class="column" id="column-{{ column }}">
     <h2>{{ column }} <span class="count">{{ page.total }}</span></h2>
-    <p>Showing {{ page.tickets | length }} of {{ page.total }}. <a href="/tickets/list?column={{ column }}">View all {{ column }}</a></p>
+    <p>{% if column == "done" %}Most recently completed{% elif column == "backlog" %}Newest tickets{% else %}Oldest tickets first{% endif %}. Showing {{ page.tickets | length }} of {{ page.total }}. <a href="/tickets/list?column={{ column }}">View all {{ column }}</a></p>
     {% for ticket in page.tickets %}{{ card(ticket, board) }}{% endfor %}
   </section>
   {% endfor %}

@@ -338,13 +338,17 @@ location through `/p/N`. Ordinary loaded anchors remain native browser anchors.
 
 ### Human ticket navigation
 
-The ticket board and its polling fragment render at most 20 tickets per column, newest
-immutable ticket ids first. Each column shows its complete count and a link to a full
-filtered history. Counts and previews share one read snapshot, including across columns.
+The ticket board and its polling fragment render at most 20 tickets per column. Todo,
+doing and review show the oldest ticket ids first so stale active work remains visible.
+Done shows most recently completed tickets (`done_at`, then id, descending); backlog
+shows newest ids first. Each column shows its complete count, ordering and a link to a
+full filtered history. Counts and previews share one read snapshot, including across columns.
 
-`/tickets/list` renders at most 50 tickets. Optional `column` and exact `assignee` filters
-are preserved in Older/Newer/Latest links. `before` and `after` are exclusive ticket-id
-cursors, and both cannot be supplied together. Every returned page is newest-first;
+`/tickets/list` renders at most 50 tickets. Optional `column`, exact `assignee` and
+`unassigned=true` filters are preserved in Older/Newer/Latest links. Unassigned mode
+ignores any supplied assignee name. `before` and `after` are exclusive ticket-id
+cursors, and both cannot be supplied together. Bad columns or conflicting cursors get
+an HTML error with a Latest escape. Every returned history page is newest-first;
 `after` selects the nearest newer page rather than jumping to the newest tickets. Empty
 intervals retain a Latest link. The history does not poll or replace the page while it is
 being read. Card actions retain their existing return to the board.

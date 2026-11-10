@@ -230,13 +230,38 @@ def _ticket_pages(tickets: Tickets) -> APIRouter:
         request: Request,
         column: Annotated[str, Query(max_length=20)] = "",
         assignee: Annotated[str, Query(max_length=200)] = "",
+        unassigned: bool = False,
         before: Annotated[int | None, Query(ge=0, le=2**63 - 1)] = None,
         after: Annotated[int | None, Query(ge=0, le=2**63 - 1)] = None,
     ) -> Response:
-        page = await tickets.page(
-            column=column or None, assignee=assignee or None, before=before, after=after
-        )
+        if unassigned:
+            assignee = ""
+        try:
+            page = await tickets.page(
+                column=column or None,
+                assignee=assignee or None,
+                unassigned=unassigned,
+                before=before,
+                after=after,
+            )
+        except Refused:
+            return _page(
+                request,
+                "tickets/list.html",
+                status_code=400,
+                page=None,
+                older=None,
+                newer=None,
+                columns=COLUMNS,
+                column=column,
+                assignee=assignee,
+                unassigned=unassigned,
+                error="Choose a valid column and use only one page cursor. Return to Latest to start again.",
+                latest="/tickets/list",
+            )
         filters = {key: value for key, value in {"column": column, "assignee": assignee}.items() if value}
+        if unassigned:
+            filters["unassigned"] = "true"
 
         def link(**cursor: int) -> str:
             query = urlencode(filters | cursor)
@@ -249,7 +274,9 @@ def _ticket_pages(tickets: Tickets) -> APIRouter:
             columns=COLUMNS,
             column=column,
             assignee=assignee,
+            unassigned=unassigned,
             latest=link(),
+            error=None,
             older=link(before=page.older) if page.older is not None else None,
             newer=link(after=page.newer) if page.newer is not None else None,
         )

@@ -1054,19 +1054,21 @@ def _seed_tickets(settings: Settings, count: int, column: str = "done") -> list[
     return ids
 
 
+@pytest.mark.parametrize("column", ["todo", "doing", "review"])
 def test_ticket_board_bounds_every_column_and_shows_full_counts(
-    browser: TestClient, human_password: str, settings: Settings
+    browser: TestClient, human_password: str, settings: Settings, column: str
 ) -> None:
     _log_in(browser, human_password)
-    _seed_tickets(settings, 23, "doing")
+    _seed_tickets(settings, 23, column)
     _seed_tickets(settings, 23, "done")
     for path in ("/tickets", "/tickets/columns"):
         html = _page(browser, path)
         assert len(re.findall(r'<article class="ticket"', html)) == 40
-        assert 'doing <span class="count">23</span>' in html
+        assert f'{column} <span class="count">23</span>' in html
         assert 'done <span class="count">23</span>' in html
-        assert "doing item 000" not in html and "done item 000" not in html
-        assert 'href="/tickets/list?column=doing"' in html
+        assert f"{column} item 000" in html and f"{column} item 022" not in html
+        assert "done item 000" not in html
+        assert f'href="/tickets/list?column={column}"' in html
         assert 'href="/tickets/list?column=done"' in html
 
 
@@ -1100,8 +1102,11 @@ def test_ticket_history_preserves_legacy_api_and_validates_bounds(
     ids = _seed_tickets(settings, 51)
     assert [ticket["id"] for ticket in _read(browser, "/api/tickets")] == ids
     assert browser.get("/tickets/list?before=-1").status_code == 422
-    assert browser.get("/tickets/list?before=1&after=2").status_code == 400
-    assert browser.get("/tickets/list?column=unknown").status_code == 400
+    for path in ("/tickets/list?before=1&after=2", "/tickets/list?column=unknown"):
+        response = browser.get(path)
+        assert response.status_code == 400
+        assert response.headers["content-type"].startswith("text/html")
+        assert 'role="alert"' in response.text
     empty = _page(browser, "/tickets/list?before=0&column=done")
     assert "Latest" in empty and "No tickets" in empty
 
@@ -1149,6 +1154,40 @@ def test_ticket_preview_queries_are_bounded_and_indexed(
                 f"EXPLAIN QUERY PLAN SELECT id FROM tickets WHERE {predicate} ORDER BY id DESC LIMIT 20", args
             ).fetchall()
             assert any(index in row[3] for row in plan), plan
+
+
+def test_done_preview_shows_old_ticket_completed_recently(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    ids = _seed_tickets(settings, 30)
+    with closing(sqlite3.connect(settings.db_path)) as conn, conn:
+        conn.execute("UPDATE tickets SET done_at = id")
+        conn.execute("UPDATE tickets SET done_at = 100000 WHERE id = ?", (ids[0],))
+    page = _page(browser, "/tickets")
+    shown = re.findall(r'<article class="ticket" id="ticket-(\d+)"', page)
+    assert shown[0] == str(ids[0])
+    assert len(shown) == 20
+
+
+def test_ticket_history_unassigned_filter_survives_navigation(
+    browser: TestClient, human_password: str, settings: Settings
+) -> None:
+    _log_in(browser, human_password)
+    ids = _seed_tickets(settings, 105)
+    first = _page(browser, "/tickets/list?column=done&unassigned=true")
+    expected = list(reversed(ids[::2]))
+    assert re.findall(r'<article class="ticket" id="ticket-(\d+)"', first) == [str(i) for i in expected[:50]]
+    older = re.search(r'href="([^"]+)"[^>]*>Older tickets', first)
+    assert older is not None and "unassigned=true" in older[1]
+    tail = _page(browser, unescape(older[1]))
+    assert re.findall(r'<article class="ticket" id="ticket-(\d+)"', tail) == [str(i) for i in expected[50:]]
+    assert 'name="unassigned" value="true" checked' in first
+    ignored = _page(browser, "/tickets/list?column=done&unassigned=true&assignee=nobody")
+    assert re.findall(r'<article class="ticket" id="ticket-(\d+)"', ignored) == [
+        str(i) for i in expected[:50]
+    ]
+    assert 'id="assignee" name="assignee" value=""' in ignored
 
 
 def test_reply_permalink_preserves_preceding_conversation(

@@ -147,9 +147,15 @@ def main() -> None:
                 page.get_by_role("link", name="View all done").click()
                 assert page.locator("article.ticket").count() == 50
                 assert page.locator("article.ticket").first.get_attribute("id") == "ticket-105"
+                page.get_by_label("Assignee (exact name)", exact=True).fill("nobody")
+                page.get_by_role("checkbox").check()
+                page.get_by_role("button", name="Filter", exact=True).click()
+                assert page.locator("article.ticket").count() == 50
+                assert page.get_by_role("checkbox").is_checked()
+                assert page.get_by_label("Assignee (exact name)", exact=True).input_value() == ""
                 page.get_by_role("link", name="Older tickets").click()
                 assert page.locator("article.ticket").first.get_attribute("id") == "ticket-55"
-                assert "column=done" in page.url
+                assert "column=done" in page.url and "unassigned=true" in page.url
                 page.get_by_role("link", name="Newer tickets").click()
                 assert page.locator("article.ticket").first.get_attribute("id") == "ticket-105"
                 page.set_viewport_size({"width": 390, "height": 844})

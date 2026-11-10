@@ -51,6 +51,12 @@ class TicketPage:
     newer: int | None
 
 
+@dataclass(frozen=True)
+class TicketPreview:
+    tickets: tuple[Ticket, ...]
+    total: int
+
+
 type _Edit = Callable[[Ticket], tuple[Ticket, str] | None]
 
 
@@ -137,6 +143,7 @@ class Tickets:
         *,
         column: str | None = None,
         assignee: str | None = None,
+        unassigned: bool = False,
         before: int | None = None,
         after: int | None = None,
         limit: int = 50,
@@ -149,12 +156,14 @@ class Tickets:
             raise Refused("bad_payload", "cursor")
         if any(cursor is not None and not 0 <= cursor <= 2**63 - 1 for cursor in (before, after)):
             raise Refused("bad_payload", "cursor")
-        return await self._db.read(lambda conn: _page(conn, column, assignee, before, after, limit))
-
-    async def previews(self) -> dict[str, TicketPage]:
+        if unassigned and assignee is not None:
+            raise Refused("bad_payload", "assignee")
         return await self._db.read(
-            lambda conn: {column: _page(conn, column, None, None, None, 20) for column in COLUMNS}
+            lambda conn: _page(conn, column, assignee, unassigned, before, after, limit)
         )
+
+    async def previews(self) -> dict[str, TicketPreview]:
+        return await self._db.read(lambda conn: {column: _preview(conn, column) for column in COLUMNS})
 
     async def for_thread(self, thread_id: int) -> Ticket | None:
         def read(conn: sqlite3.Connection) -> Ticket | None:
@@ -188,10 +197,19 @@ class Tickets:
         return ticket
 
 
+def _preview(conn: sqlite3.Connection, column: str) -> TicketPreview:
+    order = "done_at DESC, id DESC" if column == "done" else "id DESC" if column == "backlog" else "id ASC"
+    rows = conn.execute(f'{_TICKET_SELECT} WHERE "column" = ? ORDER BY {order} LIMIT 20', (column,))
+    tickets = tuple(_ticket(row) for row in rows)
+    total = conn.execute('SELECT COUNT(*) FROM tickets WHERE "column" = ?', (column,)).fetchone()[0]
+    return TicketPreview(tickets, total)
+
+
 def _page(
     conn: sqlite3.Connection,
     column: str | None,
     assignee: str | None,
+    unassigned: bool,
     before: int | None,
     after: int | None,
     limit: int,
@@ -204,6 +222,8 @@ def _page(
     if assignee is not None:
         filters.append("assignee = ?")
         values.append(assignee)
+    if unassigned:
+        filters.append("assignee IS NULL")
     where = " AND ".join(filters)
     bounds = " AND id < ?" if before is not None else " AND id > ?" if after is not None else ""
     cursor = before if before is not None else after
