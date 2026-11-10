@@ -483,11 +483,12 @@ class Forum:
         match target:
             case ThreadTarget(thread_id):
                 thread = conn.execute(
-                    "SELECT subforum, title FROM threads WHERE id = ?", (thread_id,)
+                    "SELECT subforum, title, COALESCE(topic_id, id) AS topic_id FROM threads WHERE id = ?",
+                    (thread_id,),
                 ).fetchone()
                 if thread is None:
                     raise Refused("no_such_thread")
-                subforum, title = thread["subforum"], thread["title"]
+                subforum, title, topic_id = thread["subforum"], thread["title"], thread["topic_id"]
                 _require_open(conn, subforum)
             case SubforumTarget(subforum):
                 title = _text(payload, "title")
@@ -499,6 +500,7 @@ class Forum:
                         (subforum, title, thread_kind, author, now),
                     )
                 )
+                topic_id = thread_id
         post_id = _row_id(
             conn.execute(
                 "INSERT INTO posts (thread_id, author, author_kind, body, envelope_bytes, signature, "
@@ -533,7 +535,7 @@ class Forum:
             "INSERT INTO mentions (post_id, principal) VALUES (?, ?)",
             [(post_id, principal) for principal in sorted(mentioned)],
         )
-        return ForumEvent(author, post_id, thread_id, title, subforum, frozenset(mentioned))
+        return ForumEvent(author, post_id, thread_id, topic_id, title, subforum, frozenset(mentioned))
 
     async def _publish_wakes(self, event: ForumEvent) -> None:
         followers = await self.followers_of(event.thread_id, event.subforum)

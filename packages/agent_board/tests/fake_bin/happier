@@ -3,7 +3,9 @@
 # Stands in for /usr/local/bin/happier 0.2.17 in the runner tests. State lives in
 # $FAKE_HAPPIER_STATE as {"sessions": [{"session", "agentState", "messages"}], "notifications"};
 # `session` and `agentState` copy probes 13 and 15, and the JSON envelopes copy probes 21, 22
-# and 27. FAKE_HAPPIER_FAIL=create:<code> or send:<code> makes that command fail with <code>.
+# and 27. FAKE_HAPPIER_FAIL=<command>:<code> makes create, send, wait or archive fail with <code>.
+# An entry's "turnRunning" flag makes `wait` time out; like the real CLI (probe 5), `status`
+# does not see it.
 
 import argparse
 import fcntl
@@ -12,6 +14,7 @@ import os
 import secrets
 import socket
 import sys
+import time
 from contextlib import contextmanager
 
 FAIL_ENV = "FAKE_HAPPIER_FAIL"
@@ -93,6 +96,8 @@ def cmd_send(args: argparse.Namespace) -> int:
         return refuse("session_send", code)
     with state() as current:
         entry = find(current, args.session_id)
+        if entry is not None and entry["session"].get("archivedAt"):
+            return refuse("session_send", "session_archived")
         if entry is not None:
             entry["messages"].append(args.message)
             entry.setdefault("homes", []).append(os.environ.get("HAPPIER_HOME_DIR"))
@@ -100,6 +105,34 @@ def cmd_send(args: argparse.Namespace) -> int:
     if entry is None:
         return refuse("session_send", "session_not_found")
     return reply("session_send", {"sessionId": args.session_id})
+
+
+def cmd_archive(args: argparse.Namespace) -> int:
+    if code := injected_failure("archive"):
+        return refuse("session_archive", code)
+    with state() as current:
+        entry = find(current, args.session_id)
+        if entry is None:
+            return refuse("session_archive", "session_not_found")
+        if entry["session"].get("archivedAt"):
+            return refuse("session_archive", "session_archived")
+        entry["session"]["archivedAt"] = int(time.time() * 1000)
+        entry["session"]["active"] = False
+    return reply("session_archive", {"sessionId": args.session_id, "archived": True})
+
+
+def cmd_wait(args: argparse.Namespace) -> int:
+    if code := injected_failure("wait"):
+        return refuse("session_wait", code)
+    with state() as current:
+        entry = find(current, args.session_id)
+    if entry is None:
+        return refuse("session_wait", "session_not_found")
+    if entry["session"].get("archivedAt"):
+        return refuse("session_wait", "session_archived")
+    if entry.get("turnRunning"):
+        return refuse("session_wait", "timeout")
+    return reply("session_wait", {"sessionId": args.session_id, "idle": True})
 
 
 def cmd_notify(args: argparse.Namespace) -> int:
@@ -137,6 +170,15 @@ def parse(argv: list[str]) -> argparse.Namespace:
     send.add_argument("message")
     send.add_argument("--model")
     send.add_argument("--json", action="store_true", required=True)
+    archive = session.add_parser("archive")
+    archive.set_defaults(run=cmd_archive)
+    archive.add_argument("session_id")
+    archive.add_argument("--json", action="store_true", required=True)
+    wait = session.add_parser("wait")
+    wait.set_defaults(run=cmd_wait)
+    wait.add_argument("session_id")
+    wait.add_argument("--timeout", type=int, required=True)
+    wait.add_argument("--json", action="store_true", required=True)
     notify = commands.add_parser("notify")
     notify.set_defaults(run=cmd_notify)
     notify.add_argument("-p", dest="message", required=True)

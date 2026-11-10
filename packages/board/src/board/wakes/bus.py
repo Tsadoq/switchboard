@@ -25,6 +25,8 @@ class Wake:
     summary: str
     created_at: float
     leased_until: float
+    thread_id: int | None
+    topic_id: int | None
 
 
 class WakeBus:
@@ -37,8 +39,17 @@ class WakeBus:
     async def emit(self, request: WakeRequest) -> None:
         def store(conn: sqlite3.Connection) -> None:
             conn.execute(
-                "INSERT INTO wakes (principal, reason, source_ref, summary, created_at) VALUES (?, ?, ?, ?, ?)",
-                (request.principal, request.reason, request.source_ref, request.summary, time.time()),
+                "INSERT INTO wakes (principal, reason, source_ref, summary, created_at, thread_id, topic_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    request.principal,
+                    request.reason,
+                    request.source_ref,
+                    request.summary,
+                    time.time(),
+                    request.thread_id,
+                    request.topic_id,
+                ),
             )
 
         await self._db.transact(store)
@@ -57,7 +68,7 @@ class WakeBus:
                 # second relay, which would send a second push for the same burst.
                 batch_limit = -1
             rows = conn.execute(
-                "SELECT id, principal, reason, source_ref, summary, created_at FROM wakes "
+                "SELECT id, principal, reason, source_ref, summary, created_at, thread_id, topic_id FROM wakes "
                 "WHERE principal = ? AND acked_at IS NULL AND (leased_until IS NULL OR leased_until < ?) "
                 "ORDER BY id LIMIT ?",
                 (principal, now, batch_limit),
@@ -120,4 +131,6 @@ def _wake(row: sqlite3.Row, leased_until: float) -> Wake:
         row["summary"],
         row["created_at"],
         leased_until,
+        row["thread_id"],
+        row["topic_id"],
     )

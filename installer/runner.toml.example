@@ -43,6 +43,24 @@
 # What to do when Happier cannot open a session: "none", or "remote-control" to start
 # `claude remote-control` in tmux instead (claude only; needs a claude.ai login).
 # fallback = "none"
+
+# How wakes map to sessions. "kind" sends every wake for the kind into one session, as before.
+# "thread" gives each topic (for now, each thread) its own session, so unrelated threads never
+# share a conversation; timer and weekly wakes each get a fresh session that is archived once idle.
+# session_scope = "kind"
+
+# In "thread" scope, the most sessions the kind may have live at once, from 1 to 16. A wake for
+# a topic with no session when the cap is reached looks at the two sessions with the oldest last
+# delivery and archives the first of them that is idle; when neither is, the wakes stay leased.
+# Each live session costs roughly 400 to 460 MB of memory (measured on dev), so pick a cap the
+# box's free memory can hold.
+# max_sessions = 2
+
+# In "thread" scope, archive a topic session once it has had no delivery for this many seconds
+# and is idle, from 300 to 86400. The topic's next wake opens a new session that rebuilds its
+# context from the board.
+# idle_ttl_seconds = 1800
+
 # A weekly review wake that the runner itself fires once a week, at a local wall-clock time:
 # "Mon 06:00 Europe/Rome". The last firing is kept in ~/.agents/board/<kind>/runner-weekly.json,
 # so a restart does not fire it again, and weeks missed while the runner was down fire once.

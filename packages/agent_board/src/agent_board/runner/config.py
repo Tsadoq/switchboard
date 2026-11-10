@@ -15,12 +15,26 @@ USER_CONFIG_NAME = "runner.toml"
 NO_FALLBACK = "none"
 REMOTE_CONTROL = "remote-control"
 PERMISSION_MODES = ("read_only", "default", "auto", "yolo")
+SESSION_SCOPES = ("kind", "thread")
+MAX_SESSIONS_LIMIT = 16
+MIN_IDLE_TTL_SECONDS = 300
+MAX_IDLE_TTL_SECONDS = 86400
 # The board holds a wake poll open for at most 60 s.
 MAX_POLL_WAIT_SECONDS = 60
 MAX_COALESCE_SECONDS = 180
 _KIND_TABLE = "kind"
 _GLOBAL_KEYS = {"kinds", "coalesce_seconds", "poll_wait", "notify_human", "session_home", _KIND_TABLE}
-_KIND_KEYS = {"workdir", "permission_mode", "backend", "fallback", "models", "weekly"}
+_KIND_KEYS = {
+    "workdir",
+    "permission_mode",
+    "backend",
+    "fallback",
+    "models",
+    "weekly",
+    "session_scope",
+    "max_sessions",
+    "idle_ttl_seconds",
+}
 MODEL_KEYS = ("default", "mention", "follow", "timer", "weekly")
 
 type Table = dict[str, Any]
@@ -35,6 +49,9 @@ class KindConfig:
     fallback: str
     models: Mapping[str, str] = field(default_factory=dict)
     weekly: WeeklySlot | None = None
+    session_scope: str = "kind"
+    max_sessions: int = 2
+    idle_ttl_seconds: float = 1800
 
 
 @dataclass(frozen=True)
@@ -90,23 +107,42 @@ def _kind_names(configured: list[Any]) -> list[str]:
 def _kind(name: str, table: Table) -> KindConfig:
     where = f"{_KIND_TABLE}.{name}."
     _reject_unknown(table, _KIND_KEYS, where)
-    permission_mode = _value(table, "permission_mode", "default", where)
-    fallback = _value(table, "fallback", NO_FALLBACK, where)
-    if permission_mode not in PERMISSION_MODES:
-        raise ConfigError(
-            f"runner config: {where}permission_mode must be one of {', '.join(PERMISSION_MODES)}"
-        )
-    if fallback not in (NO_FALLBACK, REMOTE_CONTROL):
-        raise ConfigError(f"runner config: {where}fallback must be {NO_FALLBACK} or {REMOTE_CONTROL}")
     return KindConfig(
         name=name,
         workdir=_workdir(_value(table, "workdir", "", where), name, where),
-        permission_mode=permission_mode,
+        permission_mode=_choice(table, "permission_mode", PERMISSION_MODES, "default", where),
         backend=_value(table, "backend", f"agent:{name}", where),
-        fallback=fallback,
+        fallback=_choice(table, "fallback", (NO_FALLBACK, REMOTE_CONTROL), NO_FALLBACK, where),
         models=_models(_value(table, "models", {}, where), where),
         weekly=_weekly(_value(table, "weekly", "", where), where),
+        session_scope=_choice(table, "session_scope", SESSION_SCOPES, "kind", where),
+        max_sessions=_max_sessions(table, where),
+        idle_ttl_seconds=_seconds(
+            table,
+            "idle_ttl_seconds",
+            1800,
+            minimum=MIN_IDLE_TTL_SECONDS,
+            maximum=MAX_IDLE_TTL_SECONDS,
+            where=where,
+        ),
     )
+
+
+def _choice(table: Table, key: str, choices: tuple[str, ...], default: str, where: str) -> str:
+    value = _value(table, key, default, where)
+    if value not in choices:
+        raise ConfigError(f"runner config: {where}{key} must be one of {', '.join(choices)}")
+    return value
+
+
+def _max_sessions(table: Table, where: str) -> int:
+    value = table.get("max_sessions", 2)
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= MAX_SESSIONS_LIMIT:
+        raise ConfigError(
+            f"runner config: {where}max_sessions must be a whole number from 1 to {MAX_SESSIONS_LIMIT}, "
+            f"got {value!r}"
+        )
+    return value
 
 
 def _models(table: Table, where: str) -> dict[str, str]:
@@ -155,12 +191,23 @@ def _session_home(configured: str) -> Path | None:
     return home
 
 
-def _seconds(table: Table, key: str, default: float, *, maximum: float, positive: bool = False) -> float:
+def _seconds(
+    table: Table,
+    key: str,
+    default: float,
+    *,
+    maximum: float,
+    minimum: float = 0,
+    positive: bool = False,
+    where: str = "",
+) -> float:
     value = table.get(key, default)
     is_number = isinstance(value, int | float) and not isinstance(value, bool)
-    if not is_number or not 0 <= value <= maximum or (positive and value == 0):
-        lowest = "above 0" if positive else "at least 0"
-        raise ConfigError(f"runner config: {key} must be a number of seconds {lowest} and at most {maximum}")
+    if not is_number or not minimum <= value <= maximum or (positive and value == 0):
+        lowest = "above 0" if positive else f"at least {minimum}"
+        raise ConfigError(
+            f"runner config: {where}{key} must be a number of seconds {lowest} and at most {maximum}"
+        )
     return float(value)
 
 

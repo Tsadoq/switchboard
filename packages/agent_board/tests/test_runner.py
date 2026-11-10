@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from agent_board.config import ConfigError
 from agent_board.runner.config import RunnerConfig
+from agent_board.runner.happier import Happier, HappierError
 from agent_board.runner.loop import prompt_for
 
 if TYPE_CHECKING:
@@ -61,6 +62,20 @@ def _seed_sessions(fakes: Fakes, probed_object: str, **fields: Any) -> None:
     for entry in state["sessions"]:
         entry[probed_object].update(fields)
     fakes.happier_state.write_text(json.dumps(state))
+
+
+def _set_turn_running(fakes: Fakes, session_id: str, running: bool) -> None:
+    state = _happier(fakes)
+    for entry in state["sessions"]:
+        if entry["session"]["id"] == session_id:
+            entry["turnRunning"] = running
+    fakes.happier_state.write_text(json.dumps(state))
+
+
+def _open_session(happier: Happier, tmp_path: Path) -> str:
+    return happier.create(
+        backend="agent:pi", path=tmp_path, tag="t", title="T", prompt="hello", permission_mode="default"
+    ).id
 
 
 def _post(agent_board: "AgentBoard", author: str, title: str, body: str) -> None:
@@ -131,8 +146,11 @@ def test_runner_records_session_id_and_acks_wake(runner_box: Fakes, agent_board:
     _drain(agent_board)
 
     created = [entry["session"]["id"] for entry in _happier(runner_box)["sessions"]]
-    record = json.loads((Path.home() / ".agents" / "board" / "pi" / "runner-session.json").read_text())
-    assert [record["session_id"]] == created, f"recorded {record}, created {created}"
+    record = json.loads((Path.home() / ".agents" / "board" / "pi" / "runner-sessions.json").read_text())
+    recorded = [(entry["key"], entry["session_id"]) for entry in record["sessions"]]
+    assert recorded == [("kind", session_id) for session_id in created], (
+        f"recorded {record}, created {created}"
+    )
     assert _redelivered(agent_board, runner_box, "pi") == [], "a dispatched wake was not acked"
 
 
@@ -199,6 +217,20 @@ def test_a_due_weekly_review_fires_once_on_its_model(runner_box: Fakes, agent_bo
     assert "weekly review" in sessions[0]["messages"][0], sessions[0]["messages"]
     fired = json.loads((state_dir / "runner-weekly.json").read_text())["last_fired_at"]
     assert fired > 0, "the delivered weekly review was not recorded"
+
+
+def test_thread_scope_gives_each_thread_its_own_session(runner_box: Fakes, agent_board: "AgentBoard") -> None:
+    _write_user_config('[kind.pi]\nsession_scope = "thread"\n')
+    _post(agent_board, "claude", "First", f"@{PI} one")
+    _post(agent_board, "claude", "Second", f"@{PI} two")
+
+    _drain(agent_board)
+
+    prompts = [entry["messages"] for entry in _happier(runner_box)["sessions"]]
+    assert len(prompts) == 2, f"expected one session per thread: {prompts}"
+    assert "First" in prompts[0][0] and "Second" not in prompts[0][0], prompts
+    assert "Second" in prompts[1][0] and "First" not in prompts[1][0], prompts
+    assert _redelivered(agent_board, runner_box, "pi") == [], "a delivered wake was not acked"
 
 
 def test_human_wake_becomes_notification(runner_box: Fakes, agent_board: "AgentBoard") -> None:
@@ -483,3 +515,89 @@ def test_models_and_weekly_are_read_per_kind(fake_sign: "FakeSign") -> None:
 
     assert dict(pi.models) == {"default": "d", "mention": "m"}
     assert pi.weekly is not None and (pi.weekly.weekday, pi.weekly.hour, pi.weekly.minute) == (6, 21, 30)
+
+
+def test_session_settings_default_to_one_session_per_kind(fake_sign: "FakeSign") -> None:
+    fake_sign.configure(box=BOX, kinds=KINDS)
+    _write_user_config("")
+
+    claude = RunnerConfig.load().kinds["claude"]
+
+    assert (claude.session_scope, claude.max_sessions, claude.idle_ttl_seconds) == ("kind", 2, 1800.0)
+
+
+def test_session_settings_are_read_per_kind(fake_sign: "FakeSign") -> None:
+    fake_sign.configure(box=BOX, kinds=KINDS)
+    _write_user_config('[kind.claude]\nsession_scope = "thread"\nmax_sessions = 3\nidle_ttl_seconds = 600\n')
+
+    kinds = RunnerConfig.load().kinds
+    claude, pi = kinds["claude"], kinds["pi"]
+
+    assert (claude.session_scope, claude.max_sessions, claude.idle_ttl_seconds) == ("thread", 3, 600.0)
+    assert (pi.session_scope, pi.max_sessions, pi.idle_ttl_seconds) == ("kind", 2, 1800.0)
+
+
+@pytest.mark.parametrize(
+    ("line", "key"),
+    [
+        ('session_scope = "topic"', "session_scope"),
+        ("max_sessions = 0", "max_sessions"),
+        ("max_sessions = true", "max_sessions"),
+        ("idle_ttl_seconds = 10", "idle_ttl_seconds"),
+    ],
+)
+def test_bad_session_settings_are_refused(fake_sign: "FakeSign", line: str, key: str) -> None:
+    fake_sign.configure(box=BOX, kinds=KINDS)
+    _write_user_config(f"[kind.claude]\n{line}\n")
+
+    with pytest.raises(ConfigError, match=re.escape(f"kind.claude.{key} must")):
+        RunnerConfig.load()
+
+
+def test_archive_ends_a_session_and_tolerates_gone_ones(runner_box: Fakes, tmp_path: Path) -> None:
+    happier = Happier()
+    session_id = _open_session(happier, tmp_path)
+
+    happier.archive(session_id)
+
+    with pytest.raises(HappierError) as refused:
+        happier.send(session_id, "after archive")
+    assert refused.value.code == "session_archived", f"send to an archived session: {refused.value.code}"
+    happier.archive(session_id)
+    happier.archive("cm-unknown")
+
+
+def test_idle_reflects_a_running_turn(runner_box: Fakes, tmp_path: Path) -> None:
+    happier = Happier()
+    session_id = _open_session(happier, tmp_path)
+
+    _set_turn_running(runner_box, session_id, True)
+    assert happier.idle(session_id) is False, "a running turn read as idle"
+    _set_turn_running(runner_box, session_id, False)
+    assert happier.idle(session_id) is True, "a finished turn read as busy"
+
+
+@pytest.mark.parametrize(
+    ("code", "idle"),
+    [("timeout", False), ("session_not_found", True), ("session_archived", True)],
+)
+def test_idle_maps_wait_errors(
+    runner_box: Fakes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str, idle: bool
+) -> None:
+    happier = Happier()
+    session_id = _open_session(happier, tmp_path)
+    monkeypatch.setenv("FAKE_HAPPIER_FAIL", f"wait:{code}")
+
+    assert happier.idle(session_id) is idle, f"wait error {code} mapped wrongly"
+
+
+def test_idle_raises_on_an_unexpected_wait_error(
+    runner_box: Fakes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    happier = Happier()
+    session_id = _open_session(happier, tmp_path)
+    monkeypatch.setenv("FAKE_HAPPIER_FAIL", "wait:boom")
+
+    with pytest.raises(HappierError) as raised:
+        happier.idle(session_id)
+    assert raised.value.code == "boom", f"unexpected wait error rewritten: {raised.value.code}"

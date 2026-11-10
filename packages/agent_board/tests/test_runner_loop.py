@@ -1,16 +1,21 @@
+import json
+import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
-from agent_board.identity import Identity
+from agent_board.identity import Identity, state_dir
 from agent_board.runner import loop, remote_control
-from agent_board.runner.config import KindConfig
-from agent_board.runner.happier import HappierError, Session, SessionState
-from agent_board.runner.loop import Wake, _Inbox
+from agent_board.runner.config import KindConfig, RunnerConfig
+from agent_board.runner.happier import Happier, HappierError
+from agent_board.runner.loop import Deliver, Wake, _Inbox, session_key
 from agent_board.runner.weekly import WeeklySlot
+
+if TYPE_CHECKING:
+    from .conftest import FakeSign
 
 _EPOCH = 1_800_000_000.0
 _LEASE_SECONDS = 120
@@ -36,16 +41,23 @@ class FakeClock:
 
 class FakeClient:
     def __init__(
-        self, clock: FakeClock, batches: list[list[Wake]], lease_seconds: float = _LEASE_SECONDS
+        self,
+        clock: FakeClock,
+        batches: list[list[Wake]],
+        lease_seconds: float = _LEASE_SECONDS,
+        polls: int | None = None,
     ) -> None:
         self._clock = clock
         self._batches = batches
         self._lease_seconds = lease_seconds
+        self._polls = polls
         self.waits: list[float] = []
-        self.acked: list[int] = []
+        self.ack_posts: list[list[int]] = []
         self.stopped = threading.Event()
 
     def get(self, path: str, *, wait: float, principal: str) -> list[Wake]:
+        if self._polls is not None and len(self.waits) >= self._polls:
+            raise Stopped
         self.waits.append(wait)
         if self.stopped.wait(0.01 if not self._batches else 0):
             raise Stopped
@@ -56,7 +68,7 @@ class FakeClient:
         return [{**wake, "leased_until": leased_until.isoformat()} for wake in self._batches.pop(0)]
 
     def post(self, path: str, payload: dict[str, Any]) -> None:
-        self.acked += payload["ids"]
+        self.ack_posts.append(payload["ids"])
 
 
 def _wake(wake_id: int) -> Wake:
@@ -70,13 +82,22 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
     return fake
 
 
-def _inbox(client: FakeClient, deliver: Callable[[list[Wake]], list[int]], coalesce: float) -> _Inbox:
-    return _Inbox("pi@testbox", client, "me", deliver, coalesce)  # type: ignore[arg-type]
+def _inbox(
+    client: FakeClient,
+    deliver: Deliver,
+    coalesce: float,
+    housekeep: Callable[[], None] | None = None,
+) -> _Inbox:
+    return _Inbox("pi@testbox", client, "me", deliver, coalesce, housekeep=housekeep)  # type: ignore[arg-type]
+
+
+def _nothing(wakes: list[Wake]) -> Iterator[list[int | None]]:
+    yield from ()
 
 
 def test_wakes_within_the_window_are_gathered_together(clock: FakeClock) -> None:
     client = FakeClient(clock, [[_wake(1)], [_wake(2)]])
-    inbox = _inbox(client, lambda wakes: [], coalesce=4)
+    inbox = _inbox(client, _nothing, coalesce=4)
 
     gathered = inbox._gather(poll_wait=1)
 
@@ -87,7 +108,7 @@ def test_wakes_within_the_window_are_gathered_together(clock: FakeClock) -> None
 def test_window_closes_before_a_short_lease_leaves_no_time_to_deliver(clock: FakeClock) -> None:
     lease_seconds = 30
     client = FakeClient(clock, [[_wake(1)]], lease_seconds=lease_seconds)
-    inbox = _inbox(client, lambda wakes: [], coalesce=60)
+    inbox = _inbox(client, _nothing, coalesce=60)
 
     inbox._gather(poll_wait=60)
 
@@ -98,7 +119,7 @@ def test_window_closes_before_a_short_lease_leaves_no_time_to_deliver(clock: Fak
 
 def test_window_is_trimmed_to_the_lease_minus_the_delivery_budget(clock: FakeClock) -> None:
     client = FakeClient(clock, [[_wake(1)]], lease_seconds=_LEASE_SECONDS)
-    inbox = _inbox(client, lambda wakes: [], coalesce=60)
+    inbox = _inbox(client, _nothing, coalesce=60)
 
     inbox._gather(poll_wait=60)
 
@@ -113,12 +134,12 @@ def test_unexpected_delivery_error_does_not_stop_the_inbox(
     attempts: list[list[int]] = []
     delivered_twice = threading.Event()
 
-    def deliver(wakes: list[Wake]) -> list[int]:
+    def deliver(wakes: list[Wake]) -> Iterator[list[int | None]]:
         attempts.append([wake["id"] for wake in wakes])
         if len(attempts) == 1:
-            raise OSError("disk full writing runner-session.json")
+            raise OSError("disk full writing runner-sessions.json")
         delivered_twice.set()
-        return [wake["id"] for wake in wakes]
+        yield [wake["id"] for wake in wakes]
 
     inbox = _inbox(client, deliver, coalesce=0)
 
@@ -136,7 +157,7 @@ def test_unexpected_delivery_error_does_not_stop_the_inbox(
     thread.join(5)
 
     assert delivered, f"inbox stopped after the first failure: {attempts}"
-    assert client.acked[:1] == [1], f"wake not acked on retry: {client.acked}"
+    assert client.ack_posts[:1] == [[1]], f"wake not acked on retry: {client.ack_posts}"
 
 
 class FakeHappier:
@@ -174,9 +195,9 @@ def test_several_human_wakes_become_one_push_grouped_by_thread() -> None:
         _human_wake(4, "pi@dev", 29),
     ]
 
-    acked = notifier(wakes)
+    acked = list(notifier(wakes))
 
-    assert acked == [1, 2, 3, 4], acked
+    assert acked == [[1, 2, 3, 4]], acked
     assert happier.sent == [
         (
             "agent board",
@@ -196,7 +217,7 @@ def test_unrecognised_summaries_still_count_in_the_digest() -> None:
 def test_failed_digest_push_acks_nothing() -> None:
     notifier = loop._HumanNotifier(FakeHappier(fail=True), "https://board.example")  # type: ignore[arg-type]
 
-    assert notifier([_human_wake(1, "pi@dev", 29), _human_wake(2, "pi@dev", 30)]) == []
+    assert list(notifier([_human_wake(1, "pi@dev", 29), _human_wake(2, "pi@dev", 30)])) == []
 
 
 def test_a_large_digest_stays_short_and_keeps_its_link() -> None:
@@ -248,87 +269,225 @@ def test_a_cut_digest_is_still_sent_once_and_acked() -> None:
     notifier = loop._HumanNotifier(happier, "https://board.example")  # type: ignore[arg-type]
     wakes = [_human_wake(1, "a" * 5000 + "@box", 3), _human_wake(2, "pi@dev", 4)]
 
-    assert notifier(wakes) == [1, 2]
+    assert list(notifier(wakes)) == [[1, 2]]
     assert len(happier.sent) == 1 and happier.sent[0][1].endswith("\nhttps://board.example/mentions"), (
         happier.sent
     )
 
 
-class SessionHappier:
-    def __init__(self, fail_create: bool = False) -> None:
-        self.fail_create = fail_create
-        self.models: list[str | None] = []
-
-    def status(self, session_id: str) -> SessionState:
-        return SessionState(active=True, pending_requests=0, controlled_by_user=False)
-
-    def send(self, session_id: str, message: str, model: str | None = None) -> None:
-        self.models.append(model)
-
-    def create(self, **fields: Any) -> Session:
-        if self.fail_create:
-            raise HappierError("exit_1")
-        self.models.append(fields["model"])
-        return Session("cm-new", True)
-
-    def notify(self, title: str, message: str) -> None:
-        pass
+def _serve_until_stopped(inbox: _Inbox, poll_wait: float) -> None:
+    with pytest.raises(Stopped):
+        inbox.serve(poll_wait)
 
 
-def _waker(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    happier: SessionHappier,
-    *,
-    session: str | None,
-    **settings: Any,
-) -> "loop._AgentWaker":
-    monkeypatch.setattr(loop, "ensure_state_dir", lambda kind: tmp_path)
-    monkeypatch.setattr(loop, "_recorded_session", lambda kind: session)
-    kind = KindConfig("claude", tmp_path, "auto", "agent:claude", "remote-control", **settings)
-    return loop._AgentWaker(kind, Identity("claude@testbox", "claude", "testbox"), happier)  # type: ignore[arg-type]
+@pytest.mark.parametrize(
+    ("scope", "wake", "key"),
+    [
+        ("kind", {"reason": "timer", "summary": "scheduled wake"}, "kind"),
+        ("kind", {"reason": "mention", "summary": "a mentioned you in thread 9", "topic_id": 7}, "kind"),
+        ("thread", {"reason": "mention", "summary": "a mentioned you in thread 9", "topic_id": 7}, "topic:7"),
+        ("thread", {"reason": "follow", "summary": 'a posted in thread 9 "T"', "topic_id": None}, "topic:9"),
+        ("thread", {"reason": "mention", "summary": "a mentioned you in thread 9"}, "topic:9"),
+        ("thread", {"reason": "ticket", "summary": "ticket 4 was assigned to you"}, None),
+        ("thread", {"reason": "timer", "summary": "scheduled wake", "topic_id": 7}, None),
+        ("thread", {"reason": "weekly", "summary": "the weekly scheduled review"}, None),
+    ],
+)
+def test_session_key_prefers_topic_then_summary(scope: str, wake: Wake, key: str | None) -> None:
+    assert session_key(wake, scope) == key
 
 
-MYTHOS_POLICY = {"default": "sonnet", "mention": "mythos", "weekly": "mythos"}
+def _slow_groups(clock: FakeClock, client: FakeClient, pulled: list[int]) -> Deliver:
+    def deliver(wakes: list[Wake]) -> Iterator[list[int | None]]:
+        for wake in wakes:
+            pulled.append(wake["id"])
+            clock.sleep(60)
+            client.stopped.set()
+            yield [wake["id"]]
+
+    return deliver
 
 
-def test_one_session_switches_model_on_every_delivery(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_groups_after_the_lease_deadline_stay_leased(clock: FakeClock) -> None:
+    client = FakeClient(clock, [[_wake(1), _wake(2)]])
+    pulled: list[int] = []
+    inbox = _inbox(client, _slow_groups(clock, client, pulled), coalesce=0)
+
+    _serve_until_stopped(inbox, 0)
+
+    assert client.ack_posts == [[1]], f"a group past the lease deadline was acked: {client.ack_posts}"
+    assert pulled == [1], f"a group was delivered past the lease deadline: {pulled}"
+
+
+def test_drain_delivers_every_group(clock: FakeClock) -> None:
+    client = FakeClient(clock, [[_wake(1), _wake(2)]])
+    inbox = _inbox(client, _slow_groups(clock, client, []), coalesce=0)
+
+    inbox.drain()
+
+    assert client.ack_posts == [[1], [2]], f"drain did not ack each group: {client.ack_posts}"
+
+
+def test_housekeeping_runs_before_a_poll_at_most_once_a_minute(clock: FakeClock) -> None:
+    client = FakeClient(clock, [], polls=7)
+    housekept: list[tuple[float, int]] = []
+    inbox = _inbox(
+        client, _nothing, coalesce=0, housekeep=lambda: housekept.append((clock.elapsed, len(client.waits)))
+    )
+
+    _serve_until_stopped(inbox, 25)
+
+    assert housekept == [(0, 0), (75, 3), (150, 6)], f"housekeeping mistimed: {housekept}"
+
+
+_MYTHOS_POLICY = {"default": "sonnet", "mention": "mythos", "weekly": "mythos"}
+_ME = Identity("claude@testbox", "claude", "testbox")
+
+
+@pytest.fixture
+def happier_state(fake_sign: "FakeSign", tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    state = tmp_path / "happier-state.json"
+    state.write_text("")
+    monkeypatch.setenv("FAKE_HAPPIER_STATE", str(state))
+    monkeypatch.delenv("FAKE_HAPPIER_FAIL", raising=False)
+    return state
+
+
+def _sessions(happier_state: Path) -> list[dict[str, Any]]:
+    text = happier_state.read_text()
+    sessions: list[dict[str, Any]] = json.loads(text)["sessions"] if text.strip() else []
+    return sessions
+
+
+def _agent_inbox(
+    client: FakeClient, scope: str = "thread", fallback: str = "none", **settings: Any
+) -> _Inbox:
+    kind = KindConfig(
+        "claude", Path.home() / "work", "default", "agent:claude", fallback, session_scope=scope, **settings
+    )
+    cfg = RunnerConfig({"claude": kind}, coalesce_seconds=0, poll_wait=1, notify_human=False)
+    (inbox,) = loop._inboxes(cfg, {_ME: client}, Happier())  # type: ignore[dict-item]
+    return inbox
+
+
+def _topic_wake(wake_id: int, topic: int, reason: str = "mention") -> Wake:
+    return {"id": wake_id, "reason": reason, "summary": f"wake {wake_id} in topic {topic}", "topic_id": topic}
+
+
+def _drain_wakes(wakes: list[Wake], scope: str = "thread", **settings: Any) -> FakeClient:
+    client = FakeClient(FakeClock(), [wakes])
+    _agent_inbox(client, scope, **settings).drain()
+    return client
+
+
+def test_batch_is_split_into_one_delivery_per_topic(happier_state: Path) -> None:
+    client = _drain_wakes([_topic_wake(1, 7), _topic_wake(2, 9), _topic_wake(3, 7)])
+
+    assert client.ack_posts == [[1, 3], [2]], client.ack_posts
+    prompts = [session["messages"] for session in _sessions(happier_state)]
+    assert len(prompts) == 2, prompts
+    assert "wake 1 in topic 7" in prompts[0][0] and "wake 3 in topic 7" in prompts[0][0], prompts
+    assert "topic 9" not in prompts[0][0] and "topic 7" not in prompts[1][0], prompts
+
+
+def test_a_failed_topic_leaves_only_its_wakes_leased(
+    happier_state: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    happier = SessionHappier()
-    waker = _waker(tmp_path, monkeypatch, happier, session="cm-old", models=MYTHOS_POLICY)
+    _drain_wakes([_topic_wake(1, 7)])
+    monkeypatch.setenv("FAKE_HAPPIER_FAIL", "create:boom")
 
-    for reason in ("mention", "timer", "mention", "follow"):
-        assert waker([{"id": 1, "reason": reason, "summary": reason}]) == [1]
+    client = _drain_wakes([_topic_wake(2, 7), _topic_wake(3, 9), _topic_wake(4, 7)])
 
-    assert happier.models == ["mythos", "sonnet", "mythos", "sonnet"]
+    assert client.ack_posts == [[2, 4]], f"only topic 7 was delivered: {client.ack_posts}"
+    notifications = json.loads(happier_state.read_text())["notifications"]
+    assert len(notifications) == 1 and "boom" in notifications[0]["message"], notifications
+
+
+def test_timer_and_weekly_wakes_never_reach_a_topic_session(happier_state: Path) -> None:
+    timer = {"id": 2, "reason": "timer", "summary": "scheduled wake, every 21600 s"}
+
+    client = _drain_wakes([_topic_wake(1, 7), timer])
+
+    assert client.ack_posts == [[1], [2]], client.ack_posts
+    prompts = [session["messages"] for session in _sessions(happier_state)]
+    assert len(prompts) == 2, prompts
+    assert "every 21600 s" not in prompts[0][0] and "agent-board read 7" in prompts[0][0], prompts
+    assert "every 21600 s" in prompts[1][0] and "topic 7" not in prompts[1][0], prompts
+
+
+def _due_weekly() -> Path:
+    weekly_file = state_dir(_ME.kind) / loop.WEEKLY_FILE
+    weekly_file.parent.mkdir(parents=True, exist_ok=True)
+    weekly_file.write_text('{"last_fired_at": 0}')
+    return weekly_file
+
+
+def test_weekly_clock_is_marked_only_when_its_group_was_delivered(
+    happier_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    weekly = WeeklySlot.parse("Mon 06:00 UTC", "")
+    _drain_wakes([_topic_wake(1, 7)])
+    weekly_file = _due_weekly()
+    monkeypatch.setenv("FAKE_HAPPIER_FAIL", "create:boom")
+
+    failed = _drain_wakes([_topic_wake(2, 7)], weekly=weekly)
+
+    assert failed.ack_posts == [[2]], failed.ack_posts
+    assert weekly_file.read_text() == '{"last_fired_at": 0}', "weekly marked though its group failed"
+    monkeypatch.delenv("FAKE_HAPPIER_FAIL")
+    _drain_wakes([], weekly=weekly)
+    assert json.loads(weekly_file.read_text())["last_fired_at"] > 0, "delivered weekly not marked"
+
+
+def test_each_topic_uses_its_own_reason_model(happier_state: Path) -> None:
+    _drain_wakes([_topic_wake(1, 7), _topic_wake(2, 9, reason="follow")], models=_MYTHOS_POLICY)
+
+    assert [session["models"] for session in _sessions(happier_state)] == [["mythos"], ["sonnet"]]
+
+
+def test_create_log_line_redacts_the_prompt(happier_state: Path, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="agent_board")
+
+    _drain_wakes([_topic_wake(1, 7)])
+
+    creates = [record.getMessage() for record in caplog.records if "session create" in record.getMessage()]
+    assert len(creates) == 1 and "<redacted>" in creates[0], creates
+    assert "wake 1 in topic 7" not in caplog.text, caplog.text
+
+
+def test_one_session_switches_model_on_every_delivery(happier_state: Path) -> None:
+    for wake_id, reason in enumerate(("mention", "timer", "mention", "follow")):
+        _drain_wakes([{"id": wake_id, "reason": reason, "summary": reason}], "kind", models=_MYTHOS_POLICY)
+
+    assert [session["models"] for session in _sessions(happier_state)] == [
+        ["mythos", "sonnet", "mythos", "sonnet"]
+    ]
 
 
 def test_no_remote_control_fallback_when_a_model_is_required(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    happier_state: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     started: list[str] = []
     monkeypatch.setattr(remote_control, "start", lambda *args: started.append("started"))
-    happier = SessionHappier(fail_create=True)
+    monkeypatch.setenv("FAKE_HAPPIER_FAIL", "create:boom")
     weekly = WeeklySlot.parse("Mon 06:00 UTC", "")
-    waker = _waker(tmp_path, monkeypatch, happier, session=None, models=MYTHOS_POLICY, weekly=weekly)
-    (tmp_path / loop.WEEKLY_FILE).write_text('{"last_fired_at": 0}')
+    weekly_file = _due_weekly()
 
-    acked = waker([{"id": 1, "reason": "mention", "summary": "m"}, *waker.scheduled()])
+    client = _drain_wakes([_wake(1)], "kind", models=_MYTHOS_POLICY, weekly=weekly, fallback="remote-control")
 
-    assert acked == [], acked
+    assert client.ack_posts == [], client.ack_posts
     assert started == [], "fell back to remote control without the chosen model"
-    assert (tmp_path / loop.WEEKLY_FILE).read_text() == '{"last_fired_at": 0}', (
-        "weekly marked though undelivered"
-    )
+    assert weekly_file.read_text() == '{"last_fired_at": 0}', "weekly marked though undelivered"
 
 
 def test_remote_control_fallback_still_works_without_models(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    happier_state: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     started: list[str] = []
     monkeypatch.setattr(remote_control, "start", lambda *args: started.append("started"))
-    waker = _waker(tmp_path, monkeypatch, SessionHappier(fail_create=True), session=None)
+    monkeypatch.setenv("FAKE_HAPPIER_FAIL", "create:boom")
 
-    assert waker([{"id": 1, "reason": "mention", "summary": "m"}]) == [1]
+    client = _drain_wakes([_wake(1)], "kind", fallback="remote-control")
+
+    assert client.ack_posts == [[1]], client.ack_posts
     assert started == ["started"]
