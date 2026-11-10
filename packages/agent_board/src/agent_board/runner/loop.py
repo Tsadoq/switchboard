@@ -9,6 +9,7 @@ from typing import Any, Final, Literal, NoReturn
 
 from agent_board.client import BoardError, BoardUnreachable, Client
 from agent_board.identity import Identity, ensure_state_dir
+from agent_board.runner.activity import ActivityReporter, threads_of
 from agent_board.runner.config import KindConfig, RunnerConfig
 from agent_board.runner.happier import TIMEOUT_SECONDS, Happier, HappierError
 from agent_board.runner.remote_control import RemoteControlError
@@ -101,8 +102,11 @@ def run_forever(cfg: RunnerConfig, clients: Mapping[Identity, Client], happier: 
             logger.exception("%s stopped", inbox.label)
             failures.put(failure)
 
-    for inbox in _inboxes(cfg, clients, happier):
+    reporters: list[ActivityReporter] = []
+    for inbox in _inboxes(cfg, clients, happier, reporters):
         threading.Thread(target=serve, args=(inbox,), name=inbox.label, daemon=True).start()
+    for reporter in reporters:
+        threading.Thread(target=reporter.serve, name="activity", daemon=True).start()
     raise failures.get()
 
 
@@ -180,11 +184,19 @@ class _Inbox:
 
 
 class _AgentWaker:
-    def __init__(self, settings: KindConfig, me: Identity, happier: Happier, sessions: SessionPool) -> None:
+    def __init__(
+        self,
+        settings: KindConfig,
+        me: Identity,
+        happier: Happier,
+        sessions: SessionPool,
+        reporter: ActivityReporter | None = None,
+    ) -> None:
         self._settings = settings
         self._me = me
         self._happier = happier
         self._sessions = sessions
+        self._reporter = reporter
         self._weekly = (
             None
             if settings.weekly is None
@@ -207,7 +219,11 @@ class _AgentWaker:
     def _deliver(self, key: str | None, group: list[Wake], wall_clock_deadline: float) -> bool:
         try:
             delivered = self._sessions.deliver(
-                key, prompt_for(group), model_for(group, self._settings.models), wall_clock_deadline
+                key,
+                prompt_for(group),
+                model_for(group, self._settings.models),
+                wall_clock_deadline,
+                on_sent=self._on_sent(group),
             )
         except (HappierError, RemoteControlError) as error:
             warn_human(
@@ -218,6 +234,13 @@ class _AgentWaker:
         if delivered and self._weekly is not None and any(wake["reason"] == WEEKLY_REASON for wake in group):
             self._weekly.mark(time.time())
         return delivered
+
+    def _on_sent(self, group: list[Wake]) -> Callable[[str], None] | None:
+        reporter = self._reporter
+        if reporter is None:
+            return None
+        threads = threads_of(group)
+        return lambda session_id: reporter.delivered(session_id, threads)
 
 
 class _HumanNotifier:
@@ -277,12 +300,22 @@ def _names(authors: list[str]) -> str:
     return ", ".join(authors[:_DIGEST_AUTHORS]) + (f" +{extra}" if extra > 0 else "")
 
 
-def _inboxes(cfg: RunnerConfig, clients: Mapping[Identity, Client], happier: Happier) -> list[_Inbox]:
+def _inboxes(
+    cfg: RunnerConfig,
+    clients: Mapping[Identity, Client],
+    happier: Happier,
+    reporters: list[ActivityReporter] | None = None,
+) -> list[_Inbox]:
+    """Passing `reporters` gives each agent an `ActivityReporter`, appended there for the caller to run."""
     inboxes = []
     for me, client in clients.items():
         settings = cfg.kinds[me.kind]
         sessions = SessionPool(settings, me, happier)
-        waker = _AgentWaker(settings, me, happier, sessions)
+        reporter = None
+        if reporters is not None:
+            reporter = ActivityReporter(client, happier)
+            reporters.append(reporter)
+        waker = _AgentWaker(settings, me, happier, sessions, reporter)
         inboxes.append(
             _Inbox(
                 me.principal,

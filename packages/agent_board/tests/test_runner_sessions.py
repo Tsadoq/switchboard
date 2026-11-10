@@ -403,3 +403,25 @@ def test_sessions_use_session_home(box: Fakes, clock: FakeClock, tmp_path: Path)
     sessions.deliver("topic:1", "second", None, float("inf"))
 
     assert [entry["homes"] for entry in _sessions(box)] == [[str(session_home)] * 2], _sessions(box)
+
+
+def test_delivery_names_the_session_it_used(box: Fakes, clock: FakeClock) -> None:
+    sessions = pool(clock)
+    used: list[str] = []
+
+    assert sessions.deliver("topic:1", "wake one", None, float("inf"), on_sent=used.append)
+    clock.advance(10)
+    assert sessions.deliver("topic:1", "wake two", None, float("inf"), on_sent=used.append)
+
+    assert used == [_map(box)["topic:1"]] * 2, f"sent sessions not reported: {used} vs {_map(box)}"
+
+
+def test_a_delivery_left_leased_names_no_session(box: Fakes, clock: FakeClock) -> None:
+    sessions = pool(clock, max_sessions=1)
+    used: list[str] = []
+    assert sessions.deliver("topic:1", "wake one", None, float("inf"))
+    _update_sessions(box, lambda entry: entry.update(turnRunning=True))
+
+    delivered = sessions.deliver("topic:2", "wake two", None, float("inf"), on_sent=used.append)
+
+    assert not delivered and used == [], f"a wake left leased was reported as sent: {used}"

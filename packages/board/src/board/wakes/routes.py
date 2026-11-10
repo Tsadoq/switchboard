@@ -1,9 +1,10 @@
+import json
 import time
 from functools import partial
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, FastAPI, Query, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response
+from pydantic import BaseModel, Field
 
 from board.constants import HUMAN
 from board.db import Database
@@ -13,6 +14,8 @@ from board.identity.verifier import rfc3339
 from board.wakes.bus import Wake, WakeBus
 
 MAX_WAIT_SECONDS = 60
+MAX_RUNS = 16
+MAX_RUN_THREADS = 20
 
 type Inbox = Literal["me", "human"]
 
@@ -22,8 +25,34 @@ class AckRequest(BaseModel):
     principal: Inbox = "me"
 
 
+class Run(BaseModel):
+    threads: list[Annotated[int, Field(ge=1, le=2**63 - 1)]] = Field(max_length=MAX_RUN_THREADS)
+    since: float = Field(ge=0, allow_inf_nan=False)
+
+
+class ActivityReport(BaseModel):
+    running: list[Run] = Field(max_length=MAX_RUNS)
+    ttl_seconds: int = Field(ge=10, le=600)
+
+
 def install(app: FastAPI, bus: WakeBus, db: Database) -> None:
     app.include_router(_routes(bus, db))
+    app.include_router(_activity_route(db))
+
+
+def _activity_route(db: Database) -> APIRouter:
+    router = APIRouter()
+
+    @router.post("/api/activity", status_code=204)
+    async def report(body: ActivityReport, caller: Annotated[str, Depends(current_principal)]) -> Response:
+        now = time.time()
+        running = json.dumps([{"threads": run.threads, "since": min(run.since, now)} for run in body.running])
+        await db.transact(
+            partial(presence.record_running, principal=caller, running=running, until=now + body.ttl_seconds)
+        )
+        return Response(status_code=204)
+
+    return router
 
 
 def _routes(bus: WakeBus, db: Database) -> APIRouter:

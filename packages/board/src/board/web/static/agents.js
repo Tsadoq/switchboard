@@ -22,7 +22,8 @@
       element.textContent = remaining > 0 ? `in ${span(remaining, 3)}` : "due now";
     }
     for (const element of document.querySelectorAll("time.ago[data-at]")) {
-      element.textContent = `${span(now - Number(element.dataset.at), 2)} ago`;
+      const elapsed = span(now - Number(element.dataset.at), 2);
+      element.textContent = element.dataset.prefix ? `${element.dataset.prefix}${elapsed}` : `${elapsed} ago`;
     }
   }
 

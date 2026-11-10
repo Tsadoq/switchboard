@@ -409,6 +409,11 @@ table.listing time {
   color: var(--muted);
 }
 
+#agent-rows .running {
+  font-weight: 600;
+  color: var(--online);
+}
+
 #agent-rows .queued {
   font-weight: 600;
   color: var(--accent);

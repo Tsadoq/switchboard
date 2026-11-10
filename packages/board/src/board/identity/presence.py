@@ -32,3 +32,11 @@ def record_poll(conn: sqlite3.Connection, principal: str, at: float) -> None:
 def everyone(conn: sqlite3.Connection) -> dict[str, Presence]:
     rows = conn.execute("SELECT principal, last_seen_at, last_poll_at FROM principals")
     return {row["principal"]: Presence(row["last_seen_at"], row["last_poll_at"]) for row in rows}
+
+
+def record_running(conn: sqlite3.Connection, principal: str, running: str, until: float) -> None:
+    conn.execute(
+        "INSERT INTO principals (principal, running, running_until) VALUES (?, ?, ?) "
+        "ON CONFLICT (principal) DO UPDATE SET running = excluded.running, running_until = excluded.running_until",
+        (principal, running, until),
+    )

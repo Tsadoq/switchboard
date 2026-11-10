@@ -63,8 +63,15 @@ class SessionPool:
         self._clock = clock
         self._thread_scope = settings.session_scope == _THREAD_SCOPE
 
-    def deliver(self, key: str | None, prompt: str, model: str | None, deadline: float) -> bool:
-        """Send `prompt` into the session for `key`, opening one if needed.
+    def deliver(
+        self,
+        key: str | None,
+        prompt: str,
+        model: str | None,
+        deadline: float,
+        on_sent: Callable[[str], None] | None = None,
+    ) -> bool:
+        """Send `prompt` into the session for `key`, opening one if needed, and pass its id to `on_sent`.
 
         False means the wakes should stay leased: the session is busy, the cap is reached with no idle
         session to evict, or evicting one ran past `deadline` (on the `clock` timebase).
@@ -83,6 +90,8 @@ class SessionPool:
                         return False
                     self._happier.send(current.session_id, prompt, model)
                     current.last_delivery = self._clock()
+                    if on_sent is not None:
+                        on_sent(current.session_id)
                     logger.info(
                         "%s: sent wakes to session %s for %s (model %s)",
                         self._me.principal,
@@ -102,7 +111,9 @@ class SessionPool:
                     return False
                 if self._clock() > deadline:
                     return False
-            self._open_or_fall_back(entries, key, _with_rebuild_context(key, prompt), model)
+            opened = self._open_or_fall_back(entries, key, _with_rebuild_context(key, prompt), model)
+            if opened is not None and on_sent is not None:
+                on_sent(opened.id)
             return True
 
     def housekeep(self) -> None:
@@ -135,9 +146,9 @@ class SessionPool:
 
     def _open_or_fall_back(
         self, entries: list[_Entry], key: str | None, prompt: str, model: str | None
-    ) -> None:
+    ) -> Session | None:
         try:
-            self._open(entries, key, prompt, model)
+            return self._open(entries, key, prompt, model)
         except HappierError as error:
             fallback_allowed = model is None and self._settings.fallback == REMOTE_CONTROL
             if not fallback_allowed or not remote_control.serves(self._me.kind):
@@ -146,6 +157,7 @@ class SessionPool:
                 "%s: create failed (%s); falling back to remote control", self._me.principal, error
             )
             remote_control.start(self._settings.workdir, f"board-{self._me.kind}", prompt)
+            return None
 
     def _open(self, entries: list[_Entry], key: str | None, prompt: str, model: str | None) -> Session:
         session = self._happier.create(
