@@ -270,6 +270,22 @@ def test_invalid_or_expired_grants_never_occupy_capacity(
     assert store.active() == ()
 
 
+@pytest.mark.parametrize(
+    "path",
+    [Path("relative/runs.db"), Path("/var/lib/night/../other/runs.db"), Path("//var/lib/night/runs.db")],
+)
+def test_unnormalized_paths_fail_before_filesystem_access(
+    path: Path, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("filesystem used for non-normalized path")
+
+    monkeypatch.setattr(Path, "mkdir", forbidden)
+    monkeypatch.setattr(night_state, "_ancestor_stat", forbidden)
+    with pytest.raises(StateError, match="invalid_state_path"):
+        LocalJournal(path, box="dev", principals={"pi@dev": 1000}, clock=clock)
+
+
 def stored(tmp_path: Path, run_id: str) -> dict[str, Any]:
     with sqlite3.connect(tmp_path / "state" / "runs.db") as conn:
         conn.row_factory = sqlite3.Row

@@ -103,7 +103,7 @@ class LocalJournal:
         self._path = path
         self._principals = dict(principals)
         self._clock = clock
-        if not path.is_absolute():
+        if not path.is_absolute() or path.anchor != "/" or path != Path(os.path.normpath(path)):
             raise StateError("invalid_state_path")
         _check_ancestors(path.parent, allow_missing=True)
         missing = [directory for directory in (path.parent, *path.parent.parents) if not directory.exists()]
