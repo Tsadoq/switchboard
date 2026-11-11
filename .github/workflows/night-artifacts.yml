@@ -1,0 +1,94 @@
+name: Night release artifacts
+
+on:
+  push:
+    tags: [night-artifacts-*]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Validate the reviewed source tag
+        id: source
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          COMMIT=$(git rev-parse HEAD)
+          test "$TAG" = "night-artifacts-$COMMIT"
+          git fetch origin main
+          git merge-base --is-ancestor "$COMMIT" origin/main
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)" >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: 0.12.5
+          python-version: '3.13'
+          enable-cache: true
+      - run: uv sync --all-packages --locked
+      - run: uv run --locked ruff check . deploy/agent-board-update
+      - run: uv run --locked ruff format --check . deploy/agent-board-update
+      - run: uv run --locked mypy packages deploy/agent-board-update
+      - name: Test with isolated home
+        run: |
+          mkdir -p "$RUNNER_TEMP/night-test-home"
+          HOME="$RUNNER_TEMP/night-test-home" uv run --locked --no-sync pytest -q
+      - name: Verify dependency manifests
+        run: |
+          set -euo pipefail
+          uv export --package agent-board --no-dev --no-emit-workspace --format requirements-txt --no-header --no-annotate --locked --output-file "$RUNNER_TEMP/verifier-requirements.txt"
+          diff -u deploy/night-verifier-requirements.txt "$RUNNER_TEMP/verifier-requirements.txt"
+          uv export --all-packages --no-dev --no-emit-workspace --format requirements-txt --no-header --no-annotate --locked --output-file "$RUNNER_TEMP/smoke-requirements.txt"
+          diff -u deploy/night-smoke-requirements.txt "$RUNNER_TEMP/smoke-requirements.txt"
+      - name: Build the locked-backend wheels
+        run: |
+          set -euo pipefail
+          uv run --locked python -c 'from importlib.metadata import version; assert version("uv-build") == "0.13.7"'
+          test ! -e dist
+          test -z "$(git status --porcelain --untracked-files=all)"
+          uv build --package board --wheel --no-build-isolation --no-sources --out-dir dist
+          uv build --package agent-board --wheel --no-build-isolation --no-sources --out-dir dist
+          cp deploy/night-verifier-requirements.txt deploy/night-smoke-requirements.txt uv.lock dist/
+          git rev-parse HEAD > dist/SOURCE_COMMIT
+          { uv --version; uv run --locked python --version; uv run --locked python -c 'from importlib.metadata import version; print("uv-build", version("uv-build"))'; } > dist/BUILD_INFO.txt
+          cd dist
+          sha256sum agent_board-0.1.0-py3-none-any.whl board-0.1.0-py3-none-any.whl night-verifier-requirements.txt night-smoke-requirements.txt uv.lock SOURCE_COMMIT BUILD_INFO.txt > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: night-artifacts-${{ steps.source.outputs.commit }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4.3.0
+        with:
+          name: night-artifacts-${{ needs.build.outputs.commit }}
+          path: dist
+      - name: Publish the exact tag artifacts without overwriting a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          COMMIT: ${{ needs.build.outputs.commit }}
+        run: |
+          set -euo pipefail
+          test "$TAG" = "night-artifacts-$COMMIT"
+          test "$(tr -d '\n' < dist/SOURCE_COMMIT)" = "$COMMIT"
+          (cd dist && sha256sum -c SHA256SUMS)
+          gh release create "$TAG" dist/* --verify-tag --title "Night artifacts $COMMIT" --notes "Commit-bound build artifacts. These assets do not authorize root installation, enrollment or pilot activation."
