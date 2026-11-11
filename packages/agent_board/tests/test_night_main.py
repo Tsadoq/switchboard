@@ -20,7 +20,7 @@ def test_every_command_refuses_to_run_without_root(monkeypatch: pytest.MonkeyPat
     touched: list[Path] = []
     monkeypatch.setattr(entry, "load", lambda path: touched.append(path))
 
-    for command in ("serve", "guard", "gate"):
+    for command in ("serve", "guard", "gate", "exec"):
         assert entry.main([command, "--config", str(tmp_path / "verifier.toml")]) == 2
 
     assert touched == [], "the config was read before the root check"

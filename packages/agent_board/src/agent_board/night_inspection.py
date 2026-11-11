@@ -4,7 +4,7 @@ import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Final, Literal, Protocol
 from uuid import UUID
 
 CGROUP_ROOT = Path("/sys/fs/cgroup")
@@ -22,6 +22,11 @@ PROPERTIES = (
     "ControlGroup",
     "Job",
 )
+
+
+AGENT_USER: Final = "agent_user"
+ROOT_EXEC: Final = "root_exec"
+type Execution = Literal["agent_user", "root_exec"]
 
 
 class InspectionError(ValueError):
@@ -49,12 +54,21 @@ class Host(Protocol):
 
 @dataclass(frozen=True)
 class Binding:
+    """A run's unit identity. `uid` is always the native principal's uid, kept for accounting and release.
+
+    `execution` says how the unit itself runs: "agent_user" units carry User=<uid>; "root_exec" units run
+    as root (no User=) and a trusted root exec step verifies and drops to `uid` before any native code.
+    """
+
     run_id: str
     uid: int
     boot_id: str
     invocation_id: str
+    execution: Execution = AGENT_USER
 
     def __post_init__(self) -> None:
+        if self.execution not in (AGENT_USER, ROOT_EXEC):
+            raise InspectionError("invalid_execution")
         try:
             valid = str(UUID(self.run_id)) == self.run_id and str(UUID(self.boot_id)) == self.boot_id
         except (ValueError, TypeError, AttributeError):
@@ -124,10 +138,10 @@ class Inspector:
     def __init__(self, host: Host) -> None:
         self._host = host
 
-    def capture(self, *, run_id: str, uid: int, boot_id: str) -> Binding:
-        identity = Binding(run_id, uid, boot_id, "f" * 32)
+    def capture(self, *, run_id: str, uid: int, boot_id: str, execution: Execution = AGENT_USER) -> Binding:
+        identity = Binding(run_id, uid, boot_id, "f" * 32, execution)
         properties = self._host.properties(identity.unit)
-        binding = Binding(run_id, uid, boot_id, properties.get("InvocationID", ""))
+        binding = Binding(run_id, uid, boot_id, properties.get("InvocationID", ""), execution)
         if self._host.boot_id() != boot_id or not self._matches(binding, properties):
             raise InspectionError("binding_conflict")
         if properties.get("ActiveState") not in ("active", "activating"):
@@ -203,7 +217,7 @@ class Inspector:
         return (
             properties.get("Id") == binding.unit
             and properties.get("LoadState") == "loaded"
-            and properties.get("User") == str(binding.uid)
+            and properties.get("User") == (str(binding.uid) if binding.execution == AGENT_USER else "")
             and properties.get("Slice") == NIGHT_SLICE
             and properties.get("Delegate") == "no"
             and properties.get("Restart") == "no"

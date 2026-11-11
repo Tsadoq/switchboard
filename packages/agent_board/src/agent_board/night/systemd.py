@@ -10,6 +10,7 @@ from agent_board.night.ledger import Ledger
 from agent_board.night_inspection import (
     CGROUP_ROOT,
     NIGHT_SLICE,
+    ROOT_EXEC,
     Binding,
     EmptyObservation,
     InspectionError,
@@ -17,6 +18,7 @@ from agent_board.night_inspection import (
 )
 
 GATE_TIMEOUT_SECONDS = 30
+DROP_CAPABILITIES = ("CAP_SETUID", "CAP_SETGID", "CAP_SETPCAP")
 SYSTEMD_RUN = "/usr/bin/systemd-run"
 SYSTEMCTL = "/usr/bin/systemctl"
 _ENVIRONMENT = {"PATH": "/usr/bin:/bin", "LANG": "C"}
@@ -70,12 +72,20 @@ def _write_control(control: Path) -> bool:
     return True
 
 
-def run_argv(config: VerifierConfig, config_path: Path, spec: RunSpec, gate_python: Path) -> tuple[str, ...]:
-    """The one transient unit a run may be: bound to the guard, gated by root, then dropped to the agent."""
-    agent, limits, python = spec.agent, config.limits, str(config.launcher_python)
-    if any(_unsafe_in_command_line(text) for text in (str(gate_python), str(config_path))):
-        raise RunManagerError("the launcher python or config path cannot appear in a systemd command line")
-    gate = f"+{gate_python} -I -m agent_board.night gate --config {config_path} {spec.run_id}"
+def run_argv(
+    config: VerifierConfig, config_path: Path, spec: RunSpec, service_python: Path
+) -> tuple[str, ...]:
+    """The one transient unit a run may be: bound to the guard, root-gated and root-exec'd, hardened throughout.
+
+    The unit runs as root (a transient unit cannot give a root main process while carrying User=), so the
+    pinned service interpreter runs both the gate and the exec step, which drops to the agent before any
+    native code. The unit properties bound what that root could do even if the drop were skipped.
+    """
+    agent, limits = spec.agent, config.limits
+    paths = (service_python, config_path, agent.workdir_root, agent.happier_home, config.state_path.parent)
+    if any(_unsafe_in_command_line(str(path)) for path in paths):
+        raise RunManagerError("a path in the night unit's command line or properties is unsafe")
+    step = f"{service_python} -I -m agent_board.night"
     return (
         SYSTEMD_RUN,
         "--system",
@@ -83,13 +93,19 @@ def run_argv(config: VerifierConfig, config_path: Path, spec: RunSpec, gate_pyth
         "--quiet",
         f"--unit={spec.unit}",
         f"--slice={NIGHT_SLICE}",
-        f"--uid={agent.uid}",
         "--property=Type=exec",
         "--property=Delegate=no",
         "--property=KillMode=control-group",
         "--property=SendSIGKILL=yes",
         "--property=Restart=no",
         "--property=NoNewPrivileges=yes",
+        f"--property=CapabilityBoundingSet={' '.join(DROP_CAPABILITIES)}",
+        "--property=AmbientCapabilities=",
+        "--property=ProtectSystem=strict",
+        f"--property=ReadWritePaths={agent.workdir_root} {agent.happier_home} {config.state_path.parent}",
+        "--property=PrivateTmp=yes",
+        "--property=ProtectKernelTunables=yes",
+        "--property=ProtectKernelModules=yes",
         "--property=UMask=0077",
         f"--property=BindsTo={config.guard_unit}",
         f"--property=After={config.guard_unit}",
@@ -99,16 +115,16 @@ def run_argv(config: VerifierConfig, config_path: Path, spec: RunSpec, gate_pyth
         f"--property=MemoryMax={limits.memory_max}",
         f"--property=TasksMax={limits.tasks_max}",
         f"--property=CPUQuota={limits.cpu_quota}",
-        f"--property=ExecStartPre={gate}",
-        f"--setenv=HOME={agent.home}",
-        f"--setenv=HAPPIER_HOME_DIR={agent.happier_home}",
-        f"--setenv=XDG_RUNTIME_DIR=/run/user/{agent.uid}",
+        f"--property=ExecStartPre={step} gate --config {config_path} {spec.run_id}",
         f"--working-directory={agent.workdir_root}",
         "--",
-        python,
+        str(service_python),
         "-I",
         "-m",
-        config.launcher_module,
+        "agent_board.night",
+        "exec",
+        "--config",
+        str(config_path),
         spec.run_id,
     )
 
@@ -174,4 +190,4 @@ class SystemdRuns:
         recorded = self._ledger.binding(run_id)
         if recorded is None:
             return None
-        return Binding(run_id, recorded.uid, recorded.boot_id, recorded.invocation_id)
+        return Binding(run_id, recorded.uid, recorded.boot_id, recorded.invocation_id, ROOT_EXEC)

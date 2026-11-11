@@ -6,7 +6,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from agent_board.night.ledger import Ledger, LedgerError, Pending
-from agent_board.night_inspection import Binding, EmptyObservation, InspectionError
+from agent_board.night_inspection import ROOT_EXEC, Binding, EmptyObservation, Execution, InspectionError
 from agent_board.night_state import LocalJournal, Record, StateError
 
 logger = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ class VerifierBoard(Protocol):
 
 
 class BindingInspector(Protocol):
-    def capture(self, *, run_id: str, uid: int, boot_id: str) -> Binding: ...
+    def capture(self, *, run_id: str, uid: int, boot_id: str, execution: Execution) -> Binding: ...
 
     def stopped(self, binding: Binding) -> EmptyObservation: ...
 
@@ -101,7 +101,7 @@ class BoardSync:
         if self.frozen is not None:
             raise SyncError(f"frozen:{self.frozen}")
         try:
-            binding = self._inspector.capture(run_id=run_id, uid=uid, boot_id=boot_id)
+            binding = self._inspector.capture(run_id=run_id, uid=uid, boot_id=boot_id, execution=ROOT_EXEC)
             self._ledger.record_binding(
                 run_id, uid=uid, boot_id=boot_id, invocation_id=binding.invocation_id, cgroup=binding.cgroup
             )
@@ -143,7 +143,7 @@ class BoardSync:
         recorded = self._ledger.binding(record.run_id)
         if recorded is None or not recorded.server_acked:
             return False
-        binding = Binding(record.run_id, recorded.uid, recorded.boot_id, recorded.invocation_id)
+        binding = Binding(record.run_id, recorded.uid, recorded.boot_id, recorded.invocation_id, ROOT_EXEC)
         try:
             self._inspector.stopped(binding)
             self._report(record, binding, recorded.cgroup, reason)

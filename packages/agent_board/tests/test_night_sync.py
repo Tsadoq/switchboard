@@ -10,7 +10,7 @@ import pytest
 from agent_board import night_state
 from agent_board.night.ledger import Ledger, LedgerError, Pending
 from agent_board.night.sync import Ack, BoardRefused, BoardState, BoardSync, BoardUnavailable, SyncError
-from agent_board.night_inspection import Binding, EmptyObservation, InspectionError
+from agent_board.night_inspection import ROOT_EXEC, Binding, EmptyObservation, Execution, InspectionError
 from agent_board.night_state import ClockReading, Grant, LocalJournal
 
 BOOT = str(uuid4())
@@ -101,11 +101,13 @@ class Inspector:
         self.failure: InspectionError | None = None
         self.not_stopped: InspectionError | None = None
         self.barrier: threading.Barrier | None = None
+        self.executions: list[str] = []
 
-    def capture(self, *, run_id: str, uid: int, boot_id: str) -> Binding:
+    def capture(self, *, run_id: str, uid: int, boot_id: str, execution: Execution) -> Binding:
+        self.executions.append(execution)
         if self.failure is not None:
             raise self.failure
-        return Binding(run_id, uid, boot_id, "b" * 32)
+        return Binding(run_id, uid, boot_id, "b" * 32, execution)
 
     def stopped(self, binding: Binding) -> EmptyObservation:
         if self.barrier is not None:
@@ -336,3 +338,15 @@ def test_the_ledger_refuses_a_second_evidence_message_for_one_run(rig: Rig) -> N
 
     with pytest.raises(LedgerError):
         rig.ledger.persist(Pending(str(uuid4()), "evidence", run_id, {"receipt_id": "b"}))
+
+
+def test_the_runtime_always_captures_root_exec_units_with_the_native_uid(rig: Rig) -> None:
+    rig.sync.reconcile()
+    run_id = rig.reserve()
+    rig.journal.claim_start(run_id, FENCE)
+
+    rig.bind(run_id)
+
+    assert rig.inspector.executions == [ROOT_EXEC]
+    recorded = rig.ledger.binding(run_id)
+    assert recorded is not None and recorded.uid == UID, "the native uid was not kept for accounting"

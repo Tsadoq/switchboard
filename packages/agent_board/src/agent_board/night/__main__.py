@@ -12,6 +12,7 @@ from agent_board.night import client, guard, server
 from agent_board.night.board import SignedBoard
 from agent_board.night.config import VerifierConfig, load, trusted_file
 from agent_board.night.controller import Controller
+from agent_board.night.execstep import ExecRefused, LiveSystem, exec_native
 from agent_board.night.gate import GuardState, open_gate
 from agent_board.night.ledger import Ledger
 from agent_board.night.sync import BoardSync
@@ -30,7 +31,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments[:1] == ["request"]:
         return client.main(arguments[1:])
     parser = argparse.ArgumentParser(prog="python -I -m agent_board.night")
-    parser.add_argument("command", choices=("serve", "guard", "gate"))
+    parser.add_argument("command", choices=("serve", "guard", "gate", "exec"))
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("run_id", nargs="?")
     args = parser.parse_args(arguments)
@@ -45,10 +46,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         principals={agent.principal: agent.uid for agent in config.agents.values()},
     )
     ledger = Ledger(config.state_path.parent / LEDGER_NAME)
+    if args.command in ("gate", "exec") and args.run_id is None:
+        parser.error(f"{args.command} needs a run id")
     if args.command == "gate":
-        if args.run_id is None:
-            parser.error("gate needs a run id")
         return 0 if _gate(args.run_id, config.guard_unit, ledger, journal) else 1
+    if args.command == "exec":
+        try:
+            exec_native(
+                args.run_id,
+                config=config,
+                journal=journal,
+                ledger=ledger,
+                environ=os.environ,
+                system=LiveSystem(_guard_state, _boot_id),
+            )
+        except ExecRefused as refusal:
+            logger.error("night run %s will not execute: %s", args.run_id, refusal)
+            return 1
     if args.command == "guard":
         _guard(config, args.config, ledger, journal)
     _serve(config, args.config, ledger, journal)

@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -9,6 +10,7 @@ from agent_board.night_inspection import (
     CGROUP_ROOT,
     NIGHT_CGROUP,
     NIGHT_SLICE,
+    ROOT_EXEC,
     Binding,
     InspectionError,
     Inspector,
@@ -244,3 +246,55 @@ def test_live_backend_requires_root_before_any_manager_access(monkeypatch: pytes
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
     with pytest.raises(InspectionError, match="root_required"):
         LiveHost()
+
+
+def _root_exec_capture(host: Host) -> Binding:
+    return Inspector(host).capture(
+        run_id=host.binding.run_id, uid=host.binding.uid, boot_id=host.binding.boot_id, execution=ROOT_EXEC
+    )
+
+
+def test_a_root_exec_unit_is_captured_with_no_user_and_keeps_the_native_uid() -> None:
+    host = Host()
+    host.props["User"] = ""
+
+    binding = _root_exec_capture(host)
+
+    assert binding.execution == ROOT_EXEC and binding.uid == 1000, binding
+
+
+@pytest.mark.parametrize("user", ["1000", "0", "root"])
+def test_a_root_exec_binding_refuses_a_unit_that_carries_any_user(user: str) -> None:
+    host = Host()
+    host.props["User"] = user
+
+    with pytest.raises(InspectionError, match="binding_conflict"):
+        _root_exec_capture(host)
+
+
+def test_an_agent_user_binding_refuses_a_root_unit() -> None:
+    host = Host()
+    host.props["User"] = ""
+
+    with pytest.raises(InspectionError, match="binding_conflict"):
+        capture(host)
+
+
+def test_stop_proof_refuses_a_mode_mismatch_in_either_direction() -> None:
+    root_host = Host()
+    root_host.props["User"] = ""
+    root_binding = _root_exec_capture(root_host)
+    root_host.props.update({"ActiveState": "inactive", "Job": "", "User": "1000"})
+    agent_host = Host()
+    agent_binding = capture(agent_host)
+    agent_host.props.update({"ActiveState": "inactive", "Job": "", "User": ""})
+
+    with pytest.raises(InspectionError, match="binding_conflict"):
+        Inspector(root_host).stopped(root_binding)
+    with pytest.raises(InspectionError, match="binding_conflict"):
+        Inspector(agent_host).stopped(agent_binding)
+
+
+def test_an_unknown_execution_mode_is_refused_before_the_manager() -> None:
+    with pytest.raises(InspectionError, match="invalid_execution"):
+        Binding(str(uuid4()), 1000, str(uuid4()), "a" * 32, cast(Any, "anything"))

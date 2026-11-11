@@ -9,7 +9,7 @@ from agent_board import night_state
 from agent_board.night.controller import unit_name
 from agent_board.night.guard import BoottimeTimer, Guard, serve, systemd_notify
 from agent_board.night.ledger import Arm, Ledger, Pending
-from agent_board.night_state import ClockReading, Grant, LocalJournal
+from agent_board.night_state import ClockReading, Grant, LocalJournal, Record, StateError
 
 BOOT = str(uuid4())
 UID = 1001
@@ -73,8 +73,9 @@ class Rig:
     def __init__(self, tmp_path: Path) -> None:
         self.boottime = 100.0
         self.utc = 1_000.0
+        self.journal_path = tmp_path / "state" / "journal.sqlite3"
         self.journal = LocalJournal(
-            tmp_path / "state" / "journal.sqlite3",
+            self.journal_path,
             box="huginn",
             principals={"pi@huginn": UID},
             clock=lambda: ClockReading(BOOT, self.boottime, self.utc),
@@ -255,3 +256,47 @@ def test_the_guard_latches_the_stop_in_the_journal_before_any_blocking_stop_work
     rig.guard().tick()
 
     assert rig.stopper.states_seen == ["stopping"], rig.stopper.states_seen
+
+
+class FlakyJournal(LocalJournal):
+    """The real journal, except that the first stop latches are refused."""
+
+    failures = 0
+
+    def request_stop(self, run_id: str, fence: str) -> Record:
+        if self.failures:
+            self.failures -= 1
+            raise StateError("state_unavailable")
+        return super().request_stop(run_id, fence)
+
+
+def test_a_failed_stop_latch_still_kills_and_is_retried_until_it_commits(rig: Rig) -> None:
+    rig.launched_run()
+    flaky = FlakyJournal(
+        rig.journal_path,
+        box="huginn",
+        principals={"pi@huginn": UID},
+        clock=lambda: ClockReading(BOOT, rig.boottime, rig.utc),
+    )
+    flaky.failures = 1
+    guard = Guard(
+        journal=flaky,
+        ledger=rig.ledger,
+        runs=rig.stopper,
+        timer=rig.timer,
+        stop_grace_seconds=5,
+        invocation_id=FIRST,
+        boot_id=lambda: BOOT,
+        boottime=lambda: rig.boottime,
+        utc=lambda: rig.utc,
+    )
+    rig.boottime = 696.0
+
+    guard.tick()
+    guard.tick()
+    guard.tick()
+
+    assert len(rig.stopper.stopped) == 2, (
+        "the guard did not kill despite the failed latch, or kept killing after it"
+    )
+    assert rig.journal.active()[0].state == "stopping", "the stop was never latched after the retry"

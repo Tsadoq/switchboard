@@ -11,7 +11,7 @@ from agent_board.night.controller import RunManagerError, RunSpec, unit_name
 from agent_board.night.gate import GuardState, open_gate
 from agent_board.night.ledger import Arm, Ledger, Pending
 from agent_board.night.systemd import SystemdRuns, run_argv
-from agent_board.night_inspection import Binding, EmptyObservation, InspectionError
+from agent_board.night_inspection import ROOT_EXEC, Binding, EmptyObservation, InspectionError
 from agent_board.night_state import ClockReading, Grant, LocalJournal
 
 BOOT = str(uuid4())
@@ -68,7 +68,7 @@ def _spec(config: Any, run_id: str, runtime: float = 600.0) -> RunSpec:
     return RunSpec(run_id, unit_name(run_id), config.agents["pi@huginn"], runtime)
 
 
-def test_the_run_unit_is_bound_to_the_guard_gated_by_root_and_dropped_to_the_agent() -> None:
+def test_the_run_unit_is_root_gated_root_execd_hardened_and_bound_to_the_guard() -> None:
     config = _config()
     run_id = str(uuid4())
 
@@ -79,26 +79,35 @@ def test_the_run_unit_is_bound_to_the_guard_gated_by_root_and_dropped_to_the_age
         "--system",
         f"--unit=switchboard-night-{run_id}.service",
         "--slice=switchboard-night.slice",
-        f"--uid={UID}",
         "--property=Delegate=no",
         "--property=KillMode=control-group",
         "--property=Restart=no",
+        "--property=NoNewPrivileges=yes",
+        "--property=CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SETPCAP",
+        "--property=AmbientCapabilities=",
+        "--property=ProtectSystem=strict",
+        "--property=ReadWritePaths=/srv/night/pi /var/lib/switchboard-night/happier/pi /var/lib/switchboard-night",
+        "--property=PrivateTmp=yes",
+        "--property=ProtectKernelTunables=yes",
+        "--property=ProtectKernelModules=yes",
         f"--property=BindsTo={PRODUCTION_GUARD_UNIT}",
         f"--property=After={PRODUCTION_GUARD_UNIT}",
         "--property=RuntimeMaxSec=594",
-        "--setenv=HAPPIER_HOME_DIR=/var/lib/switchboard-night/happier/pi",
     ):
         assert expected in options, f"missing {expected}: {options}"
+    assert not any(option.startswith("--uid") for option in options), "the unit must not carry User="
     gate = next(option for option in options if option.startswith("--property=ExecStartPre="))
     assert gate == (
-        "--property=ExecStartPre=+/opt/switchboard-night/releases/abc/bin/python -I -m agent_board.night gate "
-        f"--config {CONFIG_PATH} {run_id}"
+        f"--property=ExecStartPre={SERVICE_PYTHON} -I -m agent_board.night gate --config {CONFIG_PATH} {run_id}"
     ), gate
     assert command == (
-        "/opt/switchboard-night/releases/abc/bin/python",
+        str(SERVICE_PYTHON),
         "-I",
         "-m",
-        "agent_board.night.launch",
+        "agent_board.night",
+        "exec",
+        "--config",
+        str(CONFIG_PATH),
         run_id,
     )
 
@@ -238,7 +247,7 @@ def test_stop_proof_comes_from_the_inspector_with_the_recorded_binding(ledger: L
     unproven = runs.inspect(unit_name(run_id))
     unknown = runs.inspect(unit_name(str(uuid4())))
 
-    assert inspector.checked[0] == Binding(run_id, UID, BOOT, OWN), inspector.checked
+    assert inspector.checked[0] == Binding(run_id, UID, BOOT, OWN, ROOT_EXEC), inspector.checked
     assert (proven.unit_active, proven.cgroup_populated) == (False, False)
     assert unproven.cgroup_populated is None and unknown.cgroup_populated is None
 
@@ -338,16 +347,10 @@ def test_the_run_binds_to_the_configured_guard() -> None:
     assert not any(PRODUCTION_GUARD_UNIT in option for option in argv), argv
 
 
-def test_the_root_gate_runs_the_service_interpreter_never_the_configured_launcher() -> None:
+def test_the_configured_launcher_never_appears_in_the_root_unit() -> None:
     agent_venv = {"python": "/srv/night/pi/venv/bin/python", "module": "agent_board.night.launch"}
     config = _config(launcher=agent_venv)
-    run_id = str(uuid4())
 
-    argv = run_argv(config, CONFIG_PATH, _spec(config, run_id), SERVICE_PYTHON)
+    argv = run_argv(config, CONFIG_PATH, _spec(config, str(uuid4())), SERVICE_PYTHON)
 
-    gate = next(option for option in argv if option.startswith("--property=ExecStartPre="))
-    assert gate.startswith(f"--property=ExecStartPre=+{SERVICE_PYTHON} -I -m agent_board.night gate"), gate
-    assert "/srv/night/pi/venv" not in gate, "a configured launcher interpreter reached the root gate"
-    assert argv[argv.index("--") + 1] == "/srv/night/pi/venv/bin/python", (
-        "the launcher itself still runs as the agent"
-    )
+    assert not any("/srv/night/pi/venv" in part or "agent_board.night.launch" in part for part in argv), argv

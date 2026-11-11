@@ -98,11 +98,16 @@ class Guard:
         if record.run_id in self._stopped:
             return
         logger.warning("stopping night run %s at its deadline (state %s)", record.run_id, record.state)
-        self._stopped.add(record.run_id)
         try:
             self._journal.request_stop(record.run_id, record.fence)
+            latched = True
         except StateError as error:
-            logger.error("could not record the stop of %s: %s", record.run_id, error)
+            logger.error(
+                "could not record the stop of %s; killing anyway and retrying: %s", record.run_id, error
+            )
+            latched = False
+        if latched:
+            self._stopped.add(record.run_id)
         self._runs.stop(unit_name(record.run_id))
 
 
