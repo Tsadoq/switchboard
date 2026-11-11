@@ -1,3 +1,4 @@
+import errno
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -9,6 +10,7 @@ from agent_board import night_state
 from agent_board.night.config import parse
 from agent_board.night.execstep import Account, ExecRefused, exec_native
 from agent_board.night.gate import GuardState
+from agent_board.night.latch import latch_stop
 from agent_board.night.ledger import Arm, Ledger, Pending
 from agent_board.night_inspection import unit_cgroup
 from agent_board.night_state import ClockReading, Grant, LocalJournal
@@ -256,3 +258,22 @@ def test_an_account_lookup_that_disagrees_with_the_configured_uid_is_refused_bef
         rig.run()
 
     assert rig.system.calls == [], "a substituted identity reached the drop"
+
+
+class StoppedManager:
+    def show(self, unit: str, properties: object) -> str:
+        return "LoadState=loaded\nActiveState=inactive\nJob=\nControlGroup=\n"
+
+
+def test_a_late_exec_after_latch_stop_refuses_before_any_drop_or_exec(rig: Rig) -> None:
+    def absent(path: Path) -> str:
+        raise FileNotFoundError(errno.ENOENT, "absent", str(path))
+
+    outcome = latch_stop(
+        _config(), lambda: rig.journal, StoppedManager(), run_id=rig.run_id, fence=FENCE, events=absent
+    )
+
+    assert outcome.latched == [rig.run_id], outcome
+    with pytest.raises(ExecRefused, match="not_runnable"):
+        rig.run()
+    assert rig.system.calls == [], "the late exec reached the uid drop or native exec after the latch"

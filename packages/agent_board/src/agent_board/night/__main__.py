@@ -14,6 +14,7 @@ from agent_board.night.config import VerifierConfig, load, trusted_file
 from agent_board.night.controller import Controller
 from agent_board.night.execstep import ExecRefused, LiveSystem, exec_native
 from agent_board.night.gate import GuardState, open_gate
+from agent_board.night.latch import latch_stop
 from agent_board.night.ledger import Ledger
 from agent_board.night.sync import BoardSync
 from agent_board.night.systemd import SYSTEMCTL, LiveCommands, SystemdRuns
@@ -31,15 +32,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments[:1] == ["request"]:
         return client.main(arguments[1:])
     parser = argparse.ArgumentParser(prog="python -I -m agent_board.night")
-    parser.add_argument("command", choices=("serve", "guard", "gate", "exec"))
+    parser.add_argument("command", choices=("serve", "guard", "gate", "exec", "latch-stop"))
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("run_id", nargs="?")
+    parser.add_argument("--all-open", action="store_true")
     args = parser.parse_args(arguments)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    if os.geteuid() != 0:
+    if not _is_root():
         logger.error("the night verifier must run as root")
         return 2
     config = load(args.config)
+    if args.command == "latch-stop":
+        return _latch_stop(parser, args, config)
     journal = LocalJournal(
         config.state_path,
         box=config.box,
@@ -121,6 +125,43 @@ def _service_python() -> Path:
     python = Path(sys.executable)
     trusted_file(python)
     return python
+
+
+def _is_root() -> bool:
+    return os.geteuid() == 0
+
+
+def _latch_stop(parser: argparse.ArgumentParser, args: argparse.Namespace, config: VerifierConfig) -> int:
+    if (args.run_id is None) == (not args.all_open):
+        parser.error("latch-stop needs exactly one of a run id or --all-open")
+    outcome = latch_stop(
+        config,
+        lambda: LocalJournal(
+            config.state_path,
+            box=config.box,
+            principals={agent.principal: agent.uid for agent in config.agents.values()},
+        ),
+        LiveManager(),
+        run_id=args.run_id,
+        fence=None if args.all_open else sys.stdin.readline().strip(),
+    )
+    print(outcome.json())
+    return outcome.exit_code
+
+
+class LiveManager:
+    def show(self, unit: str, properties: Sequence[str]) -> str:
+        try:
+            return subprocess.run(
+                [SYSTEMCTL, "--system", "show", f"--property={','.join(properties)}", "--", unit],
+                env={"PATH": "/usr/bin:/bin", "LANG": "C"},
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True,
+            ).stdout
+        except subprocess.SubprocessError as error:
+            raise OSError(f"systemctl show {unit} failed: {error}") from None
 
 
 def _boot_id() -> str:

@@ -204,6 +204,21 @@ class LocalJournal:
                 )
             return self._fenced(conn, run_id, fence)
 
+    def latch_stop(self, run_id: str, fence: str) -> tuple[Record, bool]:
+        """Durably requests stop without ever completing it: a live run becomes stopping and keeps its slot.
+
+        Unlike request_stop, a never-claimed reservation is not released here; it is latched as stopping too,
+        so claim_start refuses it and it is only freed by the ordinary expiry sweep. Returns the record and
+        whether this call changed it.
+        """
+        with self._transaction() as conn:
+            self._refresh(conn, self._clock())
+            record = self._fenced(conn, run_id, fence)
+            if record.stop_requested or record.state not in ("reserved", "starting"):
+                return record, False
+            conn.execute("UPDATE runs SET state = 'stopping', stop_requested = 1 WHERE run_id = ?", (run_id,))
+            return self._fenced(conn, run_id, fence), True
+
     def quarantine(self, run_id: str, fence: str, reason: str) -> Record:
         if reason not in ("launch_uncertain", "binding_conflict", "proof_incomplete"):
             raise StateError("invalid_reason")
