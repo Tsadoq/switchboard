@@ -12,8 +12,9 @@ import pytest
 from agent_board import night_state
 from agent_board.night import server
 from agent_board.night.config import VerifierConfigError, parse
-from agent_board.night.controller import Controller, Observation, RunSpec, ServerGrant, unit_name
+from agent_board.night.controller import Controller, Observation, RunSpec, unit_name
 from agent_board.night.sync import SyncError
+from agent_board.night_authority import ServerGrant
 from agent_board.night_protocol import Operation, Request
 from agent_board.night_state import ClockReading, LocalJournal
 
