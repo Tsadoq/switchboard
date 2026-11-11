@@ -8,7 +8,7 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from agent_board.night import guard, server
+from agent_board.night import client, guard, server
 from agent_board.night.board import SignedBoard
 from agent_board.night.config import VerifierConfig, load
 from agent_board.night.controller import Controller
@@ -26,11 +26,14 @@ logger = logging.getLogger("agent_board.night")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == ["request"]:
+        return client.main(arguments[1:])
     parser = argparse.ArgumentParser(prog="python -I -m agent_board.night")
     parser.add_argument("command", choices=("serve", "guard", "gate"))
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("run_id", nargs="?")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(arguments)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     if os.geteuid() != 0:
         logger.error("the night verifier must run as root")
