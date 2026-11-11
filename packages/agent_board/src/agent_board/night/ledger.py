@@ -21,7 +21,7 @@ _SCHEMA = (
         "payload TEXT NOT NULL, acked INTEGER NOT NULL DEFAULT 0 CHECK(acked IN (0, 1)))"
     ),
     (
-        "CREATE TABLE IF NOT EXISTS bindings (run_id TEXT PRIMARY KEY, boot_id TEXT NOT NULL, "
+        "CREATE TABLE IF NOT EXISTS bindings (run_id TEXT PRIMARY KEY, uid INTEGER NOT NULL, boot_id TEXT NOT NULL, "
         "invocation_id TEXT NOT NULL, cgroup TEXT NOT NULL, "
         "server_acked INTEGER NOT NULL DEFAULT 0 CHECK(server_acked IN (0, 1)))"
     ),
@@ -50,6 +50,16 @@ class Pending:
     action: Action
     run_id: str | None
     payload: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class RecordedBinding:
+    run_id: str
+    uid: int
+    boot_id: str
+    invocation_id: str
+    cgroup: str
+    server_acked: bool
 
 
 @dataclass(frozen=True)
@@ -123,11 +133,12 @@ class Ledger:
             if pending["action"] == "binding":
                 conn.execute("UPDATE bindings SET server_acked = 1 WHERE run_id = ?", (pending["run_id"],))
 
-    def record_binding(self, run_id: str, *, boot_id: str, invocation_id: str, cgroup: str) -> None:
+    def record_binding(self, run_id: str, *, uid: int, boot_id: str, invocation_id: str, cgroup: str) -> None:
         with self._transaction() as conn:
             existing = conn.execute("SELECT * FROM bindings WHERE run_id = ?", (run_id,)).fetchone()
             if existing is not None:
-                if (existing["boot_id"], existing["invocation_id"], existing["cgroup"]) != (
+                if (existing["uid"], existing["boot_id"], existing["invocation_id"], existing["cgroup"]) != (
+                    uid,
                     boot_id,
                     invocation_id,
                     cgroup,
@@ -135,8 +146,22 @@ class Ledger:
                     raise LedgerError("binding_conflict")
                 return
             conn.execute(
-                "INSERT INTO bindings (run_id, boot_id, invocation_id, cgroup) VALUES (?, ?, ?, ?)",
-                (run_id, boot_id, invocation_id, cgroup),
+                "INSERT INTO bindings (run_id, uid, boot_id, invocation_id, cgroup) VALUES (?, ?, ?, ?, ?)",
+                (run_id, uid, boot_id, invocation_id, cgroup),
+            )
+
+    def binding(self, run_id: str) -> RecordedBinding | None:
+        with self._transaction() as conn:
+            row = conn.execute("SELECT * FROM bindings WHERE run_id = ?", (run_id,)).fetchone()
+            if row is None:
+                return None
+            return RecordedBinding(
+                row["run_id"],
+                row["uid"],
+                row["boot_id"],
+                row["invocation_id"],
+                row["cgroup"],
+                bool(row["server_acked"]),
             )
 
     def arm(self, arm: Arm) -> None:

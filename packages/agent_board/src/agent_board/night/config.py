@@ -6,11 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agent_board.night_inspection import NIGHT_SLICE
+
 _BOX = re.compile(r"[a-z0-9_-]+")
 _PRINCIPAL = re.compile(r"[A-Za-z0-9._-]+@[a-z0-9_-]+")
 _SLICE = re.compile(r"[a-z0-9_-]+\.slice")
 _MODULE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
-_NAMESPACE = re.compile(r"[A-Za-z0-9._-]+@[A-Za-z0-9.-]+")
+_NAMESPACE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,63}")
 _EXCLUDED_BOXES = ("ops", "heimdall")
 _TOP_KEYS = {
     "box",
@@ -107,7 +109,7 @@ def parse(table: Mapping[str, Any]) -> VerifierConfig:
         ca_path=_absolute(table["ca_path"], "ca_path") if "ca_path" in table else None,
         signer_key=_absolute(table["signer_key"], "signer_key"),
         state_path=_absolute(table["state_path"], "state_path"),
-        slice=_match(table["slice"], _SLICE, "slice"),
+        slice=_night_slice(table["slice"]),
         launcher_python=_absolute(launcher["python"], "launcher.python"),
         launcher_module=_match(launcher["module"], _MODULE, "launcher.module"),
         agents=agents,
@@ -131,6 +133,13 @@ def _agent(principal: str, value: Any, box: str) -> Agent:
         _absolute(table["happier_home"], f"agents.{principal}.happier_home"),
         _absolute(table["workdir_root"], f"agents.{principal}.workdir_root"),
     )
+
+
+def _night_slice(value: Any) -> str:
+    text = _match(value, _SLICE, "slice")
+    if text != NIGHT_SLICE:
+        raise VerifierConfigError(f"slice must be {NIGHT_SLICE}, which the inspector verifies")
+    return text
 
 
 def _limits(table: Mapping[str, Any]) -> Limits:

@@ -90,7 +90,7 @@ class BoardSync:
         try:
             binding = self._inspector.capture(run_id=run_id, uid=uid, boot_id=boot_id)
             self._ledger.record_binding(
-                run_id, boot_id=boot_id, invocation_id=binding.invocation_id, cgroup=binding.cgroup
+                run_id, uid=uid, boot_id=boot_id, invocation_id=binding.invocation_id, cgroup=binding.cgroup
             )
         except (InspectionError, LedgerError) as error:
             raise SyncError(f"binding:{error}") from None

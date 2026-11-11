@@ -75,15 +75,15 @@ def test_an_unknown_or_repeated_acknowledgement_is_refused(ledger: Ledger) -> No
 
 def test_a_binding_cannot_be_rebound_to_another_invocation(ledger: Ledger) -> None:
     run_id = str(uuid4())
-    ledger.record_binding(run_id, boot_id=BOOT, invocation_id="b" * 32, cgroup=CGROUP)
-    ledger.record_binding(run_id, boot_id=BOOT, invocation_id="b" * 32, cgroup=CGROUP)
+    ledger.record_binding(run_id, uid=2001, boot_id=BOOT, invocation_id="b" * 32, cgroup=CGROUP)
+    ledger.record_binding(run_id, uid=2001, boot_id=BOOT, invocation_id="b" * 32, cgroup=CGROUP)
 
     with pytest.raises(LedgerError, match="binding_conflict"):
-        ledger.record_binding(run_id, boot_id=BOOT, invocation_id="c" * 32, cgroup=CGROUP)
+        ledger.record_binding(run_id, uid=2001, boot_id=BOOT, invocation_id="c" * 32, cgroup=CGROUP)
 
 
 def _bound_and_armed(ledger: Ledger, run_id: str, guard: str = GUARD) -> None:
-    ledger.record_binding(run_id, boot_id=BOOT, invocation_id="b" * 32, cgroup=CGROUP)
+    ledger.record_binding(run_id, uid=2001, boot_id=BOOT, invocation_id="b" * 32, cgroup=CGROUP)
     receipt = _binding_receipt(run_id)
     ledger.persist(receipt)
     ledger.acknowledge(receipt.receipt_id, journal_id=JOURNAL, counter=1)
@@ -111,7 +111,7 @@ def test_ready_needs_the_board_ack_and_the_current_guards_arm_for_the_exact_dead
 
 def test_ready_is_false_without_the_boards_binding_ack(ledger: Ledger) -> None:
     run_id = str(uuid4())
-    ledger.record_binding(run_id, boot_id=BOOT, invocation_id="b" * 32, cgroup=CGROUP)
+    ledger.record_binding(run_id, uid=2001, boot_id=BOOT, invocation_id="b" * 32, cgroup=CGROUP)
     ledger.arm(Arm(run_id, BOOT, GUARD, 500.0, 2_000.0))
 
     assert not ledger.ready(

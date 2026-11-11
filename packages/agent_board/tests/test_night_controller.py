@@ -26,7 +26,7 @@ def _config_table(**changes: Any) -> dict[str, Any]:
         "box": "dev",
         "principal": "verifier@dev",
         "board_url": "https://board.test.invalid",
-        "namespace": "agent-board@board.test.invalid",
+        "namespace": "switchboard",
         "signer_key": "/etc/switchboard-night/verifier_ed25519",
         "state_path": "/var/lib/switchboard-night/journal.sqlite3",
         "slice": "switchboard-night.slice",
