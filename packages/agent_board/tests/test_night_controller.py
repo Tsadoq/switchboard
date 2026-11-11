@@ -13,6 +13,7 @@ from agent_board import night_state
 from agent_board.night import server
 from agent_board.night.config import VerifierConfigError, parse
 from agent_board.night.controller import Controller, Observation, RunSpec, ServerGrant, unit_name
+from agent_board.night.sync import SyncError
 from agent_board.night_protocol import Operation, Request
 from agent_board.night_state import ClockReading, LocalJournal
 
@@ -112,6 +113,18 @@ class Grants:
         return self.grant
 
 
+class Binder:
+    def __init__(self) -> None:
+        self.frozen: str | None = None
+        self.failure: SyncError | None = None
+        self.bound: list[str] = []
+
+    def bind(self, *, run_id: str, fence: str, uid: int, boot_id: str) -> None:
+        if self.failure is not None:
+            raise self.failure
+        self.bound.append(run_id)
+
+
 class Runs:
     def __init__(self) -> None:
         self.launched: list[RunSpec] = []
@@ -160,8 +173,15 @@ class Rig:
         )
         self.grants = Grants(self.clock)
         self.runs = Runs()
+        self.binder = Binder()
         self.controller = Controller(
-            self.config, self.journal, self.grants, self.runs, self.clock, lambda: self.clock.monotonic
+            self.config,
+            self.journal,
+            self.grants,
+            self.runs,
+            self.binder,
+            self.clock,
+            lambda: self.clock.monotonic,
         )
 
     def ask(self, op: Operation, run_id: str, uid: int = PI_UID, fence: str = FENCE) -> dict[str, object]:
@@ -401,7 +421,7 @@ def test_the_grant_round_trip_is_measured_on_a_clock_that_counts_suspend(
         return 0.0
 
     monkeypatch.setattr(time, "clock_gettime", read_clock)
-    default_clock = Controller(rig.config, rig.journal, rig.grants, rig.runs, rig.clock)
+    default_clock = Controller(rig.config, rig.journal, rig.grants, rig.runs, rig.binder, rig.clock)
 
     default_clock.handle(
         Request(v=1, request_id=str(uuid4()), op="start", run_id=str(uuid4()), fence=FENCE), PI_UID
@@ -417,3 +437,33 @@ def test_the_root_controller_does_not_import_the_ordinary_runner() -> None:
     )
 
     subprocess.run([sys.executable, "-I", "-c", probe], check=True, capture_output=True, timeout=10)
+
+
+def test_a_frozen_verifier_starts_nothing(rig: Rig) -> None:
+    rig.binder.frozen = "counter_mismatch"
+
+    answer = rig.ask("start", str(uuid4()))
+
+    assert answer["status"] == "refused" and answer["reason"] == "frozen:counter_mismatch", answer
+    assert rig.grants.calls == 0 and rig.runs.launched == [], (
+        "a frozen verifier still asked for a grant or launched"
+    )
+
+
+def test_a_launched_run_the_board_did_not_bind_is_stopped_and_held(rig: Rig) -> None:
+    rig.binder.failure = SyncError("binding:binding_conflict")
+    run_id = str(uuid4())
+
+    answer = rig.ask("start", run_id)
+    retry = rig.ask("start", str(uuid4()))
+
+    assert answer["status"] == "quarantined" and answer["reason"] == "binding_conflict", answer
+    assert rig.runs.stopped == [unit_name(run_id)], rig.runs.stopped
+    assert retry["reason"] == "capacity", retry
+
+
+def test_a_bound_start_reports_running(rig: Rig) -> None:
+    run_id = str(uuid4())
+
+    assert rig.ask("start", run_id)["status"] == "running"
+    assert rig.binder.bound == [run_id]

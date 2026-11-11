@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from agent_board.night.config import Agent, VerifierConfig
+from agent_board.night.sync import SyncError
 from agent_board.night_protocol import Request
 from agent_board.night_state import (
     MIN_START_SECONDS,
@@ -64,6 +65,12 @@ class Observation:
     cgroup_populated: bool | None
 
 
+class RunBinder(Protocol):
+    frozen: str | None
+
+    def bind(self, *, run_id: str, fence: str, uid: int, boot_id: str) -> None: ...
+
+
 class RunManager(Protocol):
     """Implementations raise RunManagerError, OSError or a subprocess error when an action's outcome is unknown."""
 
@@ -110,6 +117,7 @@ class Controller:
         journal: LocalJournal,
         grants: GrantSource,
         runs: RunManager,
+        binder: RunBinder,
         clock: Callable[[], ClockReading] = clock_reading,
         boottime: Callable[[], float] = lambda: time.clock_gettime(time.CLOCK_BOOTTIME),
     ) -> None:
@@ -117,6 +125,7 @@ class Controller:
         self._journal = journal
         self._grants = grants
         self._runs = runs
+        self._binder = binder
         self._clock = clock
         self._boottime = boottime
 
@@ -134,6 +143,8 @@ class Controller:
             return self._refuse(request, str(error))
 
     def _start(self, request: Request, allowed: frozenset[str]) -> Response:
+        if self._binder.frozen is not None:
+            return self._refuse(request, f"frozen:{self._binder.frozen}")
         before = self._boottime()
         try:
             grant = self._grants.fetch_grant(request.run_id, request.fence)
@@ -169,7 +180,20 @@ class Controller:
             logger.error("launch of run %s is uncertain: %s", request.run_id, error)
             self._journal.quarantine(request.run_id, request.fence, "launch_uncertain")
             return Response(request.request_id, request.run_id, "quarantined", "launch_uncertain")
+        try:
+            self._binder.bind(run_id=request.run_id, fence=request.fence, uid=agent.uid, boot_id=now.boot_id)
+        except SyncError as error:
+            logger.error("run %s could not be bound with the board: %s", request.run_id, error)
+            self._stop_quietly(unit_name(request.run_id))
+            self._journal.quarantine(request.run_id, request.fence, "binding_conflict")
+            return Response(request.request_id, request.run_id, "quarantined", "binding_conflict")
         return Response(request.request_id, request.run_id, "running")
+
+    def _stop_quietly(self, unit: str) -> None:
+        try:
+            self._runs.stop(unit)
+        except _MANAGER_FAILURES as error:
+            logger.error("stopping %s after a failed binding failed too: %s", unit, error)
 
     def _stop(self, request: Request, allowed: frozenset[str]) -> Response:
         record = self._owned(request, allowed)
