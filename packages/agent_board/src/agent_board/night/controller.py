@@ -111,14 +111,14 @@ class Controller:
         grants: GrantSource,
         runs: RunManager,
         clock: Callable[[], ClockReading] = clock_reading,
-        monotonic: Callable[[], float] = time.monotonic,
+        boottime: Callable[[], float] = lambda: time.clock_gettime(time.CLOCK_BOOTTIME),
     ) -> None:
         self._config = config
         self._journal = journal
         self._grants = grants
         self._runs = runs
         self._clock = clock
-        self._monotonic = monotonic
+        self._boottime = boottime
 
     def handle(self, request: Request, peer_uid: int) -> Response:
         allowed = self._config.principals_for_uid(peer_uid)
@@ -134,13 +134,13 @@ class Controller:
             return self._refuse(request, str(error))
 
     def _start(self, request: Request, allowed: frozenset[str]) -> Response:
-        before = self._monotonic()
+        before = self._boottime()
         try:
             grant = self._grants.fetch_grant(request.run_id, request.fence)
         except (GrantUnavailable, OSError) as error:
             logger.warning("grant fetch for run %s failed: %s", request.run_id, error)
             return self._refuse(request, "grant_unavailable")
-        round_trip = max(0.0, self._monotonic() - before)
+        round_trip = max(0.0, self._boottime() - before)
         why = self._inadmissible(grant, allowed, round_trip)
         if why is not None:
             return self._refuse(request, why)
