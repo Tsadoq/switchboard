@@ -118,6 +118,10 @@ class Commands:
         self.events.append(("run", tuple(argv)))
         return ""
 
+    def freeze_cgroup(self, cgroup: Path) -> bool:
+        self.events.append(("freeze", cgroup))
+        return True
+
     def kill_cgroup(self, cgroup: Path) -> bool:
         self.events.append(("kill", cgroup))
         return True
@@ -144,7 +148,7 @@ def _runs(ledger: Ledger, inspector: Inspector, commands: Commands) -> SystemdRu
     return SystemdRuns(_config(), CONFIG_PATH, ledger, inspector, commands, SERVICE_PYTHON)
 
 
-def test_stop_kills_through_the_kernel_before_and_after_asking_systemd(ledger: Ledger) -> None:
+def test_stop_freezes_and_kills_through_the_kernel_before_and_after_asking_systemd(ledger: Ledger) -> None:
     commands = Commands()
     unit = unit_name(str(uuid4()))
 
@@ -152,6 +156,7 @@ def test_stop_kills_through_the_kernel_before_and_after_asking_systemd(ledger: L
 
     cgroup = Path("/sys/fs/cgroup/switchboard.slice/switchboard-night.slice") / unit
     assert commands.events == [
+        ("freeze", cgroup),
         ("kill", cgroup),
         ("run", ("/usr/bin/systemctl", "--system", "stop", "--no-block", unit)),
         ("kill", cgroup),
@@ -171,6 +176,46 @@ class StuckManager(Commands):
     def kill_cgroup(self, cgroup: Path) -> bool:
         self.killed_at.append(self.now)
         return True
+
+
+class PendingStartDuringStall(Commands):
+    """A main process that a pending start job launches into the cgroup while the stop RPC stalls."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.now = 99.0
+        self.frozen = False
+        self.process_alive = False
+        self.ran_agent_code_at: list[float] = []
+
+    def freeze_cgroup(self, cgroup: Path) -> bool:
+        self.frozen = True
+        return True
+
+    def run(self, argv: Sequence[str]) -> str:
+        self.now += 1.0
+        self.process_alive = True
+        for _ in range(14):
+            self.now += 1.0
+            if self.process_alive and not self.frozen:
+                self.ran_agent_code_at.append(self.now)
+        raise RunManagerError("systemctl timed out")
+
+    def kill_cgroup(self, cgroup: Path) -> bool:
+        self.process_alive = False
+        return True
+
+
+def test_a_pending_start_cannot_run_agent_code_while_the_stop_rpc_stalls(ledger: Ledger) -> None:
+    commands = PendingStartDuringStall()
+
+    with pytest.raises(RunManagerError):
+        _runs(ledger, Inspector(), commands).stop(unit_name(str(uuid4())))
+
+    assert commands.ran_agent_code_at == [], (
+        f"the late process ran past the deadline: {commands.ran_agent_code_at}"
+    )
+    assert not commands.process_alive, "the process launched during the stall survived the stop"
 
 
 def test_an_unresponsive_manager_cannot_delay_the_kernel_kill(ledger: Ledger) -> None:

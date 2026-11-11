@@ -34,8 +34,12 @@ def protected_fixture_boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 class Stopper:
     def __init__(self) -> None:
         self.stopped: list[str] = []
+        self.journal: LocalJournal | None = None
+        self.states_seen: list[str] = []
 
     def stop(self, unit: str) -> None:
+        if self.journal is not None:
+            self.states_seen.extend(record.state for record in self.journal.active())
         self.stopped.append(unit)
 
 
@@ -241,3 +245,13 @@ def test_ready_is_sent_to_the_systemd_notify_socket(tmp_path: Path) -> None:
 def test_the_guard_refuses_to_run_outside_a_notify_unit() -> None:
     with pytest.raises(RuntimeError, match="Type=notify"):
         systemd_notify({})
+
+
+def test_the_guard_latches_the_stop_in_the_journal_before_any_blocking_stop_work(rig: Rig) -> None:
+    rig.launched_run()
+    rig.stopper.journal = rig.journal
+    rig.boottime = 696.0
+
+    rig.guard().tick()
+
+    assert rig.stopper.states_seen == ["stopping"], rig.stopper.states_seen

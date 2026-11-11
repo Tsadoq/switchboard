@@ -31,6 +31,8 @@ class StopInspector(Protocol):
 class Commands(Protocol):
     def run(self, argv: Sequence[str]) -> str: ...
 
+    def freeze_cgroup(self, cgroup: Path) -> bool: ...
+
     def kill_cgroup(self, cgroup: Path) -> bool: ...
 
 
@@ -53,12 +55,19 @@ class LiveCommands:
             )
         return completed.stdout
 
+    def freeze_cgroup(self, cgroup: Path) -> bool:
+        return _write_control(cgroup / "cgroup.freeze")
+
     def kill_cgroup(self, cgroup: Path) -> bool:
-        try:
-            (cgroup / "cgroup.kill").write_text("1")
-        except FileNotFoundError:
-            return False
-        return True
+        return _write_control(cgroup / "cgroup.kill")
+
+
+def _write_control(control: Path) -> bool:
+    try:
+        control.write_text("1")
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def run_argv(config: VerifierConfig, config_path: Path, spec: RunSpec, gate_python: Path) -> tuple[str, ...]:
@@ -131,13 +140,14 @@ class SystemdRuns:
         self._commands.run(run_argv(self._config, self._config_path, spec, self._gate_python))
 
     def stop(self, unit: str) -> None:
-        """Kills through the kernel first, so an unresponsive manager cannot delay the deadline.
+        """Freezes and kills through the kernel first, so neither a slow manager nor a pending start beats the deadline.
 
-        The manager is then told to stop the unit, which also cancels a pending start job, and the cgroup is
-        killed again for anything that pending start launched in between. A manager failure still raises, so
-        the caller treats the stop as unproven.
+        A frozen cgroup stays frozen and freezes anything that later joins it, so a pending ExecStart cannot run
+        while the manager is asked to stop the unit (which cancels that start job); the final kill then removes
+        whatever joined meanwhile. A manager failure still raises, so the caller treats the stop as unproven.
         """
         cgroup = CGROUP_ROOT / unit_cgroup(unit).lstrip("/")
+        self._commands.freeze_cgroup(cgroup)
         self._kill(cgroup, unit)
         try:
             self._commands.run((SYSTEMCTL, "--system", "stop", "--no-block", unit))
