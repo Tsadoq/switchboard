@@ -6,8 +6,9 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-from agent_board.runner import night_state
-from agent_board.runner.night_state import ClockReading, Grant, LocalJournal, StateError
+from agent_board import night_state
+from agent_board.night_inspection import Binding, EmptyObservation
+from agent_board.night_state import ClockReading, Grant, LocalJournal, StateError
 
 
 class Clock:
@@ -58,6 +59,92 @@ def grant(clock: Clock, principal: str = "pi@dev", **changes: object) -> Grant:
     }
     values.update(changes)
     return Grant(**values)
+
+
+def observation(original: Grant, **changes: Any) -> EmptyObservation:
+    values: dict[str, Any] = {
+        "run_id": original.run_id,
+        "uid": original.uid,
+        "boot_id": original.boot_id,
+        "invocation_id": "a" * 32,
+    } | changes
+    return EmptyObservation(Binding(**values), True, True)
+
+
+def test_settled_release_is_fenced_idempotent_and_allows_one_new_run(tmp_path: Path, clock: Clock) -> None:
+    store = journal(tmp_path, clock)
+    original = grant(clock)
+    store.reserve(original)
+    assert store.claim_start(original.run_id, original.fence)
+    store.request_stop(original.run_id, original.fence)
+    proof = observation(original)
+    result = store.release_settled(original.run_id, original.fence, observation=proof)
+    assert result.state == "stopped" and result.reason == "server_settled" and result.launch_claimed
+    assert store.release_settled(original.run_id, original.fence, observation=proof) == result
+    assert not store.claim_start(original.run_id, original.fence)
+    assert journal(tmp_path, clock).active() == ()
+    assert store.reserve(grant(clock)).created
+
+
+@pytest.mark.parametrize("change", [{"run_id": str(uuid4())}, {"uid": 1001}, {"boot_id": str(uuid4())}])
+def test_settled_release_rejects_wrong_physical_binding(
+    tmp_path: Path, clock: Clock, change: dict[str, Any]
+) -> None:
+    store = journal(tmp_path, clock)
+    original = grant(clock)
+    store.reserve(original)
+    store.claim_start(original.run_id, original.fence)
+    store.request_stop(original.run_id, original.fence)
+    with pytest.raises(StateError):
+        store.release_settled(original.run_id, original.fence, observation=observation(original, **change))
+    assert len(store.active()) == 1
+
+
+@pytest.mark.parametrize("phase", ["reserved", "starting", "wrong_fence", "changed_boot"])
+def test_settled_release_rejects_unsafe_lifecycle_or_identity(
+    tmp_path: Path, clock: Clock, phase: str
+) -> None:
+    store = journal(tmp_path, clock)
+    original = grant(clock)
+    store.reserve(original)
+    if phase != "reserved":
+        store.claim_start(original.run_id, original.fence)
+    if phase not in ("reserved", "starting"):
+        store.request_stop(original.run_id, original.fence)
+    if phase == "changed_boot":
+        clock.value = ClockReading(str(uuid4()), 10, clock().utc + 1)
+    with pytest.raises(StateError):
+        store.release_settled(
+            original.run_id,
+            "b" * 43 if phase == "wrong_fence" else original.fence,
+            observation=observation(original),
+        )
+    assert len(store.active()) == 1
+
+
+def test_settled_release_can_clear_proven_uncertainty_without_erasing_history(
+    tmp_path: Path, clock: Clock
+) -> None:
+    store = journal(tmp_path, clock)
+    original = grant(clock)
+    store.reserve(original)
+    store.claim_start(original.run_id, original.fence)
+    store.quarantine(original.run_id, original.fence, "proof_incomplete")
+    result = store.release_settled(original.run_id, original.fence, observation=observation(original))
+    assert result.state == "stopped" and result.uncertain and result.stop_requested
+    assert store.active() == ()
+
+
+@pytest.mark.parametrize("proof", [True, False, None])
+def test_settled_release_never_accepts_a_stopped_boolean(tmp_path: Path, clock: Clock, proof: Any) -> None:
+    store = journal(tmp_path, clock)
+    original = grant(clock)
+    store.reserve(original)
+    store.claim_start(original.run_id, original.fence)
+    store.request_stop(original.run_id, original.fence)
+    with pytest.raises(StateError, match="invalid_stop_observation"):
+        store.release_settled(original.run_id, original.fence, observation=proof)
+    assert len(store.active()) == 1
 
 
 def test_concurrent_server_grants_cannot_double_book_the_box(tmp_path: Path, clock: Clock) -> None:
@@ -268,6 +355,22 @@ def test_invalid_or_expired_grants_never_occupy_capacity(
     with pytest.raises(StateError):
         store.reserve(grant(clock, **changes))
     assert store.active() == ()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [Path("relative/runs.db"), Path("/var/lib/night/../other/runs.db"), Path("//var/lib/night/runs.db")],
+)
+def test_unnormalized_paths_fail_before_filesystem_access(
+    path: Path, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("filesystem used for non-normalized path")
+
+    monkeypatch.setattr(Path, "mkdir", forbidden)
+    monkeypatch.setattr(night_state, "_ancestor_stat", forbidden)
+    with pytest.raises(StateError, match="invalid_state_path"):
+        LocalJournal(path, box="dev", principals={"pi@dev": 1000}, clock=clock)
 
 
 def stored(tmp_path: Path, run_id: str) -> dict[str, Any]:

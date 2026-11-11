@@ -62,8 +62,15 @@ class _Signer:
 
 
 class Registry:
-    def __init__(self, state_dir: Path, namespace: str = DEFAULT_NAMESPACE) -> None:
+    def __init__(
+        self,
+        state_dir: Path,
+        namespace: str = DEFAULT_NAMESPACE,
+        *,
+        service_principals: frozenset[str] = frozenset(),
+    ) -> None:
         self.namespace = namespace
+        self._service_principals = service_principals
         self._allowed_signers = state_dir / "allowed_signers"
         self._revoked_keys = state_dir / "revoked_keys"
         # ssh-keygen -Y verify -r fails every verification when the deny-list file is missing (probe 26).
@@ -103,10 +110,10 @@ class Registry:
         return True
 
     def principals(self) -> set[str]:
-        return {signer.principal for signer in self._signers()}
+        return {signer.principal for signer in self._signers()} - self._service_principals
 
     def known(self, principal: str) -> bool:
-        return principal in self.principals()
+        return any(signer.principal == principal for signer in self._signers())
 
     def _signers(self) -> list[_Signer]:
         parsed = (_Signer.from_registry(line) for line in _read_lines(self._allowed_signers))

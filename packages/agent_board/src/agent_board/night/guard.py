@@ -1,0 +1,148 @@
+import logging
+import os
+import select
+import socket
+import time
+from collections.abc import Callable, Mapping
+from typing import NoReturn, Protocol
+
+from agent_board.night.controller import unit_name
+from agent_board.night.ledger import Arm, Ledger
+from agent_board.night_state import LocalJournal, Record, StateError
+
+POLL_SECONDS = 1.0
+logger = logging.getLogger(__name__)
+
+
+class Stopper(Protocol):
+    def stop(self, unit: str) -> None: ...
+
+
+class Timer(Protocol):
+    def arm(self, deadline_boottime: float) -> None:
+        """Installs the absolute CLOCK_BOOTTIME expiry in the kernel; raises if it could not."""
+        ...
+
+    def wait(self) -> None: ...
+
+
+class Guard:
+    """The root deadline guard for this box's night runs, independent of the request controller.
+
+    It only ever enforces the absolute deadlines the journal stored when the run was reserved; restarting it
+    re-arms those same deadlines and never grants a fresh budget.
+    """
+
+    def __init__(
+        self,
+        *,
+        journal: LocalJournal,
+        ledger: Ledger,
+        runs: Stopper,
+        timer: Timer,
+        stop_grace_seconds: int,
+        invocation_id: str,
+        boot_id: Callable[[], str],
+        boottime: Callable[[], float],
+        utc: Callable[[], float] = time.time,
+    ) -> None:
+        self._journal = journal
+        self._ledger = ledger
+        self._runs = runs
+        self._timer = timer
+        self._grace = stop_grace_seconds
+        self._invocation_id = invocation_id
+        self._boot_id = boot_id
+        self._boottime = boottime
+        self._utc = utc
+        self._stopped: set[str] = set()
+
+    def tick(self) -> None:
+        """Stops what is due, installs the next kernel expiry, and only then publishes arm rows.
+
+        An arm row is evidence that an enforcer is already armed, so it is never written before the timer.
+        """
+        boot = self._boot_id()
+        records = self._journal.active()
+        for record in records:
+            if record.launch_claimed and self._due(record, boot):
+                self._stop(record)
+        to_arm = [
+            record
+            for record in records
+            if record.boot_id == boot and record.state in ("reserved", "starting")
+        ]
+        self._timer.arm(self._next_wake(records))
+        for record in to_arm:
+            self._ledger.arm(
+                Arm(record.run_id, boot, self._invocation_id, record.deadline_boottime, record.deadline_utc)
+            )
+
+    def _next_wake(self, records: tuple[Record, ...]) -> float:
+        deadlines = [
+            record.deadline_boottime - self._grace
+            for record in records
+            if record.state in ("reserved", "starting") and record.run_id not in self._stopped
+        ]
+        return min([self._boottime() + POLL_SECONDS, *deadlines])
+
+    def _due(self, record: Record, boot: str) -> bool:
+        return (
+            record.boot_id != boot
+            or record.state in ("stopping", "quarantined")
+            or self._boottime() >= record.deadline_boottime - self._grace
+            or self._utc() >= record.deadline_utc - self._grace
+        )
+
+    def _stop(self, record: Record) -> None:
+        if record.run_id in self._stopped:
+            return
+        logger.warning("stopping night run %s at its deadline (state %s)", record.run_id, record.state)
+        try:
+            self._journal.request_stop(record.run_id, record.fence)
+            latched = True
+        except StateError as error:
+            logger.error(
+                "could not record the stop of %s; killing anyway and retrying: %s", record.run_id, error
+            )
+            latched = False
+        if latched:
+            self._stopped.add(record.run_id)
+        self._runs.stop(unit_name(record.run_id))
+
+
+def serve(guard: Guard, timer: Timer, notify: Callable[[str], None]) -> NoReturn:
+    guard.tick()
+    notify("READY=1")
+    while True:
+        timer.wait()
+        guard.tick()
+
+
+class BoottimeTimer:
+    def __init__(self) -> None:
+        self._fd = os.timerfd_create(time.CLOCK_BOOTTIME, flags=os.TFD_CLOEXEC)
+
+    def arm(self, deadline_boottime: float) -> None:
+        os.timerfd_settime(self._fd, flags=os.TFD_TIMER_ABSTIME, initial=max(deadline_boottime, 1e-9))
+        if os.timerfd_gettime(self._fd)[0] <= 0 and deadline_boottime > time.clock_gettime(
+            time.CLOCK_BOOTTIME
+        ):
+            raise OSError("the boot-time timer did not arm")
+
+    def wait(self) -> None:
+        select.select([self._fd], [], [])
+        os.read(self._fd, 8)
+
+
+def systemd_notify(environ: Mapping[str, str]) -> Callable[[str], None]:
+    address = environ.get("NOTIFY_SOCKET", "")
+    if not address:
+        raise RuntimeError("the guard must run as a Type=notify unit (NOTIFY_SOCKET is unset)")
+    target = "\0" + address[1:] if address.startswith("@") else address
+
+    def notify(message: str) -> None:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_CLOEXEC) as sender:
+            sender.sendto(message.encode(), target)
+
+    return notify
