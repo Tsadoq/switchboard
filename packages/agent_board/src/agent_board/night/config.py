@@ -68,8 +68,9 @@ class VerifierConfig:
     agents: Mapping[str, Agent]
     limits: Limits
 
-    def agent_for_uid(self, uid: int) -> Agent | None:
-        return next((agent for agent in self.agents.values() if agent.uid == uid), None)
+    def principals_for_uid(self, uid: int) -> frozenset[str]:
+        """Several agent kinds may share one OS account, so a peer uid can only narrow, never pick, the principal."""
+        return frozenset(agent.principal for agent in self.agents.values() if agent.uid == uid)
 
 
 def load(path: Path) -> VerifierConfig:
@@ -98,8 +99,6 @@ def parse(table: Mapping[str, Any]) -> VerifierConfig:
     if not agents_table:
         raise VerifierConfigError("agents must name at least one principal")
     agents = {name: _agent(name, value, box) for name, value in agents_table.items()}
-    if len({agent.uid for agent in agents.values()}) != len(agents):
-        raise VerifierConfigError("agents must have distinct uids")
     return VerifierConfig(
         box=box,
         principal=principal,
