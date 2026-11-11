@@ -70,6 +70,7 @@ class Record(Grant):
     state: str
     launch_claimed: bool
     stop_requested: bool
+    uncertain: bool
     reason: str | None
 
 
@@ -104,25 +105,24 @@ class LocalJournal:
         self._clock = clock
         if not path.is_absolute():
             raise StateError("invalid_state_path")
+        _check_ancestors(path.parent, allow_missing=True)
+        missing = [directory for directory in (path.parent, *path.parent.parents) if not directory.exists()]
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        parent = path.parent.lstat()
-        if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.geteuid() or parent.st_mode & 0o077:
-            raise StateError("unsafe_state_permissions")
-        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        _check_ancestors(path.parent)
+        for directory in reversed(missing):
+            _sync_directory(directory.parent)
         try:
-            metadata = os.fstat(fd)
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_uid != os.geteuid()
-                or metadata.st_mode & 0o077
-                or metadata.st_nlink != 1
-            ):
-                raise StateError("unsafe_state_permissions")
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except FileExistsError:
+            fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+        try:
+            _check_file(os.fstat(fd))
         finally:
             os.close(fd)
+        _sync_directory(path.parent)
         with self._transaction(initialize=True) as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 2):
                 raise StateError("unsupported_state_version")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS runs ("
@@ -130,13 +130,14 @@ class LocalJournal:
                 "boot_id TEXT NOT NULL, deadline_boottime REAL NOT NULL, deadline_utc REAL NOT NULL, "
                 "state TEXT NOT NULL CHECK(state IN ('reserved', 'starting', 'stopping', 'quarantined', 'stopped')), "
                 "launch_claimed INTEGER NOT NULL DEFAULT 0 CHECK(launch_claimed IN (0, 1)), "
-                "stop_requested INTEGER NOT NULL DEFAULT 0 CHECK(stop_requested IN (0, 1)), reason TEXT, "
+                "stop_requested INTEGER NOT NULL DEFAULT 0 CHECK(stop_requested IN (0, 1)), "
+                "uncertain INTEGER NOT NULL DEFAULT 0 CHECK(uncertain IN (0, 1)), reason TEXT, "
                 "slot INTEGER NOT NULL DEFAULT 1 CHECK(slot = 1))"
             )
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS one_active_run ON runs (slot) WHERE state != 'stopped'"
             )
-            conn.execute("PRAGMA user_version = 1")
+            conn.execute("PRAGMA user_version = 2")
             self._refresh(conn, self._clock())
 
     def reserve(self, grant: Grant) -> Reservation:
@@ -193,7 +194,7 @@ class LocalJournal:
                 <= MIN_START_SECONDS
             ):
                 conn.execute(
-                    "UPDATE runs SET state = 'quarantined', stop_requested = 1, reason = 'insufficient_time' WHERE run_id = ?",
+                    "UPDATE runs SET state = 'stopped', stop_requested = 1, reason = 'never_claimed_insufficient_time' WHERE run_id = ?",
                     (run_id,),
                 )
                 return False
@@ -206,7 +207,7 @@ class LocalJournal:
             record = self._fenced(conn, run_id, fence)
             if record.state == "stopped":
                 return record
-            if not record.launch_claimed:
+            if not record.launch_claimed and not record.uncertain:
                 conn.execute(
                     "UPDATE runs SET state = 'stopped', stop_requested = 1, reason = 'never_claimed' WHERE run_id = ?",
                     (run_id,),
@@ -226,7 +227,7 @@ class LocalJournal:
             if record.state == "stopped":
                 return record
             conn.execute(
-                "UPDATE runs SET state = 'quarantined', stop_requested = 1, reason = COALESCE(reason, ?) WHERE run_id = ?",
+                "UPDATE runs SET state = 'quarantined', uncertain = 1, stop_requested = 1, reason = COALESCE(reason, ?) WHERE run_id = ?",
                 (reason, run_id),
             )
             return self._fenced(conn, run_id, fence)
@@ -239,10 +240,12 @@ class LocalJournal:
     @staticmethod
     def _refresh(conn: sqlite3.Connection, now: ClockReading) -> None:
         conn.execute(
-            "UPDATE runs SET state = 'quarantined', stop_requested = 1, "
-            "reason = CASE WHEN boot_id != ? THEN 'boot_changed' ELSE 'deadline_passed' END "
+            "UPDATE runs SET state = CASE WHEN launch_claimed = 0 AND uncertain = 0 THEN 'stopped' ELSE 'quarantined' END, "
+            "stop_requested = 1, reason = CASE "
+            "WHEN launch_claimed = 0 AND uncertain = 0 THEN CASE WHEN boot_id != ? THEN 'never_claimed_boot_changed' ELSE 'never_claimed_expired' END "
+            "WHEN boot_id != ? THEN 'boot_changed' ELSE 'deadline_passed' END "
             "WHERE state NOT IN ('stopped', 'quarantined') AND (boot_id != ? OR deadline_boottime <= ? OR deadline_utc <= ?)",
-            (now.boot_id, now.boot_id, now.boottime, now.utc),
+            (now.boot_id, now.boot_id, now.boot_id, now.boottime, now.utc),
         )
 
     @staticmethod
@@ -257,19 +260,72 @@ class LocalJournal:
     def _transaction(self, *, initialize: bool = False) -> Iterator[sqlite3.Connection]:
         conn: sqlite3.Connection | None = None
         try:
+            _check_ancestors(self._path.parent)
+            _check_file(self._path.lstat())
             conn = sqlite3.connect(self._path, isolation_level=None, timeout=5)
             conn.row_factory = sqlite3.Row
+            if conn.execute("PRAGMA journal_mode").fetchone()[0] != "delete":
+                raise StateError("unsupported_journal_mode")
+            conn.execute("PRAGMA journal_mode = DELETE")
             conn.execute("PRAGMA synchronous = EXTRA")
             conn.execute("BEGIN IMMEDIATE")
-            if not initialize and conn.execute("PRAGMA user_version").fetchone()[0] != 1:
+            if not initialize and conn.execute("PRAGMA user_version").fetchone()[0] != 2:
                 raise StateError("unsupported_state_version")
-            yield conn
+            try:
+                yield conn
+            except StateError:
+                conn.rollback()
+                if not initialize:
+                    conn.execute("BEGIN IMMEDIATE")
+                    self._refresh(conn, self._clock())
+                    conn.commit()
+                raise
             conn.commit()
         except sqlite3.Error:
             raise StateError("state_unavailable") from None
         finally:
             if conn is not None:
                 conn.close()
+
+
+def _ancestor_stat(path: Path) -> os.stat_result:
+    return path.lstat()
+
+
+def _check_ancestors(parent: Path, *, allow_missing: bool = False) -> None:
+    for directory in (parent, *parent.parents):
+        try:
+            metadata = _ancestor_stat(directory)
+        except FileNotFoundError:
+            if allow_missing:
+                continue
+            raise StateError("unsafe_state_permissions") from None
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid not in (0, os.geteuid())
+            or metadata.st_mode & 0o022
+        ):
+            raise StateError("unsafe_state_permissions")
+        if directory == parent and (metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077):
+            raise StateError("unsafe_state_permissions")
+
+
+def _check_file(metadata: os.stat_result) -> None:
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_mode & 0o077
+        or metadata.st_nlink != 1
+    ):
+        raise StateError("unsafe_state_permissions")
+
+
+def _sync_directory(path: Path) -> None:
+    directory = os.open(path, os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _identity(run_id: str, fence: str) -> None:
@@ -309,5 +365,6 @@ def _record(row: sqlite3.Row) -> Record:
         row["state"],
         bool(row["launch_claimed"]),
         bool(row["stop_requested"]),
+        bool(row["uncertain"]),
         row["reason"],
     )

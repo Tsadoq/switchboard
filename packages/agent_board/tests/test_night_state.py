@@ -6,6 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from agent_board.runner import night_state
 from agent_board.runner.night_state import ClockReading, Grant, LocalJournal, StateError
 
 
@@ -15,6 +16,20 @@ class Clock:
 
     def __call__(self) -> ClockReading:
         return self.value
+
+
+@pytest.fixture(autouse=True)
+def protected_fixture_boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def metadata(path: Path) -> os.stat_result:
+        result = path.lstat()
+        if path in tmp_path.parents:
+            values = list(result)
+            values[0] = 0o40755
+            values[4] = 0
+            return os.stat_result(values)
+        return result
+
+    monkeypatch.setattr(night_state, "_ancestor_stat", metadata, raising=False)
 
 
 @pytest.fixture
@@ -193,8 +208,9 @@ def test_too_short_launch_is_not_claimed_and_explicit_cancellation_can_close_it(
     store.reserve(original)
     clock.value = ClockReading(clock().boot_id, 1295, 2195)
     assert not store.claim_start(original.run_id, original.fence)
-    assert store.active()[0].reason == "insufficient_time"
-    assert store.request_stop(original.run_id, original.fence).state == "stopped"
+    assert store.active() == ()
+    stopped = store.request_stop(original.run_id, original.fence)
+    assert stopped.reason == "never_claimed_insufficient_time" and stopped.state == "stopped"
     assert store.active() == ()
 
 
@@ -252,3 +268,125 @@ def test_invalid_or_expired_grants_never_occupy_capacity(
     with pytest.raises(StateError):
         store.reserve(grant(clock, **changes))
     assert store.active() == ()
+
+
+def stored(tmp_path: Path, run_id: str) -> dict[str, Any]:
+    with sqlite3.connect(tmp_path / "state" / "runs.db") as conn:
+        conn.row_factory = sqlite3.Row
+        return dict(conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone())
+
+
+@pytest.mark.parametrize("claimed", [False, True])
+@pytest.mark.parametrize("cause", ["boot_changed", "expired"])
+def test_sweep_distinguishes_never_claimed_from_possible_work(
+    tmp_path: Path, clock: Clock, claimed: bool, cause: str
+) -> None:
+    store = journal(tmp_path, clock)
+    original = grant(clock)
+    store.reserve(original)
+    if claimed:
+        assert store.claim_start(original.run_id, original.fence)
+    clock.value = ClockReading(str(uuid4()) if cause == "boot_changed" else clock().boot_id, 1400, 2300)
+    restarted = journal(tmp_path, clock)
+    row = stored(tmp_path, original.run_id)
+    assert row["state"] == ("quarantined" if claimed else "stopped")
+    assert row["reason"] == (
+        ("boot_changed" if cause == "boot_changed" else "deadline_passed")
+        if claimed
+        else "never_claimed_" + cause
+    )
+    assert bool(restarted.active()) == claimed
+    assert not restarted.claim_start(original.run_id, original.fence)
+
+
+@pytest.mark.parametrize("reason", ["launch_uncertain", "binding_conflict", "proof_incomplete"])
+def test_explicit_uncertainty_latches_even_without_a_launch_claim(
+    tmp_path: Path, clock: Clock, reason: str
+) -> None:
+    store = journal(tmp_path, clock)
+    original = grant(clock)
+    store.reserve(original)
+    record = store.quarantine(original.run_id, original.fence, reason)
+    assert record.uncertain and not record.launch_claimed
+    assert store.request_stop(original.run_id, original.fence).state == "quarantined"
+    clock.value = ClockReading(str(uuid4()), 1400, 2300)
+    assert journal(tmp_path, clock).active()[0].reason == reason
+
+
+@pytest.mark.parametrize("rejection", ["capacity", "stale_fence", "run_binding"])
+def test_rejected_operations_still_commit_the_clock_sweep(
+    tmp_path: Path, clock: Clock, rejection: str
+) -> None:
+    store = journal(tmp_path, clock)
+    original = grant(clock)
+    store.reserve(original)
+    assert store.claim_start(original.run_id, original.fence)
+    clock.value = ClockReading(clock().boot_id, 1400, 2300)
+    with pytest.raises(StateError, match=rejection):
+        if rejection == "capacity":
+            store.reserve(grant(clock, deadline_boottime=2400, deadline_utc=3300))
+        elif rejection == "stale_fence":
+            store.request_stop(original.run_id, "b" * 43)
+        else:
+            store.reserve(grant(clock, "claude@dev", run_id=original.run_id))
+    assert stored(tmp_path, original.run_id)["reason"] == "deadline_passed"
+    assert stored(tmp_path, original.run_id)["state"] == "quarantined"
+
+
+@pytest.mark.parametrize("unsafe", ["writable", "foreign_owner", "symlink"])
+def test_unsafe_ancestors_are_rejected_before_creation(
+    tmp_path: Path, clock: Clock, monkeypatch: pytest.MonkeyPatch, unsafe: str
+) -> None:
+    parent = tmp_path / "ancestor"
+    parent.mkdir()
+    if unsafe == "writable":
+        parent.chmod(0o777)
+    elif unsafe == "foreign_owner":
+        original = night_state._ancestor_stat
+
+        def foreign(path: Path) -> os.stat_result:
+            values = list(original(path))
+            if path == parent:
+                values[4] = 999999
+            return os.stat_result(values)
+
+        monkeypatch.setattr(night_state, "_ancestor_stat", foreign)
+    else:
+        parent.rename(tmp_path / "original")
+        parent.symlink_to(tmp_path / "original")
+    with pytest.raises(StateError, match="unsafe_state_permissions"):
+        journal(parent, clock)
+    assert not (parent / "state").exists()
+
+
+def test_permissions_are_rechecked_before_every_connection(
+    tmp_path: Path, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = journal(tmp_path, clock)
+    tmp_path.chmod(0o777)
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("SQLite opened before rejecting unsafe ancestors")
+
+    monkeypatch.setattr(sqlite3, "connect", forbidden)
+    with pytest.raises(StateError, match="unsafe_state_permissions"):
+        store.active()
+
+
+def test_parent_directory_is_synced_and_wal_is_refused(
+    tmp_path: Path, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    synced: list[bool] = []
+    real_sync = os.fsync
+
+    def sync(fd: int) -> None:
+        synced.append(os.path.isdir(f"/proc/self/fd/{fd}"))
+        real_sync(fd)
+
+    monkeypatch.setattr(os, "fsync", sync)
+    store = journal(tmp_path, clock)
+    assert any(synced)
+    with sqlite3.connect(tmp_path / "state" / "runs.db") as conn:
+        assert conn.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal"
+    with pytest.raises(StateError, match="unsupported_journal_mode"):
+        store.active()
