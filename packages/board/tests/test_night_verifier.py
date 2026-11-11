@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import pytest
 from agent_board.night_authority import AuthorityHTTP, NightAuthorityClient
+from agent_board.night_inspection import unit_cgroup
 from board.app import create_app
 from board.night import NightAdmission, Run, window_on
 from board.settings import Settings
@@ -50,7 +51,7 @@ class Case:
             "receipt_id": str(uuid4()),
             "boot_id": str(uuid4()),
             "invocation_id": "a" * 32,
-            "cgroup": f"/switchboard-night.slice/switchboard-night-{run.id}.service",
+            "cgroup": unit_cgroup(f"switchboard-night-{run.id}.service"),
         }
 
 

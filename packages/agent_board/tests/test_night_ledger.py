@@ -10,7 +10,7 @@ from agent_board.night.ledger import Arm, Ledger, LedgerError, Pending
 BOOT = str(uuid4())
 JOURNAL = str(uuid4())
 GUARD = "a" * 32
-CGROUP = "/switchboard-night.slice/switchboard-night-x.service"
+CGROUP = "/switchboard.slice/switchboard-night.slice/switchboard-night-x.service"
 
 
 @pytest.fixture(autouse=True)

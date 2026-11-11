@@ -65,6 +65,12 @@ no redirects. Its default signer refuses ordinary-user operation and unsafe key
 ownership/permissions. It does not create credentials or negotiate generic tokens.
 Tests inject temporary signers and local HTTP transports, never production keys.
 
+The configured Slice= value stays switchboard-night.slice. Systemd interprets
+its hyphen hierarchically: the actual cgroup prefix is
+/switchboard.slice/switchboard-night.slice. Both ancestors and their cgroup.procs
+files must remain root-controlled; treating the slice name as a root-level path
+would inspect or kill the wrong location.
+
 A binding report is trusted root-controller input, not proof supplied by a coding
 agent. The live implementation must obtain it from Inspector.capture and persist
 it before native exec. Empty evidence must come from Inspector.stopped for that

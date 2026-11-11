@@ -333,7 +333,7 @@ def _binding_fields(run_id: str, payload: dict[str, Any]) -> None:
         or payload["invocation_id"] == "0" * 32
     ):
         raise Denied("invalid_invocation")
-    if payload["cgroup"] != f"/switchboard-night.slice/switchboard-night-{run_id}.service":
+    if payload["cgroup"] != f"/switchboard.slice/switchboard-night.slice/switchboard-night-{run_id}.service":
         raise Denied("invalid_cgroup")
 
 

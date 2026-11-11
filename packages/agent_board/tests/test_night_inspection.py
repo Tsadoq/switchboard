@@ -7,12 +7,22 @@ from uuid import uuid4
 import pytest
 from agent_board.night_inspection import (
     CGROUP_ROOT,
+    NIGHT_CGROUP,
     NIGHT_SLICE,
     Binding,
     InspectionError,
     Inspector,
     LiveHost,
+    unit_cgroup,
 )
+
+
+@pytest.mark.parametrize(
+    "unit", ["../escaped.service", "unrelated.service", "switchboard-night-invalid.service"]
+)
+def test_unit_cgroup_rejects_noncanonical_units(unit: str) -> None:
+    with pytest.raises(InspectionError, match="invalid_unit"):
+        unit_cgroup(unit)
 
 
 class Host:
@@ -39,11 +49,17 @@ class Host:
                 Path("/sys"),
                 Path("/sys/fs"),
                 CGROUP_ROOT,
-                CGROUP_ROOT / NIGHT_SLICE,
+                CGROUP_ROOT / "switchboard.slice",
+                CGROUP_ROOT / NIGHT_CGROUP.lstrip("/"),
                 group,
             )
         }
-        for path in (CGROUP_ROOT, CGROUP_ROOT / NIGHT_SLICE, group):
+        for path in (
+            CGROUP_ROOT,
+            CGROUP_ROOT / "switchboard.slice",
+            CGROUP_ROOT / NIGHT_CGROUP.lstrip("/"),
+            group,
+        ):
             self.metadata_values[path / "cgroup.procs"] = metadata(0o100644)
         self.metadata_values[CGROUP_ROOT / "cgroup.controllers"] = metadata(0o100444)
         self.metadata_values[group / "cgroup.events"] = metadata(0o100444)
@@ -102,6 +118,7 @@ def test_invalid_binding_never_reaches_manager(
 def test_capture_and_inactive_empty_observation() -> None:
     host = Host()
     binding = capture(host)
+    assert binding.cgroup == f"/switchboard.slice/switchboard-night.slice/{binding.unit}"
     host.props["ActiveState"] = "inactive"
     host.props["Job"] = ""
     result = Inspector(host).stopped(binding)
@@ -130,13 +147,17 @@ def test_capture_rejects_wrong_system_unit_binding(field: str, value: str) -> No
         capture(host)
 
 
-@pytest.mark.parametrize("location", ["unit", "slice", "root", "common_procs"])
+@pytest.mark.parametrize(
+    "location", ["unit", "slice", "slice_parent", "slice_parent_procs", "root", "common_procs"]
+)
 @pytest.mark.parametrize("bad", ["owner", "writable", "symlink"])
 def test_capture_rejects_delegated_or_replaceable_paths(location: str, bad: str) -> None:
     host = Host()
     paths = {
         "unit": CGROUP_ROOT / host.binding.cgroup.lstrip("/"),
-        "slice": CGROUP_ROOT / NIGHT_SLICE,
+        "slice": CGROUP_ROOT / NIGHT_CGROUP.lstrip("/"),
+        "slice_parent": CGROUP_ROOT / "switchboard.slice",
+        "slice_parent_procs": CGROUP_ROOT / "switchboard.slice/cgroup.procs",
         "root": CGROUP_ROOT,
         "common_procs": CGROUP_ROOT / "cgroup.procs",
     }
