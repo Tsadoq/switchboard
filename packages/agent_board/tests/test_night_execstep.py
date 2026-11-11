@@ -36,6 +36,7 @@ class FakeSystem:
         self.drop_failure: OSError | None = None
         self.skip_drop = False
         self.executed: tuple[str, list[str], Mapping[str, str]] | None = None
+        self.looked_up: Account | None = None
 
     def own_cgroup(self) -> str:
         return self.cgroup
@@ -53,7 +54,7 @@ class FakeSystem:
         return self.now_utc
 
     def account(self, uid: int) -> Account:
-        return Account("agent", uid, GID)
+        return self.looked_up or Account("agent", uid, GID)
 
     def drop_to(self, account: Account) -> None:
         self.calls.append("drop")
@@ -236,3 +237,22 @@ def test_an_unverified_drop_never_reaches_the_launcher(rig: Rig) -> None:
         rig.run()
 
     assert rig.system.calls == ["drop"], rig.system.calls
+
+
+@pytest.mark.parametrize(
+    "looked_up",
+    [
+        pytest.param(Account("root", 0, 0), id="lookup-returns-root"),
+        pytest.param(Account("other", 1002, GID), id="lookup-returns-another-principal"),
+        pytest.param(Account("agent", UID, 0), id="lookup-returns-root-group"),
+    ],
+)
+def test_an_account_lookup_that_disagrees_with_the_configured_uid_is_refused_before_dropping(
+    rig: Rig, looked_up: Account
+) -> None:
+    rig.system.looked_up = looked_up
+
+    with pytest.raises(ExecRefused, match="account_mismatch"):
+        rig.run()
+
+    assert rig.system.calls == [], "a substituted identity reached the drop"

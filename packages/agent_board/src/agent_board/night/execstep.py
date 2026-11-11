@@ -105,9 +105,11 @@ def exec_native(
     if agent is None or agent.uid != record.uid:
         raise ExecRefused("principal_mismatch")
     account = system.account(agent.uid)
-    system.drop_to(account)
+    if account.uid != agent.uid or account.uid <= 0 or account.gid <= 0:
+        raise ExecRefused("account_mismatch")
+    system.drop_to(Account(account.name, agent.uid, account.gid))
     expected: tuple[tuple[int, int, int], tuple[int, int, int], list[int]] = (
-        (account.uid, account.uid, account.uid),
+        (agent.uid, agent.uid, agent.uid),
         (account.gid, account.gid, account.gid),
         [],
     )
@@ -118,7 +120,7 @@ def exec_native(
     environment = {
         "HOME": str(agent.home),
         "HAPPIER_HOME_DIR": str(agent.happier_home),
-        "XDG_RUNTIME_DIR": f"/run/user/{account.uid}",
+        "XDG_RUNTIME_DIR": f"/run/user/{agent.uid}",
         "USER": account.name,
         "LOGNAME": account.name,
         "PATH": "/usr/bin:/bin",
