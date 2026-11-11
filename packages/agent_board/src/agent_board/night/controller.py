@@ -8,6 +8,7 @@ from typing import Literal, Protocol
 
 from agent_board.night.config import Agent, VerifierConfig
 from agent_board.night.sync import SyncError
+from agent_board.night_authority import GrantUnavailable, ServerGrant
 from agent_board.night_protocol import Request
 from agent_board.night_state import (
     MIN_START_SECONDS,
@@ -23,19 +24,6 @@ ADMISSIBLE_STATES = ("admitted", "running")
 logger = logging.getLogger(__name__)
 
 type Status = Literal["starting", "running", "stopping", "stopped", "quarantined", "refused"]
-
-
-@dataclass(frozen=True)
-class ServerGrant:
-    principal: str
-    box: str
-    state: str
-    remaining_seconds: float
-    window_end_utc: float
-
-
-class GrantUnavailable(RuntimeError):
-    pass
 
 
 class RunManagerError(RuntimeError):
