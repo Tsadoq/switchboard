@@ -61,12 +61,12 @@ class LiveCommands:
         return True
 
 
-def run_argv(config: VerifierConfig, config_path: Path, spec: RunSpec) -> tuple[str, ...]:
+def run_argv(config: VerifierConfig, config_path: Path, spec: RunSpec, gate_python: Path) -> tuple[str, ...]:
     """The one transient unit a run may be: bound to the guard, gated by root, then dropped to the agent."""
     agent, limits, python = spec.agent, config.limits, str(config.launcher_python)
-    if any(_unsafe_in_command_line(text) for text in (python, str(config_path))):
+    if any(_unsafe_in_command_line(text) for text in (str(gate_python), str(config_path))):
         raise RunManagerError("the launcher python or config path cannot appear in a systemd command line")
-    gate = f"+{python} -I -m agent_board.night gate --config {config_path} {spec.run_id}"
+    gate = f"+{gate_python} -I -m agent_board.night gate --config {config_path} {spec.run_id}"
     return (
         SYSTEMD_RUN,
         "--system",
@@ -118,7 +118,9 @@ class SystemdRuns:
         ledger: Ledger,
         inspector: StopInspector,
         commands: Commands,
+        gate_python: Path,
     ) -> None:
+        self._gate_python = gate_python
         self._config = config
         self._config_path = config_path
         self._ledger = ledger
@@ -126,7 +128,7 @@ class SystemdRuns:
         self._commands = commands
 
     def launch(self, spec: RunSpec) -> None:
-        self._commands.run(run_argv(self._config, self._config_path, spec))
+        self._commands.run(run_argv(self._config, self._config_path, spec, self._gate_python))
 
     def stop(self, unit: str) -> None:
         try:

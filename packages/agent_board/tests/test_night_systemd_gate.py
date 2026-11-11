@@ -20,6 +20,7 @@ FENCE = "f" * 43
 OWN = "b" * 32
 GUARD = "c" * 32
 CONFIG_PATH = Path("/etc/switchboard-night/verifier.toml")
+SERVICE_PYTHON = Path("/opt/switchboard-night/releases/abc/bin/python")
 
 
 def _config(**changes: Any) -> Any:
@@ -71,7 +72,7 @@ def test_the_run_unit_is_bound_to_the_guard_gated_by_root_and_dropped_to_the_age
     config = _config()
     run_id = str(uuid4())
 
-    argv = run_argv(config, CONFIG_PATH, _spec(config, run_id, 594.7))
+    argv = run_argv(config, CONFIG_PATH, _spec(config, run_id, 594.7), SERVICE_PYTHON)
     options, command = argv[: argv.index("--")], argv[argv.index("--") + 1 :]
 
     for expected in (
@@ -106,7 +107,7 @@ def test_a_config_path_that_would_split_the_gate_command_is_refused() -> None:
     config = _config()
 
     with pytest.raises(RunManagerError):
-        run_argv(config, Path("/etc/night verifier.toml"), _spec(config, str(uuid4())))
+        run_argv(config, Path("/etc/night verifier.toml"), _spec(config, str(uuid4())), SERVICE_PYTHON)
 
 
 class Commands:
@@ -141,7 +142,7 @@ def ledger(tmp_path: Path) -> Ledger:
 
 
 def _runs(ledger: Ledger, inspector: Inspector, commands: Commands) -> SystemdRuns:
-    return SystemdRuns(_config(), CONFIG_PATH, ledger, inspector, commands)
+    return SystemdRuns(_config(), CONFIG_PATH, ledger, inspector, commands, SERVICE_PYTHON)
 
 
 def test_stop_asks_systemd_then_kills_the_root_owned_cgroup(ledger: Ledger) -> None:
@@ -260,8 +261,23 @@ def test_the_run_binds_to_the_configured_guard() -> None:
     }
     config = _config(guard_unit="switchboard-night-guard-smoke.service", launcher=stub)
 
-    argv = run_argv(config, CONFIG_PATH, _spec(config, str(uuid4())))
+    argv = run_argv(config, CONFIG_PATH, _spec(config, str(uuid4())), SERVICE_PYTHON)
 
     assert "--property=BindsTo=switchboard-night-guard-smoke.service" in argv
     assert "--property=After=switchboard-night-guard-smoke.service" in argv
     assert not any(PRODUCTION_GUARD_UNIT in option for option in argv), argv
+
+
+def test_the_root_gate_runs_the_service_interpreter_never_the_configured_launcher() -> None:
+    agent_venv = {"python": "/srv/night/pi/venv/bin/python", "module": "agent_board.night.launch"}
+    config = _config(launcher=agent_venv)
+    run_id = str(uuid4())
+
+    argv = run_argv(config, CONFIG_PATH, _spec(config, run_id), SERVICE_PYTHON)
+
+    gate = next(option for option in argv if option.startswith("--property=ExecStartPre="))
+    assert gate.startswith(f"--property=ExecStartPre=+{SERVICE_PYTHON} -I -m agent_board.night gate"), gate
+    assert "/srv/night/pi/venv" not in gate, "a configured launcher interpreter reached the root gate"
+    assert argv[argv.index("--") + 1] == "/srv/night/pi/venv/bin/python", (
+        "the launcher itself still runs as the agent"
+    )

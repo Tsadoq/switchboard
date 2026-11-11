@@ -10,7 +10,7 @@ from pathlib import Path
 
 from agent_board.night import client, guard, server
 from agent_board.night.board import SignedBoard
-from agent_board.night.config import VerifierConfig, load
+from agent_board.night.config import VerifierConfig, load, trusted_file
 from agent_board.night.controller import Controller
 from agent_board.night.gate import GuardState, open_gate
 from agent_board.night.ledger import Ledger
@@ -60,7 +60,7 @@ def _serve(config: VerifierConfig, config_path: Path, ledger: Ledger, journal: L
     board = SignedBoard(config.box, NightAuthorityClient(config))
     sync = BoardSync(config.box, ledger, board, inspector, journal)
     sync.reconcile()
-    runs = SystemdRuns(config, config_path, ledger, inspector, LiveCommands())
+    runs = SystemdRuns(config, config_path, ledger, inspector, LiveCommands(), _service_python())
     controller = Controller(config, journal, board, runs, sync)
     threading.Thread(target=_sweep_forever, args=(controller,), name="night-sweep", daemon=True).start()
     server.serve(server.inherited_listener(), controller)
@@ -76,7 +76,7 @@ def _sweep_forever(controller: Controller) -> None:
 
 
 def _guard(config: VerifierConfig, config_path: Path, ledger: Ledger, journal: LocalJournal) -> None:
-    runs = SystemdRuns(config, config_path, ledger, Inspector(LiveHost()), LiveCommands())
+    runs = SystemdRuns(config, config_path, ledger, Inspector(LiveHost()), LiveCommands(), _service_python())
     timer = guard.BoottimeTimer()
     deadline_guard = guard.Guard(
         journal=journal,
@@ -100,6 +100,13 @@ def _gate(run_id: str, guard_unit: str, ledger: Ledger, journal: LocalJournal) -
         boot_id=_boot_id,
         guard=lambda: _guard_state(guard_unit),
     )
+
+
+def _service_python() -> Path:
+    """The interpreter running this root service, which the root gate reuses rather than one named in config."""
+    python = Path(sys.executable)
+    trusted_file(python, interpreter=True)
+    return python
 
 
 def _boot_id() -> str:

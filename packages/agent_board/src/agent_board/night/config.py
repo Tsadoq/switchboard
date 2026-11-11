@@ -1,5 +1,6 @@
 import os
 import re
+import stat
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -81,12 +82,49 @@ class VerifierConfig:
 
 
 def load(path: Path) -> VerifierConfig:
+    """Reads the config only after it and every ancestor are proven root-controlled, then checks the launcher."""
     _absolute(path, "config")
+    trusted_file(path)
     try:
         table = tomllib.loads(path.read_text())
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise VerifierConfigError(f"unreadable config {path}: {error}") from None
-    return parse(table)
+    config = parse(table)
+    trusted_file(config.launcher_python, interpreter=True)
+    return config
+
+
+def trusted_file(path: Path, *, interpreter: bool = False) -> None:
+    """Fails unless `path` is root-owned, not group/other writable, and reached only through such directories.
+
+    An interpreter may be a venv's symlink to the system python; then the link's target is held to the same
+    rule. Nothing else may be a symlink, so a writable alias cannot swap what root reads or executes.
+    """
+    _trusted_directories(path.parent)
+    metadata = _metadata(path)
+    if stat.S_ISLNK(metadata.st_mode) and interpreter:
+        if metadata.st_uid != 0:
+            raise VerifierConfigError(f"{path} is a symlink not owned by root")
+        target = Path(os.path.realpath(path))
+        _trusted_directories(target.parent)
+        metadata = _metadata(target)
+        path = target
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_mode & 0o022:
+        raise VerifierConfigError(f"{path} must be a regular root-owned file that only root can write")
+
+
+def _trusted_directories(directory: Path) -> None:
+    for each in (directory, *directory.parents):
+        metadata = _metadata(each)
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_mode & 0o022:
+            raise VerifierConfigError(f"{each} must be a root-owned directory that only root can write")
+
+
+def _metadata(path: Path) -> os.stat_result:
+    try:
+        return path.lstat()
+    except OSError as error:
+        raise VerifierConfigError(f"cannot inspect {path}: {error}") from None
 
 
 def parse(table: Mapping[str, Any]) -> VerifierConfig:
