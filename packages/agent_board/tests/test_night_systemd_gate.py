@@ -6,11 +6,11 @@ from uuid import uuid4
 
 import pytest
 from agent_board import night_state
-from agent_board.night.config import parse
+from agent_board.night.config import PRODUCTION_GUARD_UNIT, VerifierConfigError, parse
 from agent_board.night.controller import RunManagerError, RunSpec, unit_name
 from agent_board.night.gate import GuardState, open_gate
 from agent_board.night.ledger import Arm, Ledger, Pending
-from agent_board.night.systemd import GUARD_UNIT, SystemdRuns, run_argv
+from agent_board.night.systemd import SystemdRuns, run_argv
 from agent_board.night_inspection import Binding, EmptyObservation, InspectionError
 from agent_board.night_state import ClockReading, Grant, LocalJournal
 
@@ -82,8 +82,8 @@ def test_the_run_unit_is_bound_to_the_guard_gated_by_root_and_dropped_to_the_age
         "--property=Delegate=no",
         "--property=KillMode=control-group",
         "--property=Restart=no",
-        f"--property=BindsTo={GUARD_UNIT}",
-        f"--property=After={GUARD_UNIT}",
+        f"--property=BindsTo={PRODUCTION_GUARD_UNIT}",
+        f"--property=After={PRODUCTION_GUARD_UNIT}",
         "--property=RuntimeMaxSec=594",
         "--setenv=HAPPIER_HOME_DIR=/var/lib/switchboard-night/happier/pi",
     ):
@@ -235,3 +235,33 @@ def test_an_arm_from_an_earlier_guard_or_an_inactive_guard_keeps_the_gate_shut(t
 
     assert not stale, "an arm from an earlier guard invocation opened the gate"
     assert not rig.open(), "an inactive guard opened the gate"
+
+
+def test_a_smoke_guard_name_is_only_accepted_with_the_acceptance_stub() -> None:
+    stub = {
+        "python": "/opt/switchboard-night/releases/abc/bin/python",
+        "module": "agent_board.night.acceptance_stub",
+    }
+
+    smoke = _config(guard_unit="switchboard-night-guard-smoke.service", launcher=stub)
+
+    assert smoke.guard_unit == "switchboard-night-guard-smoke.service"
+    with pytest.raises(VerifierConfigError, match="acceptance stub"):
+        _config(guard_unit="switchboard-night-guard-smoke.service")
+    with pytest.raises(VerifierConfigError, match="guard_unit"):
+        _config(guard_unit="getty@tty1.service", launcher=stub)
+    assert _config().guard_unit == PRODUCTION_GUARD_UNIT
+
+
+def test_the_run_binds_to_the_configured_guard() -> None:
+    stub = {
+        "python": "/opt/switchboard-night/releases/abc/bin/python",
+        "module": "agent_board.night.acceptance_stub",
+    }
+    config = _config(guard_unit="switchboard-night-guard-smoke.service", launcher=stub)
+
+    argv = run_argv(config, CONFIG_PATH, _spec(config, str(uuid4())))
+
+    assert "--property=BindsTo=switchboard-night-guard-smoke.service" in argv
+    assert "--property=After=switchboard-night-guard-smoke.service" in argv
+    assert not any(PRODUCTION_GUARD_UNIT in option for option in argv), argv

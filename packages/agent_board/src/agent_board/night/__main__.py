@@ -15,7 +15,7 @@ from agent_board.night.controller import Controller
 from agent_board.night.gate import GuardState, open_gate
 from agent_board.night.ledger import Ledger
 from agent_board.night.sync import BoardSync
-from agent_board.night.systemd import GUARD_UNIT, SYSTEMCTL, LiveCommands, SystemdRuns
+from agent_board.night.systemd import SYSTEMCTL, LiveCommands, SystemdRuns
 from agent_board.night_authority import NightAuthorityClient
 from agent_board.night_inspection import Inspector, LiveHost
 from agent_board.night_state import LocalJournal
@@ -48,7 +48,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "gate":
         if args.run_id is None:
             parser.error("gate needs a run id")
-        return 0 if _gate(args.run_id, ledger, journal) else 1
+        return 0 if _gate(args.run_id, config.guard_unit, ledger, journal) else 1
     if args.command == "guard":
         _guard(config, args.config, ledger, journal)
     _serve(config, args.config, ledger, journal)
@@ -91,9 +91,14 @@ def _guard(config: VerifierConfig, config_path: Path, ledger: Ledger, journal: L
     guard.serve(deadline_guard, timer, guard.systemd_notify(os.environ))
 
 
-def _gate(run_id: str, ledger: Ledger, journal: LocalJournal) -> bool:
+def _gate(run_id: str, guard_unit: str, ledger: Ledger, journal: LocalJournal) -> bool:
     return open_gate(
-        run_id, ledger=ledger, journal=journal, environ=os.environ, boot_id=_boot_id, guard=_guard_state
+        run_id,
+        ledger=ledger,
+        journal=journal,
+        environ=os.environ,
+        boot_id=_boot_id,
+        guard=lambda: _guard_state(guard_unit),
     )
 
 
@@ -101,10 +106,10 @@ def _boot_id() -> str:
     return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
 
 
-def _guard_state() -> GuardState:
+def _guard_state(guard_unit: str) -> GuardState:
     try:
         shown = subprocess.run(
-            [SYSTEMCTL, "--system", "show", GUARD_UNIT, "--property=ActiveState,InvocationID"],
+            [SYSTEMCTL, "--system", "show", guard_unit, "--property=ActiveState,InvocationID"],
             env={"PATH": "/usr/bin:/bin", "LANG": "C"},
             capture_output=True,
             text=True,

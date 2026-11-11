@@ -14,6 +14,9 @@ _SLICE = re.compile(r"[a-z0-9_-]+\.slice")
 _MODULE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 _NAMESPACE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,63}")
 _EXCLUDED_BOXES = ("ops", "heimdall")
+PRODUCTION_GUARD_UNIT = "switchboard-night-guard.service"
+ACCEPTANCE_STUB = "agent_board.night.acceptance_stub"
+_GUARD_UNIT = re.compile(r"switchboard-night-guard(?:-[a-z0-9]{1,32})?\.service")
 _TOP_KEYS = {
     "box",
     "principal",
@@ -26,6 +29,7 @@ _TOP_KEYS = {
     "launcher",
     "agents",
     "limits",
+    "guard_unit",
 }
 _LAUNCHER_KEYS = {"python", "module"}
 _AGENT_KEYS = {"uid", "home", "happier_home", "workdir_root"}
@@ -69,6 +73,7 @@ class VerifierConfig:
     launcher_module: str
     agents: Mapping[str, Agent]
     limits: Limits
+    guard_unit: str = PRODUCTION_GUARD_UNIT
 
     def principals_for_uid(self, uid: int) -> frozenset[str]:
         """Several agent kinds may share one OS account, so a peer uid can only narrow, never pick, the principal."""
@@ -85,7 +90,7 @@ def load(path: Path) -> VerifierConfig:
 
 
 def parse(table: Mapping[str, Any]) -> VerifierConfig:
-    _keys(table, _TOP_KEYS, "top level", optional={"ca_path"})
+    _keys(table, _TOP_KEYS, "top level", optional={"ca_path", "guard_unit"})
     box = _match(table["box"], _BOX, "box")
     if box in _EXCLUDED_BOXES:
         raise VerifierConfigError(f"box {box} is excluded from night runs")
@@ -114,6 +119,7 @@ def parse(table: Mapping[str, Any]) -> VerifierConfig:
         launcher_module=_match(launcher["module"], _MODULE, "launcher.module"),
         agents=agents,
         limits=_limits(_table(table["limits"], "limits")),
+        guard_unit=_guard_unit(table.get("guard_unit", PRODUCTION_GUARD_UNIT), launcher["module"]),
     )
 
 
@@ -133,6 +139,16 @@ def _agent(principal: str, value: Any, box: str) -> Agent:
         _absolute(table["happier_home"], f"agents.{principal}.happier_home"),
         _absolute(table["workdir_root"], f"agents.{principal}.workdir_root"),
     )
+
+
+def _guard_unit(value: Any, launcher_module: str) -> str:
+    """A non-production guard name is only for the acceptance smoke, so it requires the inert stub launcher."""
+    unit = _match(value, _GUARD_UNIT, "guard_unit")
+    if unit != PRODUCTION_GUARD_UNIT and launcher_module != ACCEPTANCE_STUB:
+        raise VerifierConfigError(
+            f"guard_unit may only differ from {PRODUCTION_GUARD_UNIT} with the acceptance stub"
+        )
+    return unit
 
 
 def _night_slice(value: Any) -> str:

@@ -16,7 +16,6 @@ from agent_board.night_inspection import (
     unit_cgroup,
 )
 
-GUARD_UNIT = "switchboard-night-guard.service"
 GATE_TIMEOUT_SECONDS = 30
 SYSTEMD_RUN = "/usr/bin/systemd-run"
 SYSTEMCTL = "/usr/bin/systemctl"
@@ -83,8 +82,8 @@ def run_argv(config: VerifierConfig, config_path: Path, spec: RunSpec) -> tuple[
         "--property=Restart=no",
         "--property=NoNewPrivileges=yes",
         "--property=UMask=0077",
-        f"--property=BindsTo={GUARD_UNIT}",
-        f"--property=After={GUARD_UNIT}",
+        f"--property=BindsTo={config.guard_unit}",
+        f"--property=After={config.guard_unit}",
         f"--property=TimeoutStartSec={GATE_TIMEOUT_SECONDS}",
         f"--property=TimeoutStopSec={limits.stop_grace_seconds}",
         f"--property=RuntimeMaxSec={max(1, int(spec.runtime_max_seconds))}",

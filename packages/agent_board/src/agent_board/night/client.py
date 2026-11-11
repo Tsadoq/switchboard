@@ -50,3 +50,7 @@ def main(argv: Sequence[str], stdin: TextIO = sys.stdin, stdout: TextIO = sys.st
         return USAGE_EXIT
     print(json.dumps(answer, sort_keys=True), file=stdout)
     return REFUSED_EXIT if answer.get("status") == "refused" else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

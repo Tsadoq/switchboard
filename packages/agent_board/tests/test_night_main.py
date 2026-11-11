@@ -37,10 +37,15 @@ def test_the_guard_state_comes_from_the_system_manager(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    state = entry._guard_state()
+    state = entry._guard_state("switchboard-night-guard-smoke.service")
 
     assert state == GuardState(True, "a" * 32), state
-    assert seen[0][:4] == ["/usr/bin/systemctl", "--system", "show", "switchboard-night-guard.service"], seen
+    assert seen[0][:4] == [
+        "/usr/bin/systemctl",
+        "--system",
+        "show",
+        "switchboard-night-guard-smoke.service",
+    ], seen
 
 
 def test_an_unreadable_guard_counts_as_inactive(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -49,7 +54,7 @@ def test_an_unreadable_guard_counts_as_inactive(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(subprocess, "run", failing)
 
-    assert entry._guard_state() == GuardState(False, "")
+    assert entry._guard_state("switchboard-night-guard.service") == GuardState(False, "")
 
 
 def test_the_entry_point_does_not_import_the_ordinary_runner() -> None:
@@ -117,3 +122,21 @@ def test_request_runs_without_root_and_never_takes_the_fence_on_argv(monkeypatch
 
     assert entry.main(["request", "stop", str(uuid4()), "--socket", "/run/x.sock"]) == 0
     assert seen and len(seen[0]) == 4, "request parsing accepted extra argv, such as a fence"
+
+
+def test_the_client_runs_as_its_own_module_without_root_code() -> None:
+    probe = (
+        "import sys; import agent_board.night.client; "
+        "assert 'agent_board.night.controller' not in sys.modules; "
+        "assert 'agent_board.night_state' not in sys.modules"
+    )
+
+    subprocess.run([sys.executable, "-I", "-c", probe], check=True, capture_output=True, timeout=10)
+    usage = subprocess.run(
+        [sys.executable, "-I", "-m", "agent_board.night.client", "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert "--socket" in usage.stdout
