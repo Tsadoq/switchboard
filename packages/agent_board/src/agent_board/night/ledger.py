@@ -20,6 +20,7 @@ _SCHEMA = (
         "action TEXT NOT NULL CHECK(action IN ('bootstrap', 'binding', 'evidence')), run_id TEXT, "
         "payload TEXT NOT NULL, acked INTEGER NOT NULL DEFAULT 0 CHECK(acked IN (0, 1)))"
     ),
+    ("CREATE UNIQUE INDEX IF NOT EXISTS one_evidence_per_run ON receipts (run_id) WHERE action = 'evidence'"),
     (
         "CREATE TABLE IF NOT EXISTS bindings (run_id TEXT PRIMARY KEY, uid INTEGER NOT NULL, boot_id TEXT NOT NULL, "
         "invocation_id TEXT NOT NULL, cgroup TEXT NOT NULL, "

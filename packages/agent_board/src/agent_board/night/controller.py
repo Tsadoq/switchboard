@@ -217,9 +217,24 @@ class Controller:
         if frozen is not None and frozen.startswith(TRANSIENT_FREEZES):
             self._binder.reconcile()
         for record in self._journal.active():
-            if record.launch_claimed and record.state in ("stopping", "quarantined"):
+            if not record.launch_claimed:
+                continue
+            if record.state == "starting":
+                record = self._finished(record) or record
+            if record.state in ("stopping", "quarantined"):
                 reason = "deadline" if record.reason == "deadline_passed" else "completed"
                 self._binder.settle(record, reason)
+
+    def _finished(self, record: Record) -> Record | None:
+        """A running run whose unit already exited on its own; never stops healthy work."""
+        try:
+            seen = self._runs.inspect(unit_name(record.run_id))
+        except _MANAGER_FAILURES as error:
+            logger.warning("could not inspect night run %s: %s", record.run_id, error)
+            return None
+        if seen.unit_active or seen.cgroup_populated is not False:
+            return None
+        return self._journal.request_stop(record.run_id, record.fence)
 
     def _status(self, request: Request, allowed: frozenset[str]) -> Response:
         record = self._owned(request, allowed)

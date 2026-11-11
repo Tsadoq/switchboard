@@ -1,5 +1,6 @@
 import os
 import shutil
+import threading
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -7,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 from agent_board import night_state
-from agent_board.night.ledger import Ledger
+from agent_board.night.ledger import Ledger, LedgerError, Pending
 from agent_board.night.sync import Ack, BoardRefused, BoardState, BoardSync, BoardUnavailable, SyncError
 from agent_board.night_inspection import Binding, EmptyObservation, InspectionError
 from agent_board.night_state import ClockReading, Grant, LocalJournal
@@ -99,6 +100,7 @@ class Inspector:
     def __init__(self) -> None:
         self.failure: InspectionError | None = None
         self.not_stopped: InspectionError | None = None
+        self.barrier: threading.Barrier | None = None
 
     def capture(self, *, run_id: str, uid: int, boot_id: str) -> Binding:
         if self.failure is not None:
@@ -106,6 +108,11 @@ class Inspector:
         return Binding(run_id, uid, boot_id, "b" * 32)
 
     def stopped(self, binding: Binding) -> EmptyObservation:
+        if self.barrier is not None:
+            try:
+                self.barrier.wait(timeout=0.5)
+            except threading.BrokenBarrierError:
+                pass
         if self.not_stopped is not None:
             raise self.not_stopped
         return EmptyObservation(binding, cgroup_present=False, unit_loaded=False)
@@ -301,3 +308,31 @@ def test_a_run_never_bound_with_the_board_is_not_released(rig: Rig) -> None:
 
     assert not rig.sync.settle(record, "completed")
     assert rig.board.evidence_payloads == []
+
+
+def test_concurrent_stop_and_sweep_settle_a_run_with_one_evidence_receipt(rig: Rig) -> None:
+    record = _stopping_run(rig)
+    rig.inspector.barrier = threading.Barrier(2)
+    results: list[bool] = []
+
+    workers = [
+        threading.Thread(target=lambda: results.append(rig.sync.settle(record, "completed")))
+        for _ in range(2)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=10)
+
+    receipts = {payload["receipt_id"] for payload in rig.board.evidence_payloads}
+    assert len(receipts) == 1, f"concurrent settles composed {len(receipts)} evidence receipts"
+    assert rig.ledger.unacknowledged() == (), "an orphaned evidence receipt was left behind"
+    assert rig.journal.active() == () and True in results, results
+
+
+def test_the_ledger_refuses_a_second_evidence_message_for_one_run(rig: Rig) -> None:
+    run_id = str(uuid4())
+    rig.ledger.persist(Pending(str(uuid4()), "evidence", run_id, {"receipt_id": "a"}))
+
+    with pytest.raises(LedgerError):
+        rig.ledger.persist(Pending(str(uuid4()), "evidence", run_id, {"receipt_id": "b"}))

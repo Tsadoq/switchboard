@@ -505,3 +505,24 @@ def test_the_sweep_settles_runs_the_guard_stopped_and_retries_only_transient_fre
 
     assert rig.binder.reconciles == 1, "a real mismatch was retried as if it were transient"
     assert rig.binder.settles == [(run_id, "completed"), (run_id, "completed")], rig.binder.settles
+
+
+def test_the_sweep_settles_a_run_that_exited_on_its_own_after_proving_it_empty(rig: Rig) -> None:
+    run_id = str(uuid4())
+    rig.ask("start", run_id)
+
+    rig.controller.sweep()
+
+    assert rig.binder.settles == [(run_id, "completed")], rig.binder.settles
+    assert rig.journal.active()[0].state == "stopping"
+
+
+def test_the_sweep_leaves_a_healthy_running_run_alone(rig: Rig) -> None:
+    run_id = str(uuid4())
+    rig.ask("start", run_id)
+    rig.runs.observation = Observation(unit_active=True, cgroup_populated=None)
+
+    rig.controller.sweep()
+
+    assert rig.binder.settles == [] and rig.runs.stopped == []
+    assert rig.journal.active()[0].state == "starting"

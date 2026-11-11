@@ -1,4 +1,5 @@
 import logging
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -76,8 +77,13 @@ class BoardSync:
         self._inspector = inspector
         self._journal = journal
         self.frozen: str | None = "not_reconciled"
+        self._lock = threading.RLock()
 
     def reconcile(self) -> str | None:
+        with self._lock:
+            return self._reconcile_locked()
+
+    def _reconcile_locked(self) -> str | None:
         try:
             self.frozen = self._reconcile()
         except (SyncError, LedgerError) as error:
@@ -87,6 +93,11 @@ class BoardSync:
         return self.frozen
 
     def bind(self, *, run_id: str, fence: str, uid: int, boot_id: str) -> None:
+        """Serialized with reconcile and settle: the board counter allows one mutation in flight at a time."""
+        with self._lock:
+            self._bind_locked(run_id=run_id, fence=fence, uid=uid, boot_id=boot_id)
+
+    def _bind_locked(self, *, run_id: str, fence: str, uid: int, boot_id: str) -> None:
         if self.frozen is not None:
             raise SyncError(f"frozen:{self.frozen}")
         try:
@@ -118,6 +129,10 @@ class BoardSync:
         )
 
     def settle(self, record: Record, reason: str) -> bool:
+        with self._lock:
+            return self._settle_locked(record, reason)
+
+    def _settle_locked(self, record: Record, reason: str) -> bool:
         """Reports a proven-empty run to the board and frees its local slot only once the board agrees.
 
         Runtime is always reported unknown (a full charge): the unit's monotonic timestamps exclude suspend,
