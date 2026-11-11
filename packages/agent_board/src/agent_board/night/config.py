@@ -16,8 +16,12 @@ _MODULE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 _NAMESPACE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,63}")
 _EXCLUDED_BOXES = ("ops", "heimdall")
 PRODUCTION_GUARD_UNIT = "switchboard-night-guard.service"
+PRODUCTION_VERIFIER_UNIT = "switchboard-night-verifier.service"
+PRODUCTION_VERIFIER_SOCKET = "switchboard-night-verifier.socket"
 ACCEPTANCE_STUB = "agent_board.night.acceptance_stub"
 _GUARD_UNIT = re.compile(r"switchboard-night-guard(?:-[a-z0-9]{1,32})?\.service")
+_VERIFIER_UNIT = re.compile(r"switchboard-night-verifier(?:-[a-z0-9]{1,32})?\.service")
+_VERIFIER_SOCKET = re.compile(r"switchboard-night-verifier(?:-[a-z0-9]{1,32})?\.socket")
 _TOP_KEYS = {
     "box",
     "principal",
@@ -31,6 +35,8 @@ _TOP_KEYS = {
     "agents",
     "limits",
     "guard_unit",
+    "verifier_unit",
+    "verifier_socket",
 }
 _LAUNCHER_KEYS = {"python", "module"}
 _AGENT_KEYS = {"uid", "home", "happier_home", "workdir_root"}
@@ -75,6 +81,8 @@ class VerifierConfig:
     agents: Mapping[str, Agent]
     limits: Limits
     guard_unit: str = PRODUCTION_GUARD_UNIT
+    verifier_unit: str = PRODUCTION_VERIFIER_UNIT
+    verifier_socket: str = PRODUCTION_VERIFIER_SOCKET
 
     def principals_for_uid(self, uid: int) -> frozenset[str]:
         """Several agent kinds may share one OS account, so a peer uid can only narrow, never pick, the principal."""
@@ -121,7 +129,9 @@ def _metadata(path: Path) -> os.stat_result:
 
 
 def parse(table: Mapping[str, Any]) -> VerifierConfig:
-    _keys(table, _TOP_KEYS, "top level", optional={"ca_path", "guard_unit"})
+    _keys(
+        table, _TOP_KEYS, "top level", optional={"ca_path", "guard_unit", "verifier_unit", "verifier_socket"}
+    )
     box = _match(table["box"], _BOX, "box")
     if box in _EXCLUDED_BOXES:
         raise VerifierConfigError(f"box {box} is excluded from night runs")
@@ -150,7 +160,27 @@ def parse(table: Mapping[str, Any]) -> VerifierConfig:
         launcher_module=_match(launcher["module"], _MODULE, "launcher.module"),
         agents=agents,
         limits=_limits(_table(table["limits"], "limits")),
-        guard_unit=_guard_unit(table.get("guard_unit", PRODUCTION_GUARD_UNIT), launcher["module"]),
+        guard_unit=_unit_name(
+            table.get("guard_unit", PRODUCTION_GUARD_UNIT),
+            _GUARD_UNIT,
+            PRODUCTION_GUARD_UNIT,
+            "guard_unit",
+            launcher,
+        ),
+        verifier_unit=_unit_name(
+            table.get("verifier_unit", PRODUCTION_VERIFIER_UNIT),
+            _VERIFIER_UNIT,
+            PRODUCTION_VERIFIER_UNIT,
+            "verifier_unit",
+            launcher,
+        ),
+        verifier_socket=_unit_name(
+            table.get("verifier_socket", PRODUCTION_VERIFIER_SOCKET),
+            _VERIFIER_SOCKET,
+            PRODUCTION_VERIFIER_SOCKET,
+            "verifier_socket",
+            launcher,
+        ),
     )
 
 
@@ -172,13 +202,13 @@ def _agent(principal: str, value: Any, box: str) -> Agent:
     )
 
 
-def _guard_unit(value: Any, launcher_module: str) -> str:
-    """A non-production guard name is only for the acceptance smoke, so it requires the inert stub launcher."""
-    unit = _match(value, _GUARD_UNIT, "guard_unit")
-    if unit != PRODUCTION_GUARD_UNIT and launcher_module != ACCEPTANCE_STUB:
-        raise VerifierConfigError(
-            f"guard_unit may only differ from {PRODUCTION_GUARD_UNIT} with the acceptance stub"
-        )
+def _unit_name(
+    value: Any, pattern: re.Pattern[str], production: str, where: str, launcher: Mapping[str, Any]
+) -> str:
+    """A non-production unit name is only for the acceptance smoke, so it requires the inert stub launcher."""
+    unit = _match(value, pattern, where)
+    if unit != production and launcher.get("module") != ACCEPTANCE_STUB:
+        raise VerifierConfigError(f"{where} may only differ from {production} with the acceptance stub")
     return unit
 
 
