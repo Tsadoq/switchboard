@@ -6,8 +6,8 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-from agent_board.runner import night_state
-from agent_board.runner.night_state import ClockReading, Grant, LocalJournal, StateError
+from agent_board import night_state
+from agent_board.night_state import ClockReading, Grant, LocalJournal, StateError
 
 
 class Clock:

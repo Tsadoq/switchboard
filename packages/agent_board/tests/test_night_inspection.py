@@ -1,9 +1,11 @@
 import os
+import subprocess
+import sys
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from agent_board.runner.night_inspection import (
+from agent_board.night_inspection import (
     CGROUP_ROOT,
     NIGHT_SLICE,
     Binding,
@@ -202,6 +204,19 @@ def test_changed_boot_and_mid_observation_invocation_changes_fail_closed() -> No
     host.change_after_first = True
     with pytest.raises(InspectionError, match="unstable_stop"):
         Inspector(host).stopped(binding)
+
+
+def test_root_helpers_do_not_import_the_ordinary_runner() -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import agent_board.night_protocol, agent_board.night_state, agent_board.night_inspection; assert 'agent_board.runner' not in sys.modules",
+        ],
+        check=True,
+        capture_output=True,
+        timeout=10,
+    )
 
 
 def test_live_backend_requires_root_before_any_manager_access(monkeypatch: pytest.MonkeyPatch) -> None:

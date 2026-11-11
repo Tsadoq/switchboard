@@ -3,7 +3,7 @@ from dataclasses import asdict
 from uuid import uuid4
 
 import pytest
-from agent_board.runner.night_protocol import FrameError, Request, decode_request
+from agent_board.night_protocol import FrameError, Request, decode_request
 
 
 def body() -> dict[str, object]:
