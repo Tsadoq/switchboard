@@ -131,11 +131,22 @@ class SystemdRuns:
         self._commands.run(run_argv(self._config, self._config_path, spec, self._gate_python))
 
     def stop(self, unit: str) -> None:
+        """Kills through the kernel first, so an unresponsive manager cannot delay the deadline.
+
+        The manager is then told to stop the unit, which also cancels a pending start job, and the cgroup is
+        killed again for anything that pending start launched in between. A manager failure still raises, so
+        the caller treats the stop as unproven.
+        """
+        cgroup = CGROUP_ROOT / unit_cgroup(unit).lstrip("/")
+        self._kill(cgroup, unit)
         try:
             self._commands.run((SYSTEMCTL, "--system", "stop", "--no-block", unit))
         finally:
-            if self._commands.kill_cgroup(CGROUP_ROOT / unit_cgroup(unit).lstrip("/")):
-                logger.info("killed the cgroup of %s", unit)
+            self._kill(cgroup, unit)
+
+    def _kill(self, cgroup: Path, unit: str) -> None:
+        if self._commands.kill_cgroup(cgroup):
+            logger.info("killed the cgroup of %s", unit)
 
     def inspect(self, unit: str) -> Observation:
         binding = self._binding(unit)

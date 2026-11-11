@@ -112,15 +112,14 @@ def test_a_config_path_that_would_split_the_gate_command_is_refused() -> None:
 
 class Commands:
     def __init__(self) -> None:
-        self.ran: list[tuple[str, ...]] = []
-        self.killed: list[Path] = []
+        self.events: list[tuple[str, object]] = []
 
     def run(self, argv: Sequence[str]) -> str:
-        self.ran.append(tuple(argv))
+        self.events.append(("run", tuple(argv)))
         return ""
 
     def kill_cgroup(self, cgroup: Path) -> bool:
-        self.killed.append(cgroup)
+        self.events.append(("kill", cgroup))
         return True
 
 
@@ -145,16 +144,42 @@ def _runs(ledger: Ledger, inspector: Inspector, commands: Commands) -> SystemdRu
     return SystemdRuns(_config(), CONFIG_PATH, ledger, inspector, commands, SERVICE_PYTHON)
 
 
-def test_stop_asks_systemd_then_kills_the_root_owned_cgroup(ledger: Ledger) -> None:
+def test_stop_kills_through_the_kernel_before_and_after_asking_systemd(ledger: Ledger) -> None:
     commands = Commands()
     unit = unit_name(str(uuid4()))
 
     _runs(ledger, Inspector(), commands).stop(unit)
 
-    assert commands.ran == [("/usr/bin/systemctl", "--system", "stop", "--no-block", unit)], commands.ran
-    assert commands.killed == [Path("/sys/fs/cgroup/switchboard.slice/switchboard-night.slice") / unit], (
-        commands.killed
-    )
+    cgroup = Path("/sys/fs/cgroup/switchboard.slice/switchboard-night.slice") / unit
+    assert commands.events == [
+        ("kill", cgroup),
+        ("run", ("/usr/bin/systemctl", "--system", "stop", "--no-block", unit)),
+        ("kill", cgroup),
+    ], commands.events
+
+
+class StuckManager(Commands):
+    def __init__(self) -> None:
+        super().__init__()
+        self.now = 99.0
+        self.killed_at: list[float] = []
+
+    def run(self, argv: Sequence[str]) -> str:
+        self.now += 15.0
+        raise RunManagerError("systemctl timed out")
+
+    def kill_cgroup(self, cgroup: Path) -> bool:
+        self.killed_at.append(self.now)
+        return True
+
+
+def test_an_unresponsive_manager_cannot_delay_the_kernel_kill(ledger: Ledger) -> None:
+    commands = StuckManager()
+
+    with pytest.raises(RunManagerError):
+        _runs(ledger, Inspector(), commands).stop(unit_name(str(uuid4())))
+
+    assert commands.killed_at[0] == 99.0, f"the first kill waited for the manager: {commands.killed_at}"
 
 
 def test_stop_proof_comes_from_the_inspector_with_the_recorded_binding(ledger: Ledger) -> None:
