@@ -67,15 +67,21 @@ def test_config_refuses_unsafe_values(changes: dict[str, Any], message: str) -> 
         parse(_config_table(**changes))
 
 
-def test_config_refuses_agents_from_another_box_or_shared_uids() -> None:
+def test_config_refuses_agents_from_another_box() -> None:
     agents = _config_table()["agents"]
-    foreign = {**agents, "pi@vault": agents["pi@dev"]}
-    shared = {"pi@dev": agents["pi@dev"], "claude@dev": {**agents["claude@dev"], "uid": PI_UID}}
 
     with pytest.raises(VerifierConfigError, match="does not belong"):
-        parse(_config_table(agents=foreign))
-    with pytest.raises(VerifierConfigError, match="distinct uids"):
-        parse(_config_table(agents=shared))
+        parse(_config_table(agents={**agents, "pi@vault": agents["pi@dev"]}))
+
+
+def test_kinds_sharing_one_os_account_map_to_both_principals() -> None:
+    agents = _config_table()["agents"]
+    shared = {"pi@dev": agents["pi@dev"], "claude@dev": {**agents["claude@dev"], "uid": PI_UID}}
+
+    config = parse(_config_table(agents=shared))
+
+    assert config.principals_for_uid(PI_UID) == {"pi@dev", "claude@dev"}
+    assert config.principals_for_uid(STRANGER_UID) == frozenset()
 
 
 class Clock:
@@ -137,13 +143,16 @@ def protected_fixture_boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
 
 class Rig:
-    def __init__(self, tmp_path: Path) -> None:
-        self.config = parse(_config_table())
+    def __init__(self, tmp_path: Path, shared_uid: bool = False) -> None:
+        table = _config_table()
+        if shared_uid:
+            table["agents"]["claude@dev"]["uid"] = PI_UID
+        self.config = parse(table)
         self.clock = Clock()
         self.journal = LocalJournal(
             tmp_path / "state" / "journal.sqlite3",
             box="dev",
-            principals={"pi@dev": PI_UID, "claude@dev": CLAUDE_UID},
+            principals={agent.principal: agent.uid for agent in self.config.agents.values()},
             clock=self.clock,
         )
         self.grants = Grants(self.clock)
@@ -361,3 +370,18 @@ def test_only_a_single_systemd_socket_is_accepted() -> None:
         server.inherited_listener({"LISTEN_PID": "1", "LISTEN_FDS": "1"})
     with pytest.raises(server.SocketError):
         server.inherited_listener({"LISTEN_PID": str(os.getpid()), "LISTEN_FDS": "2"})
+
+
+def test_on_a_shared_account_the_grant_names_the_principal_and_either_kind_can_stop_it(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path, shared_uid=True)
+    rig.grants.grant = ServerGrant("claude@dev", "dev", "admitted", 900.0, 9e9)
+    run_id = str(uuid4())
+
+    started = rig.ask("start", run_id, uid=PI_UID)
+    stopped = rig.ask("stop", run_id, uid=PI_UID)
+
+    assert started["status"] == "running", started
+    assert rig.runs.launched[0].agent.principal == "claude@dev", rig.runs.launched
+    assert stopped["status"] == "stopped", stopped

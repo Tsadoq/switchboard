@@ -121,19 +121,19 @@ class Controller:
         self._monotonic = monotonic
 
     def handle(self, request: Request, peer_uid: int) -> Response:
-        agent = self._config.agent_for_uid(peer_uid)
-        if agent is None:
+        allowed = self._config.principals_for_uid(peer_uid)
+        if not allowed:
             return self._refuse(request, "peer_not_configured")
         try:
             if request.op == "start":
-                return self._start(request, agent)
+                return self._start(request, allowed)
             if request.op == "stop":
-                return self._stop(request, agent)
-            return self._status(request, agent)
+                return self._stop(request, allowed)
+            return self._status(request, allowed)
         except StateError as error:
             return self._refuse(request, str(error))
 
-    def _start(self, request: Request, agent: Agent) -> Response:
+    def _start(self, request: Request, allowed: frozenset[str]) -> Response:
         before = self._monotonic()
         try:
             grant = self._grants.fetch_grant(request.run_id, request.fence)
@@ -141,9 +141,10 @@ class Controller:
             logger.warning("grant fetch for run %s failed: %s", request.run_id, error)
             return self._refuse(request, "grant_unavailable")
         round_trip = max(0.0, self._monotonic() - before)
-        why = self._inadmissible(grant, agent, round_trip)
+        why = self._inadmissible(grant, allowed, round_trip)
         if why is not None:
             return self._refuse(request, why)
+        agent = self._config.agents[grant.principal]
         now = self._clock()
         remaining = grant.remaining_seconds - round_trip
         reservation = self._journal.reserve(
@@ -170,8 +171,8 @@ class Controller:
             return Response(request.request_id, request.run_id, "quarantined", "launch_uncertain")
         return Response(request.request_id, request.run_id, "running")
 
-    def _stop(self, request: Request, agent: Agent) -> Response:
-        record = self._owned(request, agent)
+    def _stop(self, request: Request, allowed: frozenset[str]) -> Response:
+        record = self._owned(request, allowed)
         if record is None:
             return self._refuse(request, "unknown_run")
         record = self._journal.request_stop(request.run_id, request.fence)
@@ -189,16 +190,16 @@ class Controller:
             return Response(request.request_id, request.run_id, "stopping")
         return Response(request.request_id, request.run_id, "stopped")
 
-    def _status(self, request: Request, agent: Agent) -> Response:
-        record = self._owned(request, agent)
+    def _status(self, request: Request, allowed: frozenset[str]) -> Response:
+        record = self._owned(request, allowed)
         if record is None:
             return self._refuse(request, "unknown_run")
         return self._from_record(request, record)
 
-    def _inadmissible(self, grant: ServerGrant, agent: Agent, round_trip: float) -> str | None:
+    def _inadmissible(self, grant: ServerGrant, allowed: frozenset[str], round_trip: float) -> str | None:
         if grant.box != self._config.box:
             return "wrong_box"
-        if grant.principal != agent.principal:
+        if grant.principal not in allowed:
             return "wrong_principal"
         if grant.state not in ADMISSIBLE_STATES:
             return "not_admissible"
@@ -206,10 +207,10 @@ class Controller:
             return "insufficient_time"
         return None
 
-    def _owned(self, request: Request, agent: Agent) -> Record | None:
+    def _owned(self, request: Request, allowed: frozenset[str]) -> Record | None:
         for record in self._journal.active():
             if record.run_id == request.run_id:
-                if record.uid != agent.uid or not secrets.compare_digest(record.fence, request.fence):
+                if record.principal not in allowed or not secrets.compare_digest(record.fence, request.fence):
                     return None
                 return record
         return None
