@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from board.db import Database
 from board.identity import presence
+from board.identity.roles import VerifierRoles
 from board.identity.verifier import Rejected, Verified
 
 AUTH_ACTION = "auth"
@@ -26,11 +27,13 @@ class Token:
 
 
 class ReadTokens:
-    def __init__(self, db: Database, token_ttl_hours: int) -> None:
+    def __init__(self, db: Database, token_ttl_hours: int, roles: VerifierRoles | None = None) -> None:
+        self._roles = roles or VerifierRoles()
         self._db = db
         self._token_ttl_seconds = token_ttl_hours * 3600
 
     async def issue_challenge(self, principal: str) -> Challenge:
+        self._roles.require_agent(principal)
         now = time.time()
         challenge = Challenge(secrets.token_urlsafe(_RANDOM_BYTES), now + CHALLENGE_TTL_SECONDS)
 
@@ -46,6 +49,7 @@ class ReadTokens:
 
     async def redeem(self, verified: Verified) -> Token:
         principal = verified.envelope.principal
+        self._roles.require_agent(principal)
         offered = verified.envelope.payload.get("challenge")
         if verified.envelope.action != AUTH_ACTION or not isinstance(offered, str) or not offered.isascii():
             raise Rejected("bad_challenge")
@@ -78,7 +82,7 @@ class ReadTokens:
                 "SELECT principal FROM tokens WHERE token_sha256 = ? AND expires_at > ?",
                 (_sha256(bearer), now),
             ).fetchone()
-            if row is None:
+            if row is None or self._roles.is_service(row["principal"]):
                 return None
             presence.record_seen(conn, row["principal"], now)
             principal: str = row["principal"]

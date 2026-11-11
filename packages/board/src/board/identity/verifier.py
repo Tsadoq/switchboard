@@ -23,6 +23,7 @@ type RejectionReason = Literal[
     "replay",
     "bad_challenge",
     "bad_token",
+    "forbidden_role",
 ]
 
 NONCE_RETENTION_SECONDS = 24 * 3600

@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import Response
 
-from board import passwords, periodic, selftest
+from board import night_verifier, passwords, periodic, selftest
 from board.db import Database, migrate
 from board.dist import Distribution
 from board.dist import routes as dist_routes
@@ -30,6 +30,7 @@ from board.forum import routes as forum_routes
 from board.forum.actions import Forum
 from board.identity import routes as identity_routes
 from board.identity.registry import BadSignerLine, Registry
+from board.identity.roles import VerifierRoles
 from board.identity.tokens import ReadTokens
 from board.identity.verifier import Verified, Verifier
 from board.settings import Settings
@@ -54,7 +55,8 @@ class UnknownAction(LookupError):
 
 
 class ActionRegistry:
-    def __init__(self) -> None:
+    def __init__(self, roles: VerifierRoles | None = None) -> None:
+        self._roles = roles or VerifierRoles()
         self._handlers: dict[str, ActionHandler] = {}
 
     def register(self, name: str, handler: ActionHandler) -> None:
@@ -63,6 +65,7 @@ class ActionRegistry:
         self._handlers[name] = handler
 
     async def dispatch(self, verified: Verified) -> Response:
+        self._roles.require_agent(verified.envelope.principal)
         action = verified.envelope.action
         handler = self._handlers.get(action)
         if handler is None:
@@ -94,7 +97,8 @@ def create_app(settings: Settings) -> FastAPI:
     app = FastAPI(title="agent-board", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     db = Database(settings.db_path)
     events = EventHub()
-    registry = _open_registry(settings)
+    roles = VerifierRoles.load(settings.night_verifiers_path)
+    registry = _open_registry(settings, roles.principals)
     forum = Forum(db, events, registry, settings)
     tickets = Tickets(db, forum)
     file_store = Store(settings.state_dir / "files", settings.file_max_mb * 1024 * 1024)
@@ -102,16 +106,19 @@ def create_app(settings: Settings) -> FastAPI:
     app.state.settings = settings
     app.state.db = db
     app.state.events = events
-    app.state.actions = ActionRegistry()
+    app.state.actions = ActionRegistry(roles)
+    app.state.verifier_roles = roles
+    app.state.night_verifier = night_verifier.NightVerifier(db, roles)
     app.state.registry = registry
     app.state.verifier = Verifier(registry, db, settings.ts_window_seconds, settings.ssh_keygen)
-    app.state.tokens = ReadTokens(db, settings.token_ttl_hours)
+    app.state.tokens = ReadTokens(db, settings.token_ttl_hours, roles)
     app.state.forum = forum
     app.state.tickets = tickets
     app.state.file_store = file_store
     app.state.files = files
     app.state.human_sessions = HumanSessions(db, settings)
     identity_routes.install(app)
+    night_verifier.install(app, app.state.night_verifier)
     forum_routes.install(app, forum, reader=principal_or_human)
     ticket_routes.install(app, tickets, reader=principal_or_human)
     file_routes.install(app, files, reader=principal_or_human)
@@ -133,9 +140,9 @@ def create_app(settings: Settings) -> FastAPI:
     return app
 
 
-def _open_registry(settings: Settings) -> Registry:
+def _open_registry(settings: Settings, services: frozenset[str] = frozenset()) -> Registry:
     settings.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    return Registry(settings.state_dir, settings.signing_namespace)
+    return Registry(settings.state_dir, settings.signing_namespace, service_principals=services)
 
 
 async def _unknown_action(request: Request, unknown: UnknownAction) -> JSONResponse:
