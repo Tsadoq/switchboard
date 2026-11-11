@@ -289,7 +289,12 @@ def _uuid(value: str) -> bool:
 
 
 def _number(value: float) -> bool:
-    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value) and value >= 0
+    except OverflowError:
+        return False
 
 
 def _record(row: sqlite3.Row) -> Record:

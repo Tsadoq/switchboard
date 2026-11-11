@@ -162,6 +162,13 @@ def test_repeated_uncertainty_retains_the_original_cause_and_slot(tmp_path: Path
         store.reserve(grant(clock, "claude@dev"))
 
 
+def test_oversized_integer_clocks_fail_as_invalid_input(clock: Clock) -> None:
+    with pytest.raises(StateError, match="invalid_clock"):
+        ClockReading(clock().boot_id, 10**400, 1000)
+    with pytest.raises(StateError, match="invalid_deadline"):
+        grant(clock, deadline_utc=10**400)
+
+
 @pytest.mark.parametrize("axis", ["boottime", "utc"])
 def test_each_deadline_independently_holds_the_gate_on_expiry(
     tmp_path: Path, clock: Clock, axis: str
