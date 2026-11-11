@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from agent_board.night.config import Agent, VerifierConfig
-from agent_board.runner.night_protocol import Request
-from agent_board.runner.night_state import (
+from agent_board.night_protocol import Request
+from agent_board.night_state import (
     MIN_START_SECONDS,
     ClockReading,
     Grant,

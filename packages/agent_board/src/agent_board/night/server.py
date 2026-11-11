@@ -6,7 +6,7 @@ import struct
 from typing import NoReturn, Protocol
 
 from agent_board.night.controller import Response
-from agent_board.runner.night_protocol import MAX_FRAME_BYTES, FrameError, Request, decode_request
+from agent_board.night_protocol import MAX_FRAME_BYTES, FrameError, Request, decode_request
 
 SYSTEMD_FIRST_FD = 3
 CONNECTION_TIMEOUT_SECONDS = 5

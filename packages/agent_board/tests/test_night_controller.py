@@ -1,18 +1,20 @@
 import json
 import os
 import socket
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import pytest
+from agent_board import night_state
 from agent_board.night import server
 from agent_board.night.config import VerifierConfigError, parse
 from agent_board.night.controller import Controller, Observation, RunSpec, ServerGrant, unit_name
-from agent_board.runner import night_state
-from agent_board.runner.night_protocol import Operation, Request
-from agent_board.runner.night_state import ClockReading, LocalJournal
+from agent_board.night_protocol import Operation, Request
+from agent_board.night_state import ClockReading, LocalJournal
 
 PI_UID, CLAUDE_UID, STRANGER_UID = 2001, 2002, 2999
 FENCE = "f" * 43
@@ -406,3 +408,12 @@ def test_the_grant_round_trip_is_measured_on_a_clock_that_counts_suspend(
     )
 
     assert clocks and set(clocks) == {time.CLOCK_BOOTTIME}, clocks
+
+
+def test_the_root_controller_does_not_import_the_ordinary_runner() -> None:
+    probe = (
+        "import sys; import agent_board.night.config, agent_board.night.controller, agent_board.night.server; "
+        "assert 'agent_board.runner' not in sys.modules"
+    )
+
+    subprocess.run([sys.executable, "-I", "-c", probe], check=True, capture_output=True, timeout=10)
