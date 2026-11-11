@@ -145,46 +145,14 @@ class NightAdmission:
         return await self._db.transact(write)
 
     async def start(self, principal: str, run_id: str, fence: str, now: float) -> Run:
-        def write(conn: sqlite3.Connection) -> Run:
-            _eligible(conn, principal)
-            run = _fenced(conn, principal, run_id, fence)
-            night = window_for(now)
-            if night is None or now >= run.deadline or now < run.admitted_at:
-                raise AdmissionDenied("expired")
-            if night.local_date != run.local_date or run.state not in ("admitted", "running"):
-                raise AdmissionDenied("stopped")
-            if run.state == "admitted":
-                conn.execute(
-                    "UPDATE night_runs SET state = 'running', started_at = ? WHERE id = ?", (now, run_id)
-                )
-            return _find(conn, run_id)
-
-        return await self._db.transact(write)
+        return await self._db.transact(lambda conn: start_in_transaction(conn, principal, run_id, fence, now))
 
     async def settle(self, principal: str, run_id: str, fence: str, *, elapsed: float, stopped: bool) -> Run:
-        def write(conn: sqlite3.Connection) -> Run:
-            run = _fenced(conn, principal, run_id, fence)
-            if not math.isfinite(elapsed) or elapsed < 0:
-                raise AdmissionDenied("invalid_elapsed")
-            if run.state == "finished":
-                return run
-            measured = max(elapsed, run.elapsed or 0)
-            overran = measured > run.reserved
-            charged = conn.execute("SELECT charged FROM night_runs WHERE id = ?", (run_id,)).fetchone()[0]
-            if charged is None:
-                charged = measured if stopped and not overran else run.reserved
-                conn.execute(
-                    "UPDATE night_budget SET reserved = reserved - ?, spent = spent + ? WHERE principal = ? AND local_date = ?",
-                    (run.reserved, charged, principal, run.local_date),
-                )
-            state = "finished" if stopped and not overran else "quarantined"
-            conn.execute(
-                "UPDATE night_runs SET charged = ?, elapsed = ?, state = ? WHERE id = ?",
-                (charged, measured, state, run_id),
+        return await self._db.transact(
+            lambda conn: settle_in_transaction(
+                conn, principal, run_id, fence, elapsed=elapsed, stopped=stopped
             )
-            return _find(conn, run_id)
-
-        return await self._db.transact(write)
+        )
 
     async def run(self, run_id: str) -> Run:
         return await self._db.read(lambda conn: _find(conn, run_id))
@@ -219,6 +187,46 @@ class NightAdmission:
             return fired
 
         return await self._db.transact(write)
+
+
+def start_in_transaction(
+    conn: sqlite3.Connection, principal: str, run_id: str, fence: str, now: float
+) -> Run:
+    _eligible(conn, principal)
+    run = _fenced(conn, principal, run_id, fence)
+    night = window_for(now)
+    if night is None or now >= run.deadline or now < run.admitted_at:
+        raise AdmissionDenied("expired")
+    if night.local_date != run.local_date or run.state not in ("admitted", "running"):
+        raise AdmissionDenied("stopped")
+    if run.state == "admitted":
+        conn.execute("UPDATE night_runs SET state = 'running', started_at = ? WHERE id = ?", (now, run_id))
+    return _find(conn, run_id)
+
+
+def settle_in_transaction(
+    conn: sqlite3.Connection, principal: str, run_id: str, fence: str, *, elapsed: float, stopped: bool
+) -> Run:
+    run = _fenced(conn, principal, run_id, fence)
+    if not math.isfinite(elapsed) or elapsed < 0:
+        raise AdmissionDenied("invalid_elapsed")
+    if run.state == "finished":
+        return run
+    measured = max(elapsed, run.elapsed or 0)
+    overran = measured > run.reserved
+    charged = conn.execute("SELECT charged FROM night_runs WHERE id = ?", (run_id,)).fetchone()[0]
+    if charged is None:
+        charged = measured if stopped and not overran else run.reserved
+        conn.execute(
+            "UPDATE night_budget SET reserved = reserved - ?, spent = spent + ? WHERE principal = ? AND local_date = ?",
+            (run.reserved, charged, principal, run.local_date),
+        )
+    state = "finished" if stopped and not overran else "quarantined"
+    conn.execute(
+        "UPDATE night_runs SET charged = ?, elapsed = ?, state = ? WHERE id = ?",
+        (charged, measured, state, run_id),
+    )
+    return _find(conn, run_id)
 
 
 def _box(principal: str) -> str:

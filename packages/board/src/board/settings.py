@@ -28,6 +28,7 @@ class Settings:
     listen: str
     signing_namespace: str = DEFAULT_NAMESPACE
     update_status_path: Path = Path("/var/lib/agent-board-update/status.json")
+    night_verifiers_path: Path | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> Self:
@@ -48,6 +49,9 @@ class Settings:
             ssh_keygen=_text(env, "BOARD_SSH_KEYGEN", "ssh-keygen"),
             listen=_text(env, "BOARD_LISTEN", "0.0.0.0:8080"),
             signing_namespace=_namespace(env),
+            night_verifiers_path=Path(env["BOARD_NIGHT_VERIFIERS_FILE"])
+            if env.get("BOARD_NIGHT_VERIFIERS_FILE")
+            else None,
             update_status_path=Path(
                 _text(env, "BOARD_UPDATE_STATUS", "/var/lib/agent-board-update/status.json")
             ),

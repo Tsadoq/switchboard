@@ -7,7 +7,14 @@ from typing import Protocol
 from agent_board.night.config import VerifierConfig
 from agent_board.night.controller import Observation, RunManagerError, RunSpec
 from agent_board.night.ledger import Ledger
-from agent_board.night_inspection import CGROUP_ROOT, NIGHT_SLICE, Binding, EmptyObservation, InspectionError
+from agent_board.night_inspection import (
+    CGROUP_ROOT,
+    NIGHT_SLICE,
+    Binding,
+    EmptyObservation,
+    InspectionError,
+    unit_cgroup,
+)
 
 GUARD_UNIT = "switchboard-night-guard.service"
 GATE_TIMEOUT_SECONDS = 30
@@ -126,7 +133,7 @@ class SystemdRuns:
         try:
             self._commands.run((SYSTEMCTL, "--system", "stop", "--no-block", unit))
         finally:
-            if self._commands.kill_cgroup(CGROUP_ROOT / NIGHT_SLICE / unit):
+            if self._commands.kill_cgroup(CGROUP_ROOT / unit_cgroup(unit).lstrip("/")):
                 logger.info("killed the cgroup of %s", unit)
 
     def inspect(self, unit: str) -> Observation:

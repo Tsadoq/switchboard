@@ -151,7 +151,9 @@ def test_stop_asks_systemd_then_kills_the_root_owned_cgroup(ledger: Ledger) -> N
     _runs(ledger, Inspector(), commands).stop(unit)
 
     assert commands.ran == [("/usr/bin/systemctl", "--system", "stop", "--no-block", unit)], commands.ran
-    assert commands.killed == [Path("/sys/fs/cgroup/switchboard-night.slice") / unit], commands.killed
+    assert commands.killed == [Path("/sys/fs/cgroup/switchboard.slice/switchboard-night.slice") / unit], (
+        commands.killed
+    )
 
 
 def test_stop_proof_comes_from_the_inspector_with_the_recorded_binding(ledger: Ledger) -> None:

@@ -9,6 +9,7 @@ from uuid import UUID
 
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 NIGHT_SLICE = "switchboard-night.slice"
+NIGHT_CGROUP = "/switchboard.slice/switchboard-night.slice"
 PROPERTIES = (
     "Id",
     "LoadState",
@@ -25,6 +26,18 @@ PROPERTIES = (
 
 class InspectionError(ValueError):
     pass
+
+
+def unit_cgroup(unit: str) -> str:
+    match = re.fullmatch(r"switchboard-night-([0-9a-f-]{36})\.service", unit)
+    if match is None:
+        raise InspectionError("invalid_unit")
+    try:
+        if str(UUID(match[1])) != match[1]:
+            raise ValueError
+    except ValueError:
+        raise InspectionError("invalid_unit") from None
+    return f"{NIGHT_CGROUP}/{unit}"
 
 
 class Host(Protocol):
@@ -57,7 +70,7 @@ class Binding:
 
     @property
     def cgroup(self) -> str:
-        return f"/{NIGHT_SLICE}/{self.unit}"
+        return unit_cgroup(self.unit)
 
 
 @dataclass(frozen=True)
@@ -159,7 +172,12 @@ class Inspector:
         self._protected(CGROUP_ROOT / "cgroup.controllers", directory=False)
         self._host.read(CGROUP_ROOT / "cgroup.controllers")
         present = True
-        for group in (CGROUP_ROOT, CGROUP_ROOT / NIGHT_SLICE, CGROUP_ROOT / binding.cgroup.lstrip("/")):
+        for group in (
+            CGROUP_ROOT,
+            CGROUP_ROOT / "switchboard.slice",
+            CGROUP_ROOT / NIGHT_CGROUP.lstrip("/"),
+            CGROUP_ROOT / binding.cgroup.lstrip("/"),
+        ):
             if self._host.metadata(group) is None:
                 if required:
                     raise InspectionError("missing_cgroup")
