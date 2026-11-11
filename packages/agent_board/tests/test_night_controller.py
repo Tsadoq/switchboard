@@ -1,6 +1,7 @@
 import json
 import os
 import socket
+import time
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -385,3 +386,23 @@ def test_on_a_shared_account_the_grant_names_the_principal_and_either_kind_can_s
     assert started["status"] == "running", started
     assert rig.runs.launched[0].agent.principal == "claude@dev", rig.runs.launched
     assert stopped["status"] == "stopped", stopped
+
+
+def test_the_grant_round_trip_is_measured_on_a_clock_that_counts_suspend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = Rig(tmp_path)
+    clocks: list[int] = []
+
+    def read_clock(clock: int) -> float:
+        clocks.append(clock)
+        return 0.0
+
+    monkeypatch.setattr(time, "clock_gettime", read_clock)
+    default_clock = Controller(rig.config, rig.journal, rig.grants, rig.runs, rig.clock)
+
+    default_clock.handle(
+        Request(v=1, request_id=str(uuid4()), op="start", run_id=str(uuid4()), fence=FENCE), PI_UID
+    )
+
+    assert clocks and set(clocks) == {time.CLOCK_BOOTTIME}, clocks
