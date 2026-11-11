@@ -15,7 +15,6 @@ class Tree:
     def __init__(self, tmp_path: Path) -> None:
         self.base = tmp_path
         self.entries: dict[Path, tuple[int, int]] = {}
-        self.links: dict[Path, str] = {}
 
     def add(self, relative: str, mode: int, uid: int = 0) -> Path:
         path = self.base / relative
@@ -36,7 +35,6 @@ class Tree:
 def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Tree:
     fake = Tree(tmp_path)
     monkeypatch.setattr(night_config, "_metadata", fake.metadata)
-    monkeypatch.setattr(night_config, "_link_target", lambda path: fake.links[path])
     return fake
 
 
@@ -65,36 +63,22 @@ def test_an_untrusted_config_chain_is_refused_before_reading(
         trusted_file(config)
 
 
-def test_an_interpreter_may_be_a_root_venv_symlink_to_a_trusted_target(tree: Tree) -> None:
+def test_any_interpreter_symlink_is_refused_even_root_owned_to_a_trusted_target(tree: Tree) -> None:
     tree.add("opt", ROOT_DIR)
     tree.add("opt/bin", ROOT_DIR)
     link = tree.add("opt/bin/python", LINK)
     tree.add("usr", ROOT_DIR)
-    target = tree.add("usr/python3.13", ROOT_FILE | 0o111)
-    tree.links[link] = str(target)
+    tree.add("usr/python3.13", ROOT_FILE | 0o111)
 
-    trusted_file(link, interpreter=True)
+    with pytest.raises(VerifierConfigError, match="regular root-owned file"):
+        trusted_file(link)
 
 
-@pytest.mark.parametrize(
-    ("link_uid", "target_directory_mode"),
-    [
-        pytest.param(1000, ROOT_DIR, id="agent-owned-link"),
-        pytest.param(0, stat.S_IFDIR | 0o777, id="target-in-writable-directory"),
-    ],
-)
-def test_an_interpreter_substitution_through_the_symlink_is_refused(
-    tree: Tree, link_uid: int, target_directory_mode: int
-) -> None:
+def test_a_copied_root_owned_interpreter_is_trusted(tree: Tree) -> None:
     tree.add("opt", ROOT_DIR)
     tree.add("opt/bin", ROOT_DIR)
-    link = tree.add("opt/bin/python", LINK, link_uid)
-    tree.add("srv", target_directory_mode)
-    target = tree.add("srv/python3.13", ROOT_FILE | 0o111)
-    tree.links[link] = str(target)
 
-    with pytest.raises(VerifierConfigError):
-        trusted_file(link, interpreter=True)
+    trusted_file(tree.add("opt/bin/python", ROOT_FILE | 0o111))
 
 
 def test_a_symlinked_config_is_refused_even_when_root_owned(tree: Tree) -> None:
@@ -102,41 +86,3 @@ def test_a_symlinked_config_is_refused_even_when_root_owned(tree: Tree) -> None:
 
     with pytest.raises(VerifierConfigError):
         trusted_file(tree.add("etc/verifier.toml", LINK))
-
-
-def test_an_agent_owned_hop_in_the_middle_of_a_symlink_chain_is_refused(tree: Tree) -> None:
-    tree.add("opt", ROOT_DIR)
-    first = tree.add("opt/python", LINK)
-    tree.add("agent", ROOT_DIR, 1000)
-    shim = tree.add("agent/shim", LINK, 1000)
-    tree.add("usr", ROOT_DIR)
-    target = tree.add("usr/python3.13", ROOT_FILE | 0o111)
-    tree.links[first] = str(shim)
-    tree.links[shim] = str(target)
-
-    with pytest.raises(VerifierConfigError, match="agent"):
-        trusted_file(first, interpreter=True)
-
-
-def test_a_relative_chain_of_root_links_is_followed_hop_by_hop(tree: Tree) -> None:
-    tree.add("opt", ROOT_DIR)
-    tree.add("opt/bin", ROOT_DIR)
-    first = tree.add("opt/bin/python", LINK)
-    second = tree.add("opt/bin/python3", LINK)
-    target = tree.add("opt/bin/python3.13", ROOT_FILE | 0o111)
-    tree.links[first] = "python3"
-    tree.links[second] = "./python3.13"
-
-    trusted_file(first, interpreter=True)
-    assert target in tree.entries
-
-
-def test_a_symlink_cycle_is_refused(tree: Tree) -> None:
-    tree.add("opt", ROOT_DIR)
-    first = tree.add("opt/a", LINK)
-    second = tree.add("opt/b", LINK)
-    tree.links[first] = str(second)
-    tree.links[second] = str(first)
-
-    with pytest.raises(VerifierConfigError, match="hops"):
-        trusted_file(first, interpreter=True)

@@ -16,7 +16,6 @@ _MODULE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 _NAMESPACE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,63}")
 _EXCLUDED_BOXES = ("ops", "heimdall")
 PRODUCTION_GUARD_UNIT = "switchboard-night-guard.service"
-MAX_LINK_HOPS = 8
 ACCEPTANCE_STUB = "agent_board.night.acceptance_stub"
 _GUARD_UNIT = re.compile(r"switchboard-night-guard(?:-[a-z0-9]{1,32})?\.service")
 _TOP_KEYS = {
@@ -91,36 +90,20 @@ def load(path: Path) -> VerifierConfig:
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise VerifierConfigError(f"unreadable config {path}: {error}") from None
     config = parse(table)
-    trusted_file(config.launcher_python, interpreter=True)
+    trusted_file(config.launcher_python)
     return config
 
 
-def trusted_file(path: Path, *, interpreter: bool = False) -> None:
-    """Fails unless `path` is root-owned, not group/other writable, and reached only through such directories.
+def trusted_file(path: Path) -> None:
+    """Fails unless `path` is a regular root-owned file, not group/other writable, under such directories.
 
-    An interpreter may be a chain of root-owned symlinks, as venvs use; every hop and the directories above it
-    are checked before the hop is followed, so no agent-owned link or directory can sit anywhere in the chain.
+    No symlink is accepted anywhere, not even for an interpreter: release venvs are created with --copies,
+    so nothing root reads or executes can be retargeted through a link.
     """
-    current = path
-    for _ in range(MAX_LINK_HOPS + 1):
-        _trusted_directories(current.parent)
-        metadata = _metadata(current)
-        if not (interpreter and stat.S_ISLNK(metadata.st_mode)):
-            break
-        if metadata.st_uid != 0:
-            raise VerifierConfigError(f"{current} is a symlink not owned by root")
-        current = Path(os.path.normpath(current.parent / _link_target(current)))
-    else:
-        raise VerifierConfigError(f"{path} has more than {MAX_LINK_HOPS} symlink hops")
+    _trusted_directories(path.parent)
+    metadata = _metadata(path)
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_mode & 0o022:
-        raise VerifierConfigError(f"{current} must be a regular root-owned file that only root can write")
-
-
-def _link_target(path: Path) -> str:
-    try:
-        return os.readlink(path)
-    except OSError as error:
-        raise VerifierConfigError(f"cannot read the link {path}: {error}") from None
+        raise VerifierConfigError(f"{path} must be a regular root-owned file that only root can write")
 
 
 def _trusted_directories(directory: Path) -> None:

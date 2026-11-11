@@ -105,7 +105,7 @@ def _gate(run_id: str, guard_unit: str, ledger: Ledger, journal: LocalJournal) -
 def _service_python() -> Path:
     """The interpreter running this root service, which the root gate reuses rather than one named in config."""
     python = Path(sys.executable)
-    trusted_file(python, interpreter=True)
+    trusted_file(python)
     return python
 
 
