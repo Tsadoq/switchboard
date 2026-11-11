@@ -103,23 +103,7 @@ class LocalJournal:
         self._path = path
         self._principals = dict(principals)
         self._clock = clock
-        if not path.is_absolute() or path.anchor != "/" or path != Path(os.path.normpath(path)):
-            raise StateError("invalid_state_path")
-        _check_ancestors(path.parent, allow_missing=True)
-        missing = [directory for directory in (path.parent, *path.parent.parents) if not directory.exists()]
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        _check_ancestors(path.parent)
-        for directory in reversed(missing):
-            _sync_directory(directory.parent)
-        try:
-            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        except FileExistsError:
-            fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
-        try:
-            _check_file(os.fstat(fd))
-        finally:
-            os.close(fd)
-        _sync_directory(path.parent)
+        prepare_private_file(path)
         with self._transaction(initialize=True) as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             if version not in (0, 2):
@@ -286,6 +270,32 @@ class LocalJournal:
         finally:
             if conn is not None:
                 conn.close()
+
+
+def prepare_private_file(path: Path) -> None:
+    """Create or open `path` as a private file whose every ancestor only root or this euid can change."""
+    if not path.is_absolute() or path.anchor != "/" or path != Path(os.path.normpath(path)):
+        raise StateError("invalid_state_path")
+    _check_ancestors(path.parent, allow_missing=True)
+    missing = [directory for directory in (path.parent, *path.parent.parents) if not directory.exists()]
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _check_ancestors(path.parent)
+    for directory in reversed(missing):
+        _sync_directory(directory.parent)
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+    try:
+        _check_file(os.fstat(fd))
+    finally:
+        os.close(fd)
+    _sync_directory(path.parent)
+
+
+def check_private_file(path: Path) -> None:
+    _check_ancestors(path.parent)
+    _check_file(path.lstat())
 
 
 def _ancestor_stat(path: Path) -> os.stat_result:
