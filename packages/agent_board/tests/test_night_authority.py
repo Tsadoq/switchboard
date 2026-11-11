@@ -6,6 +6,8 @@ from typing import Any
 
 import httpx
 import pytest
+from agent_board.night.board import SignedBoard
+from agent_board.night.sync import BoardRefused, BoardUnavailable
 from agent_board.night_authority import GrantUnavailable, NightAuthorityClient
 
 
@@ -99,6 +101,46 @@ def test_redirect_is_not_followed_and_denial_is_redacted() -> None:
         with pytest.raises(GrantUnavailable, match="authority_unavailable"):
             client.fetch_grant("run", "secret-fence")
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("status,error", [(401, BoardRefused), (409, BoardRefused), (503, BoardUnavailable)])
+def test_board_adapter_distinguishes_authority_refusal_from_outage(
+    status: int, error: type[Exception]
+) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"reason": "secret-do-not-log"})
+
+    with httpx.Client(base_url=Config().board_url, transport=httpx.MockTransport(handle)) as http:
+        board = SignedBoard(
+            "dev", NightAuthorityClient(Config(), http=http, signer=lambda _: "test-signature")
+        )
+        with pytest.raises(error) as caught:
+            board.state()
+    assert "secret-do-not-log" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"box": "vault"},
+        {"counter": True},
+        {"counter": -1},
+        {"journal_id": "bad"},
+        {"active": [{"id": "bad"}]},
+    ],
+)
+def test_board_adapter_rejects_malformed_state(change: dict[str, Any]) -> None:
+    state = {"box": "dev", "journal_id": None, "counter": 0, "active": []} | change
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=state)
+
+    with httpx.Client(base_url=Config().board_url, transport=httpx.MockTransport(handle)) as http:
+        board = SignedBoard(
+            "dev", NightAuthorityClient(Config(), http=http, signer=lambda _: "test-signature")
+        )
+        with pytest.raises(BoardRefused):
+            board.state()
 
 
 def test_unprivileged_default_signer_never_creates_a_key_or_sends(
