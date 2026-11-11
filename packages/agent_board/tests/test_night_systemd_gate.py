@@ -87,6 +87,7 @@ def test_the_run_unit_is_root_gated_root_execd_hardened_and_bound_to_the_guard()
         "--property=AmbientCapabilities=",
         "--property=ProtectSystem=strict",
         "--property=ReadWritePaths=/srv/night/pi /var/lib/switchboard-night/happier/pi /var/lib/switchboard-night",
+        "--property=InaccessiblePaths=/etc/switchboard-night/verifier_ed25519",
         "--property=PrivateTmp=yes",
         "--property=ProtectKernelTunables=yes",
         "--property=ProtectKernelModules=yes",

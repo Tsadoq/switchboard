@@ -82,7 +82,14 @@ def run_argv(
     native code. The unit properties bound what that root could do even if the drop were skipped.
     """
     agent, limits = spec.agent, config.limits
-    paths = (service_python, config_path, agent.workdir_root, agent.happier_home, config.state_path.parent)
+    paths = (
+        service_python,
+        config_path,
+        agent.workdir_root,
+        agent.happier_home,
+        config.state_path.parent,
+        config.signer_key,
+    )
     if any(_unsafe_in_command_line(str(path)) for path in paths):
         raise RunManagerError("a path in the night unit's command line or properties is unsafe")
     step = f"{service_python} -I -m agent_board.night"
@@ -103,6 +110,7 @@ def run_argv(
         "--property=AmbientCapabilities=",
         "--property=ProtectSystem=strict",
         f"--property=ReadWritePaths={agent.workdir_root} {agent.happier_home} {config.state_path.parent}",
+        f"--property=InaccessiblePaths={config.signer_key}",
         "--property=PrivateTmp=yes",
         "--property=ProtectKernelTunables=yes",
         "--property=ProtectKernelModules=yes",
