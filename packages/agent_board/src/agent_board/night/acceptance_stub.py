@@ -3,6 +3,7 @@ import signal
 import sys
 import time
 from collections.abc import Sequence
+from typing import NoReturn
 
 SLEEP_SECONDS = 3600
 
@@ -23,7 +24,7 @@ def main(argv: Sequence[str]) -> int:
     _sleep_forever()
 
 
-def _sleep_forever() -> int:
+def _sleep_forever() -> NoReturn:
     while True:
         time.sleep(SLEEP_SECONDS)
 
