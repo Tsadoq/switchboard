@@ -58,6 +58,13 @@ class RunBinder(Protocol):
 
     def bind(self, *, run_id: str, fence: str, uid: int, boot_id: str) -> None: ...
 
+    def settle(self, record: Record, reason: str) -> bool: ...
+
+    def reconcile(self) -> str | None: ...
+
+
+TRANSIENT_FREEZES = ("not_reconciled", "reconcile_failed:")
+
 
 class RunManager(Protocol):
     """Implementations raise RunManagerError, OSError or a subprocess error when an action's outcome is unknown."""
@@ -200,7 +207,19 @@ class Controller:
             return Response(request.request_id, request.run_id, "quarantined", "proof_incomplete")
         if seen.unit_active or seen.cgroup_populated is not False:
             return Response(request.request_id, request.run_id, "stopping")
+        if not self._binder.settle(record, "completed"):
+            return Response(request.request_id, request.run_id, "stopping", "awaiting_settlement")
         return Response(request.request_id, request.run_id, "stopped")
+
+    def sweep(self) -> None:
+        """Retries a reconciliation that only failed transiently and settles runs the guard stopped."""
+        frozen = self._binder.frozen
+        if frozen is not None and frozen.startswith(TRANSIENT_FREEZES):
+            self._binder.reconcile()
+        for record in self._journal.active():
+            if record.launch_claimed and record.state in ("stopping", "quarantined"):
+                reason = "deadline" if record.reason == "deadline_passed" else "completed"
+                self._binder.settle(record, reason)
 
     def _status(self, request: Request, allowed: frozenset[str]) -> Response:
         record = self._owned(request, allowed)

@@ -119,6 +119,18 @@ class Binder:
         self.frozen: str | None = None
         self.failure: SyncError | None = None
         self.bound: list[str] = []
+        self.settles: list[tuple[str, str]] = []
+        self.settle_result = True
+        self.reconciles = 0
+
+    def settle(self, record: Any, reason: str) -> bool:
+        self.settles.append((record.run_id, reason))
+        return self.settle_result
+
+    def reconcile(self) -> str | None:
+        self.reconciles += 1
+        self.frozen = None
+        return None
 
     def bind(self, *, run_id: str, fence: str, uid: int, boot_id: str) -> None:
         if self.failure is not None:
@@ -468,3 +480,28 @@ def test_a_bound_start_reports_running(rig: Rig) -> None:
 
     assert rig.ask("start", run_id)["status"] == "running"
     assert rig.binder.bound == [run_id]
+
+
+def test_stop_reports_stopped_only_after_the_board_settles_the_run(rig: Rig) -> None:
+    run_id = str(uuid4())
+    rig.ask("start", run_id)
+    rig.binder.settle_result = False
+
+    answer = rig.ask("stop", run_id)
+
+    assert answer["status"] == "stopping" and answer["reason"] == "awaiting_settlement", answer
+    assert rig.binder.settles == [(run_id, "completed")]
+
+
+def test_the_sweep_settles_runs_the_guard_stopped_and_retries_only_transient_freezes(rig: Rig) -> None:
+    run_id = str(uuid4())
+    rig.ask("start", run_id)
+    rig.journal.request_stop(run_id, FENCE)
+    rig.binder.frozen = "reconcile_failed:board down"
+
+    rig.controller.sweep()
+    rig.binder.frozen = "counter_mismatch"
+    rig.controller.sweep()
+
+    assert rig.binder.reconciles == 1, "a real mismatch was retried as if it were transient"
+    assert rig.binder.settles == [(run_id, "completed"), (run_id, "completed")], rig.binder.settles

@@ -9,7 +9,7 @@ import pytest
 from agent_board import night_state
 from agent_board.night.ledger import Ledger
 from agent_board.night.sync import Ack, BoardRefused, BoardState, BoardSync, BoardUnavailable, SyncError
-from agent_board.night_inspection import Binding, InspectionError
+from agent_board.night_inspection import Binding, EmptyObservation, InspectionError
 from agent_board.night_state import ClockReading, Grant, LocalJournal
 
 BOOT = str(uuid4())
@@ -39,6 +39,9 @@ class Board:
         self.acks: dict[str, Ack] = {}
         self.calls: list[str] = []
         self.lose_next_reply = False
+        self.keep_held = False
+        self.drift_after_evidence = False
+        self.evidence_payloads: list[dict[str, Any]] = []
 
     def state(self) -> BoardState:
         return BoardState("dev", self.journal_id, self.counter, frozenset(self.active))
@@ -62,7 +65,22 @@ class Board:
         return self._apply(payload["receipt_id"])
 
     def evidence(self, run_id: str, payload: Mapping[str, Any]) -> Ack:
-        raise AssertionError("not used here")
+        self.calls.append("evidence")
+        self.evidence_payloads.append(dict(payload))
+        if payload["receipt_id"] in self.acks:
+            return self._reply(self.acks[payload["receipt_id"]])
+        if (
+            payload["journal_id"] != self.journal_id
+            or payload["counter"] != self.counter
+            or run_id not in self.active
+        ):
+            raise BoardRefused("stale_counter")
+        if not self.keep_held:
+            self.active.discard(run_id)
+        ack = self._apply(payload["receipt_id"])
+        if self.drift_after_evidence:
+            self.counter += 1
+        return ack
 
     def _apply(self, receipt_id: str) -> Ack:
         assert self.journal_id is not None
@@ -80,11 +98,17 @@ class Board:
 class Inspector:
     def __init__(self) -> None:
         self.failure: InspectionError | None = None
+        self.not_stopped: InspectionError | None = None
 
     def capture(self, *, run_id: str, uid: int, boot_id: str) -> Binding:
         if self.failure is not None:
             raise self.failure
         return Binding(run_id, uid, boot_id, "b" * 32)
+
+    def stopped(self, binding: Binding) -> EmptyObservation:
+        if self.not_stopped is not None:
+            raise self.not_stopped
+        return EmptyObservation(binding, cgroup_present=False, unit_loaded=False)
 
 
 class Rig:
@@ -203,3 +227,77 @@ def test_a_unit_that_cannot_be_inspected_is_not_bound(rig: Rig) -> None:
     with pytest.raises(SyncError, match="binding_conflict"):
         rig.bind(rig.reserve())
     assert rig.board.calls == ["bootstrap"], rig.board.calls
+
+
+def _stopping_run(rig: Rig) -> Any:
+    rig.sync.reconcile()
+    run_id = rig.reserve()
+    rig.journal.claim_start(run_id, FENCE)
+    rig.bind(run_id)
+    return rig.journal.request_stop(run_id, FENCE)
+
+
+def test_a_proven_empty_run_is_reported_once_and_released_when_the_board_agrees(rig: Rig) -> None:
+    record = _stopping_run(rig)
+
+    settled = rig.sync.settle(record, "completed")
+
+    assert settled, "a proven, board-settled run was not released"
+    assert rig.journal.active() == ()
+    [payload] = rig.board.evidence_payloads
+    assert (
+        payload["outcome"] == "empty"
+        and payload["runtime_seconds"] is None
+        and payload["reason"] == "completed"
+    )
+    assert payload["counter"] == 2 and payload["cgroup"].endswith(
+        f"switchboard-night-{record.run_id}.service"
+    )
+
+
+def test_a_run_the_board_still_holds_keeps_its_slot(rig: Rig) -> None:
+    record = _stopping_run(rig)
+    rig.board.keep_held = True
+
+    assert not rig.sync.settle(record, "deadline")
+    assert [each.run_id for each in rig.journal.active()] == [record.run_id]
+
+
+def test_no_evidence_is_sent_for_a_run_that_is_not_proven_stopped(rig: Rig) -> None:
+    record = _stopping_run(rig)
+    rig.inspector.not_stopped = InspectionError("populated_or_unknown")
+
+    assert not rig.sync.settle(record, "completed")
+    assert rig.board.evidence_payloads == []
+
+
+def test_a_lost_evidence_reply_is_resent_identically_and_applied_once(rig: Rig) -> None:
+    record = _stopping_run(rig)
+    rig.board.lose_next_reply = True
+
+    first = rig.sync.settle(record, "completed")
+    second = rig.sync.settle(record, "completed")
+
+    assert not first and second
+    assert rig.board.counter == 3, rig.board.counter
+    assert {payload["receipt_id"] for payload in rig.board.evidence_payloads} == {
+        rig.board.evidence_payloads[0]["receipt_id"]
+    }
+
+
+def test_counter_drift_after_the_report_keeps_the_slot(rig: Rig) -> None:
+    record = _stopping_run(rig)
+    rig.board.drift_after_evidence = True
+
+    assert not rig.sync.settle(record, "completed")
+    assert [each.run_id for each in rig.journal.active()] == [record.run_id]
+
+
+def test_a_run_never_bound_with_the_board_is_not_released(rig: Rig) -> None:
+    rig.sync.reconcile()
+    run_id = rig.reserve()
+    rig.journal.claim_start(run_id, FENCE)
+    record = rig.journal.request_stop(run_id, FENCE)
+
+    assert not rig.sync.settle(record, "completed")
+    assert rig.board.evidence_payloads == []

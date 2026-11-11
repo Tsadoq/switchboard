@@ -114,6 +114,18 @@ class Ledger:
                 for row in rows
             )
 
+    def evidence(self, run_id: str) -> tuple[Pending, bool] | None:
+        """The run's evidence message and whether the board acknowledged it, if one was ever composed."""
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM receipts WHERE action = 'evidence' AND run_id = ? ORDER BY seq LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            pending = Pending(row["receipt_id"], row["action"], row["run_id"], json.loads(row["payload"]))
+            return pending, bool(row["acked"])
+
     def acknowledge(self, receipt_id: str, *, journal_id: str, counter: int) -> None:
         with self._transaction() as conn:
             current = conn.execute("SELECT journal_id, acked_counter FROM identity").fetchone()

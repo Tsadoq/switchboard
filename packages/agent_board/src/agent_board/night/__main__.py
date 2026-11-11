@@ -3,6 +3,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -20,6 +21,7 @@ from agent_board.night_inspection import Inspector, LiveHost
 from agent_board.night_state import LocalJournal
 
 LEDGER_NAME = "ledger.sqlite3"
+SWEEP_SECONDS = 30
 logger = logging.getLogger("agent_board.night")
 
 
@@ -57,7 +59,17 @@ def _serve(config: VerifierConfig, config_path: Path, ledger: Ledger, journal: L
     sync.reconcile()
     runs = SystemdRuns(config, config_path, ledger, inspector, LiveCommands())
     controller = Controller(config, journal, board, runs, sync)
+    threading.Thread(target=_sweep_forever, args=(controller,), name="night-sweep", daemon=True).start()
     server.serve(server.inherited_listener(), controller)
+
+
+def _sweep_forever(controller: Controller) -> None:
+    while True:
+        time.sleep(SWEEP_SECONDS)
+        try:
+            controller.sweep()
+        except Exception:
+            logger.exception("night sweep failed; retrying in %ds", SWEEP_SECONDS)
 
 
 def _guard(config: VerifierConfig, config_path: Path, ledger: Ledger, journal: LocalJournal) -> None:

@@ -5,8 +5,8 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from agent_board.night.ledger import Ledger, LedgerError, Pending
-from agent_board.night_inspection import Binding, InspectionError
-from agent_board.night_state import LocalJournal
+from agent_board.night_inspection import Binding, EmptyObservation, InspectionError
+from agent_board.night_state import LocalJournal, Record, StateError
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,8 @@ class VerifierBoard(Protocol):
 
 class BindingInspector(Protocol):
     def capture(self, *, run_id: str, uid: int, boot_id: str) -> Binding: ...
+
+    def stopped(self, binding: Binding) -> EmptyObservation: ...
 
 
 class BoardSync:
@@ -113,6 +115,73 @@ class BoardSync:
                     "cgroup": binding.cgroup,
                 },
             )
+        )
+
+    def settle(self, record: Record, reason: str) -> bool:
+        """Reports a proven-empty run to the board and frees its local slot only once the board agrees.
+
+        Runtime is always reported unknown (a full charge): the unit's monotonic timestamps exclude suspend,
+        which the budget counts. Any doubt, at any step, keeps the slot.
+        """
+        if self.frozen is not None or not record.launch_claimed:
+            return False
+        recorded = self._ledger.binding(record.run_id)
+        if recorded is None or not recorded.server_acked:
+            return False
+        binding = Binding(record.run_id, recorded.uid, recorded.boot_id, recorded.invocation_id)
+        try:
+            self._inspector.stopped(binding)
+            self._report(record, binding, recorded.cgroup, reason)
+            if not self._board_released(record.run_id):
+                return False
+            self._journal.release_settled(
+                record.run_id, record.fence, observation=self._inspector.stopped(binding)
+            )
+        except (InspectionError, SyncError, LedgerError, StateError) as error:
+            logger.warning("night run %s stays held: %s", record.run_id, error)
+            return False
+        return True
+
+    def _report(self, record: Record, binding: Binding, cgroup: str, reason: str) -> None:
+        existing = self._ledger.evidence(record.run_id)
+        if existing is not None:
+            pending, acked = existing
+            if not acked:
+                self._send_and_acknowledge(pending)
+            return
+        identity = self._ledger.identity()
+        if identity.journal_id is None:
+            raise SyncError("not_bootstrapped")
+        receipt_id = str(uuid4())
+        self._deliver(
+            Pending(
+                receipt_id,
+                "evidence",
+                record.run_id,
+                {
+                    "fence": record.fence,
+                    "journal_id": identity.journal_id,
+                    "counter": identity.acked_counter,
+                    "receipt_id": receipt_id,
+                    "boot_id": binding.boot_id,
+                    "invocation_id": binding.invocation_id,
+                    "cgroup": cgroup,
+                    "outcome": "empty",
+                    "runtime_seconds": None,
+                    "reason": reason,
+                },
+            )
+        )
+
+    def _board_released(self, run_id: str) -> bool:
+        fresh = self._board.state()
+        identity = self._ledger.identity()
+        return (
+            fresh.box == self._box
+            and fresh.journal_id == identity.journal_id
+            and fresh.counter == identity.acked_counter
+            and not self._ledger.unacknowledged()
+            and run_id not in fresh.active_run_ids
         )
 
     def _reconcile(self) -> str | None:
