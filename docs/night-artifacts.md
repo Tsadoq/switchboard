@@ -4,15 +4,27 @@ The night-artifacts workflow prepares both project wheels for root installs with
 building source on an agent box. Adding this workflow does not authorize creating a
 tag or release, root installation, test identities, enrollment or activation.
 
-Only the human creates and pushes a publication tag after the source is independently
-reviewed, CI is green and the exact commit is on main. The tag format is:
+Publication is currently gated by review and convention, not an enforced human-only
+identity boundary. A tag ruleset cannot distinguish a human from agents using the same
+GitHub account/app credentials. Enforced separation would require an owner-authorized
+restricted agent identity or approval credentials unavailable to agents. Do not create
+identities, change repository permissions or add tokens as part of this source change.
+No release proves that a human pressed the button. Installation still requires the
+independently reviewed checksum pins in cluster-state and explicit run authorization.
+
+By policy, only the human creates and pushes a publication tag after the source is
+independently reviewed, CI is green and the exact commit is on main. This workflow
+cannot enforce that actor distinction with the credentials currently shared.
+The tag format is:
 
     night-artifacts-<full 40-character commit>
 
 The workflow rejects a tag that does not name its checked-out commit or whose commit
 is not an ancestor of origin/main. It runs lint, format, mypy, the full tests with an
 isolated home, and byte-for-byte lock-export drift checks before building. The build
-job has contents:read. Only its separate publishing job has contents:write.
+job has contents:read. Only its separate publishing job has contents:write. All four
+actions are pinned to full commit SHAs, with version labels in their step names. The
+release build imports no Actions cache, and checkout persists no credentials.
 
 The backend uv-build==0.13.7 is a locked development dependency. uv is pinned to
 0.12.5 in this workflow, the source commit timestamp is SOURCE_DATE_EPOCH, and both
@@ -37,8 +49,8 @@ The publishing job rechecks the source commit and checksums and creates a releas
 for the existing exact tag. It never overwrites or clobbers an existing release.
 No workflow is triggered by an ordinary PR or main push to publish these assets.
 
-The managed role must pin the repository, exact tag/commit and expected SHA256 of
-each downloaded wheel and manifest. SHA256SUMS is an integrity record, not a claim
+The managed role must pin the repository, exact tag/commit, the expected SHA256 of
+SHA256SUMS itself, and the expected SHA256 of each downloaded wheel and manifest. SHA256SUMS is an integrity record, not a claim
 that source review, authorization or acceptance happened. Check SOURCE_COMMIT too.
 Install dependencies with --require-hashes --only-binary=:all: and project wheels
 with --no-deps into fixed root-owned releases. Never substitute a source checkout,

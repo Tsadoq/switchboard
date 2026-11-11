@@ -14,9 +14,11 @@ jobs:
     outputs:
       commit: ${{ steps.source.outputs.commit }}
     steps:
-      - uses: actions/checkout@v7.0.1
+      - name: Checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Validate the reviewed source tag
         id: source
         env:
@@ -29,11 +31,12 @@ jobs:
           git merge-base --is-ancestor "$COMMIT" origin/main
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
           echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)" >> "$GITHUB_ENV"
-      - uses: astral-sh/setup-uv@v10.0.1
+      - name: Set up uv v10.0.1
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
         with:
           version: 0.12.5
           python-version: '3.13'
-          enable-cache: true
+          enable-cache: false
       - run: uv sync --all-packages --locked
       - run: uv run --locked ruff check . deploy/agent-board-update
       - run: uv run --locked ruff format --check . deploy/agent-board-update
@@ -63,7 +66,8 @@ jobs:
           cd dist
           sha256sum agent_board-0.1.0-py3-none-any.whl board-0.1.0-py3-none-any.whl night-verifier-requirements.txt night-smoke-requirements.txt uv.lock SOURCE_COMMIT BUILD_INFO.txt > SHA256SUMS
           sha256sum -c SHA256SUMS
-      - uses: actions/upload-artifact@v4.6.2
+      - name: Upload artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: night-artifacts-${{ steps.source.outputs.commit }}
           path: dist/*
@@ -76,7 +80,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4.3.0
+      - name: Download artifact v4.3.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: night-artifacts-${{ needs.build.outputs.commit }}
           path: dist
@@ -90,5 +95,6 @@ jobs:
           set -euo pipefail
           test "$TAG" = "night-artifacts-$COMMIT"
           test "$(tr -d '\n' < dist/SOURCE_COMMIT)" = "$COMMIT"
+          test "$(gh api "repos/$GH_REPO/commits/$TAG" --jq .sha)" = "$COMMIT"
           (cd dist && sha256sum -c SHA256SUMS)
           gh release create "$TAG" dist/* --verify-tag --title "Night artifacts $COMMIT" --notes "Commit-bound build artifacts. These assets do not authorize root installation, enrollment or pilot activation."
