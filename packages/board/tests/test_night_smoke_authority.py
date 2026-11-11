@@ -1,5 +1,6 @@
 import base64
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,9 @@ def test_smoke_authority_uses_real_roles_and_separate_bootstrap_admission(
         )
 
     with calendar(config), TestClient(smoke_app(config)) as client:
+        for name, module in tuple(sys.modules.items()):
+            if name.startswith("board.") and hasattr(module, "window_for"):
+                assert vars(module)["window_for"] == config.window, name
         assert client.portal is not None
         with pytest.raises(ValueError, match="not_bootstrapped"):
             client.portal.call(admit, config)

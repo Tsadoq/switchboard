@@ -30,6 +30,7 @@ dev = [
     "pytest-timeout>=2,<3",
     "pytest-xdist>=3,<4",
     "ruff>=0.17.3,<0.18",
+    "uv-build==0.13.7",
 ]
 
 [tool.ruff]
