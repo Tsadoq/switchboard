@@ -30,6 +30,10 @@ class GrantUnavailable(RuntimeError):
     pass
 
 
+class AuthorityRefused(GrantUnavailable):
+    pass
+
+
 class AuthorityConfig(Protocol):
     @property
     def principal(self) -> str: ...
@@ -101,6 +105,8 @@ class NightAuthorityClient:
                     timeout=5,
                 ) as client:
                     response = client.post("/api/night/verifier", json=body)
+            if response.status_code in (401, 409):
+                raise AuthorityRefused("authority_refused")
             response.raise_for_status()
             result = response.json()
             if not isinstance(result, dict):

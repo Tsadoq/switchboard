@@ -10,6 +10,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 import pytest
+from agent_board.night.board import SignedBoard
 from agent_board.night_authority import AuthorityHTTP, NightAuthorityClient
 from agent_board.night_inspection import unit_cgroup
 from board.app import create_app
@@ -92,11 +93,13 @@ def test_real_signed_client_reaches_role_scoped_server_and_settles(case: Case) -
     client = NightAuthorityClient(
         ClientConfig(), http=cast(AuthorityHTTP, case.client), signer=case.service.sign
     )
-    assert client.request("night.state", "self", {})["journal_id"] == case.journal
+    board = SignedBoard("dev", client)
+    assert board.state().journal_id == case.journal
+    assert board.bootstrap({"journal_id": case.journal, "receipt_id": str(uuid4())}).counter == 0
     run = case.run()
-    assert client.fetch_grant(run.id, run.fence).principal == "pi@dev"
+    assert board.fetch_grant(run.id, run.fence).principal == "pi@dev"
     binding = case.binding(run)
-    assert client.request("night.binding", run.id, binding)["counter"] == 1
+    assert board.binding(run.id, binding).counter == 1
     evidence = binding | {
         "counter": 1,
         "receipt_id": str(uuid4()),
@@ -104,9 +107,9 @@ def test_real_signed_client_reaches_role_scoped_server_and_settles(case: Case) -
         "runtime_seconds": None,
         "reason": "completed",
     }
-    assert client.request("night.evidence", run.id, evidence)["state"] == "finished"
-    state = client.request("night.state", "self", {})
-    assert state["counter"] == 2 and state["active"] == []
+    assert board.evidence(run.id, evidence).counter == 2
+    state = board.state()
+    assert state.counter == 2 and state.active_run_ids == frozenset()
 
 
 def test_bootstrap_retry_returns_fresh_state_not_a_stale_counter(case: Case) -> None:
