@@ -62,16 +62,18 @@ def _serve(config: VerifierConfig, config_path: Path, ledger: Ledger, journal: L
 
 def _guard(config: VerifierConfig, config_path: Path, ledger: Ledger, journal: LocalJournal) -> None:
     runs = SystemdRuns(config, config_path, ledger, Inspector(LiveHost()), LiveCommands())
+    timer = guard.BoottimeTimer()
     deadline_guard = guard.Guard(
         journal=journal,
         ledger=ledger,
         runs=runs,
+        timer=timer,
         stop_grace_seconds=config.limits.stop_grace_seconds,
         invocation_id=os.environ.get("INVOCATION_ID", ""),
         boot_id=_boot_id,
         boottime=lambda: time.clock_gettime(time.CLOCK_BOOTTIME),
     )
-    guard.serve(deadline_guard, guard.systemd_notify(os.environ), guard.boottime_timer())
+    guard.serve(deadline_guard, timer, guard.systemd_notify(os.environ))
 
 
 def _gate(run_id: str, ledger: Ledger, journal: LocalJournal) -> bool:

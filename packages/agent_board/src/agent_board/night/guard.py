@@ -18,6 +18,14 @@ class Stopper(Protocol):
     def stop(self, unit: str) -> None: ...
 
 
+class Timer(Protocol):
+    def arm(self, deadline_boottime: float) -> None:
+        """Installs the absolute CLOCK_BOOTTIME expiry in the kernel; raises if it could not."""
+        ...
+
+    def wait(self) -> None: ...
+
+
 class Guard:
     """The root deadline guard for this box's night runs, independent of the request controller.
 
@@ -31,6 +39,7 @@ class Guard:
         journal: LocalJournal,
         ledger: Ledger,
         runs: Stopper,
+        timer: Timer,
         stop_grace_seconds: int,
         invocation_id: str,
         boot_id: Callable[[], str],
@@ -40,6 +49,7 @@ class Guard:
         self._journal = journal
         self._ledger = ledger
         self._runs = runs
+        self._timer = timer
         self._grace = stop_grace_seconds
         self._invocation_id = invocation_id
         self._boot_id = boot_id
@@ -48,27 +58,31 @@ class Guard:
         self._stopped: set[str] = set()
 
     def tick(self) -> None:
+        """Stops what is due, installs the next kernel expiry, and only then publishes arm rows.
+
+        An arm row is evidence that an enforcer is already armed, so it is never written before the timer.
+        """
         boot = self._boot_id()
-        for record in self._journal.active():
-            if record.boot_id == boot and record.state in ("reserved", "starting"):
-                self._ledger.arm(
-                    Arm(
-                        record.run_id,
-                        boot,
-                        self._invocation_id,
-                        record.deadline_boottime,
-                        record.deadline_utc,
-                    )
-                )
+        records = self._journal.active()
+        for record in records:
             if record.launch_claimed and self._due(record, boot):
                 self._stop(record)
+        to_arm = [
+            record
+            for record in records
+            if record.boot_id == boot and record.state in ("reserved", "starting")
+        ]
+        self._timer.arm(self._next_wake(records))
+        for record in to_arm:
+            self._ledger.arm(
+                Arm(record.run_id, boot, self._invocation_id, record.deadline_boottime, record.deadline_utc)
+            )
 
-    def next_wake(self) -> float:
-        """The boot-time clock reading at which the guard must look again."""
+    def _next_wake(self, records: tuple[Record, ...]) -> float:
         deadlines = [
             record.deadline_boottime - self._grace
-            for record in self._journal.active()
-            if record.launch_claimed and record.run_id not in self._stopped
+            for record in records
+            if record.state in ("reserved", "starting") and record.run_id not in self._stopped
         ]
         return min([self._boottime() + POLL_SECONDS, *deadlines])
 
@@ -94,23 +108,28 @@ class Guard:
                 logger.error("could not record the stop of %s: %s", record.run_id, error)
 
 
-def serve(guard: Guard, notify: Callable[[str], None], wait_until: Callable[[float], None]) -> NoReturn:
+def serve(guard: Guard, timer: Timer, notify: Callable[[str], None]) -> NoReturn:
     guard.tick()
     notify("READY=1")
     while True:
-        wait_until(guard.next_wake())
+        timer.wait()
         guard.tick()
 
 
-def boottime_timer() -> Callable[[float], None]:
-    timer = os.timerfd_create(time.CLOCK_BOOTTIME, flags=os.TFD_CLOEXEC)
+class BoottimeTimer:
+    def __init__(self) -> None:
+        self._fd = os.timerfd_create(time.CLOCK_BOOTTIME, flags=os.TFD_CLOEXEC)
 
-    def wait_until(deadline: float) -> None:
-        os.timerfd_settime(timer, flags=os.TFD_TIMER_ABSTIME, initial=max(deadline, 1e-9))
-        select.select([timer], [], [])
-        os.read(timer, 8)
+    def arm(self, deadline_boottime: float) -> None:
+        os.timerfd_settime(self._fd, flags=os.TFD_TIMER_ABSTIME, initial=max(deadline_boottime, 1e-9))
+        if os.timerfd_gettime(self._fd)[0] <= 0 and deadline_boottime > time.clock_gettime(
+            time.CLOCK_BOOTTIME
+        ):
+            raise OSError("the boot-time timer did not arm")
 
-    return wait_until
+    def wait(self) -> None:
+        select.select([self._fd], [], [])
+        os.read(self._fd, 8)
 
 
 def systemd_notify(environ: Mapping[str, str]) -> Callable[[str], None]:

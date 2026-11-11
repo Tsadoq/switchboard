@@ -7,8 +7,8 @@ from uuid import uuid4
 import pytest
 from agent_board import night_state
 from agent_board.night.controller import unit_name
-from agent_board.night.guard import Guard, boottime_timer, systemd_notify
-from agent_board.night.ledger import Ledger, Pending
+from agent_board.night.guard import BoottimeTimer, Guard, serve, systemd_notify
+from agent_board.night.ledger import Arm, Ledger, Pending
 from agent_board.night_state import ClockReading, Grant, LocalJournal
 
 BOOT = str(uuid4())
@@ -39,6 +39,32 @@ class Stopper:
         self.stopped.append(unit)
 
 
+class RecordingLedger(Ledger):
+    def __init__(self, path: Path, events: list[str]) -> None:
+        super().__init__(path)
+        self.events = events
+
+    def arm(self, arm: Arm) -> None:
+        self.events.append("arm")
+        super().arm(arm)
+
+
+class Timer:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.armed: list[float] = []
+        self.failure: OSError | None = None
+
+    def arm(self, deadline_boottime: float) -> None:
+        if self.failure is not None:
+            raise self.failure
+        self.events.append("timer")
+        self.armed.append(deadline_boottime)
+
+    def wait(self) -> None:
+        raise StopIteration
+
+
 class Rig:
     def __init__(self, tmp_path: Path) -> None:
         self.boottime = 100.0
@@ -49,14 +75,17 @@ class Rig:
             principals={"pi@huginn": UID},
             clock=lambda: ClockReading(BOOT, self.boottime, self.utc),
         )
-        self.ledger = Ledger(tmp_path / "state" / "ledger.sqlite3")
+        self.events: list[str] = []
+        self.ledger = RecordingLedger(tmp_path / "state" / "ledger.sqlite3", self.events)
         self.stopper = Stopper()
+        self.timer = Timer(self.events)
 
     def guard(self, invocation: str = FIRST) -> Guard:
         return Guard(
             journal=self.journal,
             ledger=self.ledger,
             runs=self.stopper,
+            timer=self.timer,
             stop_grace_seconds=5,
             invocation_id=invocation,
             boot_id=lambda: BOOT,
@@ -148,21 +177,53 @@ def test_a_reserved_run_that_never_launched_is_not_stopped(rig: Rig) -> None:
     assert rig.stopper.stopped == []
 
 
-def test_the_guard_wakes_for_the_earliest_deadline_or_the_next_poll(rig: Rig) -> None:
+def test_the_kernel_timer_is_armed_before_any_arm_row_is_written(rig: Rig) -> None:
+    rig.launched_run()
+
+    rig.guard().tick()
+
+    assert rig.events == ["timer", "arm"], rig.events
+
+
+def test_no_arm_row_and_no_ready_when_the_timer_cannot_be_armed(rig: Rig) -> None:
+    run_id = rig.launched_run()
+    rig.timer.failure = OSError("timerfd_settime failed")
+    sent: list[str] = []
+
+    with pytest.raises(OSError):
+        serve(rig.guard(), rig.timer, sent.append)
+
+    assert not rig.ready(run_id, FIRST), "an arm row was published without an armed timer"
+    assert sent == [], "READY was sent without an armed timer"
+
+
+def test_ready_is_sent_only_after_the_first_armed_tick(rig: Rig) -> None:
+    rig.launched_run()
+
+    with pytest.raises(StopIteration):
+        serve(rig.guard(), rig.timer, rig.events.append)
+
+    assert rig.events == ["timer", "arm", "READY=1"], rig.events
+
+
+def test_the_timer_is_set_for_the_earliest_deadline_or_the_next_poll(rig: Rig) -> None:
     guard = rig.guard()
-    idle = guard.next_wake()
+    guard.tick()
     rig.launched_run(deadline_boottime=110.0)
     rig.boottime = 104.8
 
-    assert idle == pytest.approx(101.0)
-    assert guard.next_wake() == pytest.approx(105.0)
+    guard.tick()
+
+    assert rig.timer.armed[0] == pytest.approx(101.0)
+    assert rig.timer.armed[1] == pytest.approx(105.0)
 
 
-def test_the_boottime_timer_waits_until_an_absolute_deadline() -> None:
-    wait_until = boottime_timer()
+def test_the_boottime_timer_arms_in_the_kernel_and_waits_for_an_absolute_deadline() -> None:
+    timer = BoottimeTimer()
     target = time.clock_gettime(time.CLOCK_BOOTTIME) + 0.05
 
-    wait_until(target)
+    timer.arm(target)
+    timer.wait()
 
     assert time.clock_gettime(time.CLOCK_BOOTTIME) >= target
 
