@@ -24,7 +24,9 @@ _EXPORT = (
         pytest.param("deploy/night-smoke-requirements.txt", ("--all-packages",), id="smoke"),
     ],
 )
-def test_root_install_requirements_match_the_lock(tmp_path: Path, artifact: str, scope: tuple[str, ...]) -> None:
+def test_root_install_requirements_match_the_lock(
+    tmp_path: Path, artifact: str, scope: tuple[str, ...]
+) -> None:
     uv = shutil.which("uv")
     assert uv is not None, "uv is required to check the hash-pinned root install requirements"
     exported = tmp_path / "requirements.txt"
