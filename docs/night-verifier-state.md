@@ -54,12 +54,23 @@ The library does not create a root signer, execute a command or confer permissio
   This predeployment revision uses format 2 for the separate uncertainty latch; format 1
   is refused rather than silently reinterpreted. No live root journal has been installed.
 
-## Deliberately absent
+## Trusted settlement boundary
 
-There is no release/settlement interface for launch-claimed work in this slice. The
-future root-owned-cgroup inspector and trusted controller must supply actual binding,
-stop and termination evidence before such a transition is added. There is no method
-that accepts an agent's `stopped=True`, idle report or user-cgroup emptiness as proof.
+`release_settled(run_id, fence, observation=...)` is a trusted-controller-only transition
+for launched stopping/quarantined work. It requires an `EmptyObservation` from the
+root inspector, matching run, UID and boot, and an unchanged current boot. It preserves
+the historical launch/uncertainty flags, marks the row stopped with reason
+`server_settled`, and never makes the UUID launchable again. Repeating the same fenced
+settlement is idempotent. There is no method accepting an agent's `stopped=True`, idle
+report or user-cgroup emptiness as proof.
+
+Before calling it, the controller must persist the evidence acknowledgment and check
+fresh authoritative state: matching box/journal UUID, counter equal to the fully
+acknowledged local ledger, no pending mutation, and this run absent from server-active
+runs. Acknowledgment alone is not settlement: overrun/quarantined runs remain active.
+It must then obtain `Inspector.stopped` on the exact ledger binding immediately before
+release. The journal cannot independently authenticate remote settlement and must not
+be exposed as a socket action or treated as a recovery override.
 
 Local intent state is not sufficient for external budget refunds or recovery after
 missing journals, snapshot restore or possible rollback. Reconcile authoritative server

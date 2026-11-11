@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID
 
+from agent_board.night_inspection import EmptyObservation
 from agent_board.night_protocol import FrameError, Request
 
 MIN_START_SECONDS = 6
@@ -213,6 +214,31 @@ class LocalJournal:
             conn.execute(
                 "UPDATE runs SET state = 'quarantined', uncertain = 1, stop_requested = 1, reason = COALESCE(reason, ?) WHERE run_id = ?",
                 (reason, run_id),
+            )
+            return self._fenced(conn, run_id, fence)
+
+    def release_settled(self, run_id: str, fence: str, *, observation: EmptyObservation) -> Record:
+        if type(observation) is not EmptyObservation:
+            raise StateError("invalid_stop_observation")
+        with self._transaction() as conn:
+            now = self._clock()
+            self._refresh(conn, now)
+            record = self._fenced(conn, run_id, fence)
+            binding = observation.binding
+            if (binding.run_id, binding.uid, binding.boot_id) != (
+                record.run_id,
+                record.uid,
+                record.boot_id,
+            ) or now.boot_id != record.boot_id:
+                raise StateError("stop_binding_conflict")
+            if not record.launch_claimed:
+                raise StateError("not_claimed")
+            if record.state == "stopped" and record.reason == "server_settled":
+                return record
+            if record.state not in ("stopping", "quarantined") or not record.stop_requested:
+                raise StateError("not_stopping")
+            conn.execute(
+                "UPDATE runs SET state = 'stopped', reason = 'server_settled' WHERE run_id = ?", (run_id,)
             )
             return self._fenced(conn, run_id, fence)
 
