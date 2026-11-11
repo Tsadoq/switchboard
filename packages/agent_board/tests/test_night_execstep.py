@@ -270,7 +270,7 @@ def test_a_late_exec_after_latch_stop_refuses_before_any_drop_or_exec(rig: Rig) 
         raise FileNotFoundError(errno.ENOENT, "absent", str(path))
 
     outcome = latch_stop(
-        _config(), rig.journal, StoppedManager(), run_id=rig.run_id, fence=FENCE, events=absent
+        _config(), lambda: rig.journal, StoppedManager(), run_id=rig.run_id, fence=FENCE, events=absent
     )
 
     assert outcome.latched == [rig.run_id], outcome

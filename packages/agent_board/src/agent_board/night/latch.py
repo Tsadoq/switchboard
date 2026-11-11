@@ -47,7 +47,7 @@ class Outcome:
 
 def latch_stop(
     config: VerifierConfig,
-    journal: LocalJournal,
+    open_journal: Callable[[], LocalJournal],
     manager: Manager,
     *,
     run_id: str | None,
@@ -56,40 +56,34 @@ def latch_stop(
 ) -> Outcome:
     """Durably requests stop for night runs once the only journal writer, the verifier, is proven gone.
 
-    A named run needs its fence. --all-open (run_id None) latches every open run on root's authority alone,
+    Arguments are validated and the verifier proven stopped before the journal is even opened, since opening
+    it already refreshes expiry state. It only latches: no run is marked stopped, no slot is released.
+    A named run needs its fence; --all-open (run_id None) latches every open run on root's authority alone,
     which is sound only because no request writer can still be adding or starting runs.
     """
+    if run_id is not None and (_UUID.fullmatch(run_id) is None or not fence):
+        return Outcome(refused="invalid_run")
     for unit in (config.verifier_socket, config.verifier_unit):
         why = unit_not_stopped(manager, unit, events)
         if why is not None:
             return Outcome(refused=f"{unit}: {why}")
-    if run_id is None:
-        return _latch_all(journal)
-    if _UUID.fullmatch(run_id) is None or not fence:
-        return Outcome(refused="invalid_run")
     try:
-        before = next((each for each in journal.active() if each.run_id == run_id), None)
-        record = journal.request_stop(run_id, fence)
+        journal = open_journal()
+        if run_id is None or fence is None:
+            return _latch_all(journal)
+        record, changed = journal.latch_stop(run_id, fence)
     except StateError as error:
         reason = str(error)
-        if reason == "stale_fence":
-            return Outcome(refused="unknown_run_or_wrong_fence")
-        return Outcome(refused=reason)
-    if record.state == "stopped" or (before is not None and before.stop_requested):
-        return Outcome(already=[run_id])
-    return Outcome(latched=[run_id])
+        return Outcome(refused="unknown_run_or_wrong_fence" if reason == "stale_fence" else reason)
+    return Outcome(latched=[run_id]) if changed else Outcome(already=[record.run_id])
 
 
 def _latch_all(journal: LocalJournal) -> Outcome:
     outcome = Outcome()
-    try:
-        open_runs = journal.active()
-        for record in open_runs:
-            before = record.stop_requested
-            journal.request_stop(record.run_id, record.fence)
-            (outcome.already if before else outcome.latched).append(record.run_id)
-    except StateError as error:
-        return Outcome(latched=outcome.latched, already=outcome.already, refused=str(error))
+    open_runs = journal.active()
+    for record in open_runs:
+        _, changed = journal.latch_stop(record.run_id, record.fence)
+        (outcome.latched if changed else outcome.already).append(record.run_id)
     outcome.no_run = not open_runs
     return outcome
 

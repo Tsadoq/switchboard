@@ -1,6 +1,8 @@
 import errno
+import io
 import json
 import os
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -9,6 +11,7 @@ from uuid import uuid4
 import pytest
 from agent_board import night_state
 from agent_board.night import __main__ as entry
+from agent_board.night import latch
 from agent_board.night.config import VerifierConfigError, parse
 from agent_board.night.latch import latch_stop, unit_not_stopped
 from agent_board.night_state import ClockReading, Grant, LocalJournal
@@ -50,8 +53,10 @@ class Manager:
     def __init__(self) -> None:
         self.outputs: dict[str, str] = {}
         self.failure: OSError | None = None
+        self.asked = 0
 
     def show(self, unit: str, properties: Sequence[str]) -> str:
+        self.asked += 1
         if self.failure is not None:
             raise self.failure
         return self.outputs.get(unit, STOPPED)
@@ -85,6 +90,7 @@ class Rig:
             clock=lambda: ClockReading(BOOT, 100.0, 1_000.0),
         )
         self.manager = Manager()
+        self.opened = 0
 
     def open_run(self, claim: bool = True) -> str:
         run_id = str(uuid4())
@@ -93,8 +99,14 @@ class Rig:
             self.journal.claim_start(run_id, FENCE)
         return run_id
 
+    def open_journal(self) -> LocalJournal:
+        self.opened += 1
+        return self.journal
+
     def latch(self, run_id: str | None, fence: str | None = FENCE, events: Any = _absent) -> Any:
-        return latch_stop(self.config, self.journal, self.manager, run_id=run_id, fence=fence, events=events)
+        return latch_stop(
+            self.config, self.open_journal, self.manager, run_id=run_id, fence=fence, events=events
+        )
 
 
 @pytest.fixture
@@ -240,11 +252,15 @@ def test_a_smoke_verifier_name_is_only_accepted_with_the_acceptance_stub() -> No
         parse(_table(verifier_socket="ssh.socket", launcher=stub))
 
 
+def _forbidden(*args: object, **kwargs: object) -> None:
+    raise AssertionError("state was opened on the latch-stop path before it was allowed")
+
+
 def test_latch_stop_needs_exactly_one_of_a_run_id_or_all_open(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(entry, "_is_root", lambda: True)
     monkeypatch.setattr(entry, "load", lambda path: parse(_table()))
-    monkeypatch.setattr(entry, "LocalJournal", lambda *args, **kwargs: None)
-    monkeypatch.setattr(entry, "Ledger", lambda path: None)
+    monkeypatch.setattr(entry, "LocalJournal", _forbidden)
+    monkeypatch.setattr(entry, "Ledger", _forbidden)
 
     for argv in (
         ["latch-stop", "--config", "/etc/x.toml"],
@@ -253,3 +269,67 @@ def test_latch_stop_needs_exactly_one_of_a_run_id_or_all_open(monkeypatch: pytes
         with pytest.raises(SystemExit) as raised:
             entry.main(argv)
         assert raised.value.code == 2
+
+
+def test_a_failed_daemon_proof_never_opens_the_journal(rig: Rig) -> None:
+    rig.open_run()
+    rig.manager.outputs[rig.config.verifier_unit] = "LoadState=loaded\nActiveState=inactive\nControlGroup=\n"
+
+    outcome = rig.latch(None, fence=None)
+
+    assert outcome.refused is not None and rig.opened == 0, (outcome, rig.opened)
+
+
+def test_a_malformed_run_id_is_refused_before_the_manager_or_the_journal(rig: Rig) -> None:
+    outcome = rig.latch("not-a-uuid")
+
+    assert outcome.refused == "invalid_run"
+    assert rig.manager.asked == 0 and rig.opened == 0
+
+
+def test_a_never_claimed_reservation_is_latched_as_stopping_not_released(rig: Rig) -> None:
+    run_id = rig.open_run(claim=False)
+
+    outcome = rig.latch(run_id)
+
+    assert outcome.latched == [run_id], outcome
+    [record] = rig.journal.active()
+    assert record.state == "stopping" and record.stop_requested, record
+    assert rig.journal.claim_start(run_id, FENCE) is False, "a latched reservation could still be claimed"
+
+
+def test_the_entry_point_proves_the_daemon_gone_before_opening_state_and_never_opens_the_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+    monkeypatch.setattr(entry, "_is_root", lambda: True)
+    monkeypatch.setattr(entry, "load", lambda path: parse(_table()))
+    monkeypatch.setattr(entry, "Ledger", _forbidden)
+
+    class RecordingManager(Manager):
+        def show(self, unit: str, properties: Sequence[str]) -> str:
+            order.append("proof")
+            return "LoadState=loaded\nActiveState=active\nJob=\nControlGroup=\n"
+
+    monkeypatch.setattr(entry, "LiveManager", RecordingManager)
+    monkeypatch.setattr(entry, "LocalJournal", lambda *args, **kwargs: order.append("journal"))
+
+    code = entry.main(["latch-stop", "--config", "/etc/x.toml", "--all-open"])
+
+    assert code == 1 and order == ["proof"], order
+
+
+def test_an_offline_latch_through_the_entry_point_needs_no_ledger(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = rig.open_run()
+    monkeypatch.setattr(entry, "_is_root", lambda: True)
+    monkeypatch.setattr(entry, "load", lambda path: rig.config)
+    monkeypatch.setattr(entry, "LiveManager", lambda: rig.manager)
+    monkeypatch.setattr(entry, "LocalJournal", lambda *args, **kwargs: rig.journal)
+    monkeypatch.setattr(entry, "Ledger", _forbidden)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(FENCE + "\n"))
+    monkeypatch.setattr(latch, "_cgroup_not_empty", lambda group, events: None)
+
+    assert entry.main(["latch-stop", "--config", "/etc/x.toml", run_id]) == 0
+    assert rig.journal.active()[0].stop_requested

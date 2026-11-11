@@ -16,7 +16,7 @@ from agent_board.night.gate import GuardState
 
 
 def test_every_command_refuses_to_run_without_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(entry, "_is_root", lambda: False)
     touched: list[Path] = []
     monkeypatch.setattr(entry, "load", lambda path: touched.append(path))
 

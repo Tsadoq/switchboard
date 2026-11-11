@@ -38,28 +38,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--all-open", action="store_true")
     args = parser.parse_args(arguments)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    if os.geteuid() != 0:
+    if not _is_root():
         logger.error("the night verifier must run as root")
         return 2
     config = load(args.config)
+    if args.command == "latch-stop":
+        return _latch_stop(parser, args, config)
     journal = LocalJournal(
         config.state_path,
         box=config.box,
         principals={agent.principal: agent.uid for agent in config.agents.values()},
     )
     ledger = Ledger(config.state_path.parent / LEDGER_NAME)
-    if args.command == "latch-stop":
-        if (args.run_id is None) == (not args.all_open):
-            parser.error("latch-stop needs exactly one of a run id or --all-open")
-        outcome = latch_stop(
-            config,
-            journal,
-            LiveManager(),
-            run_id=args.run_id,
-            fence=None if args.all_open else sys.stdin.readline().strip(),
-        )
-        print(outcome.json())
-        return outcome.exit_code
     if args.command in ("gate", "exec") and args.run_id is None:
         parser.error(f"{args.command} needs a run id")
     if args.command == "gate":
@@ -135,6 +125,28 @@ def _service_python() -> Path:
     python = Path(sys.executable)
     trusted_file(python)
     return python
+
+
+def _is_root() -> bool:
+    return os.geteuid() == 0
+
+
+def _latch_stop(parser: argparse.ArgumentParser, args: argparse.Namespace, config: VerifierConfig) -> int:
+    if (args.run_id is None) == (not args.all_open):
+        parser.error("latch-stop needs exactly one of a run id or --all-open")
+    outcome = latch_stop(
+        config,
+        lambda: LocalJournal(
+            config.state_path,
+            box=config.box,
+            principals={agent.principal: agent.uid for agent in config.agents.values()},
+        ),
+        LiveManager(),
+        run_id=args.run_id,
+        fence=None if args.all_open else sys.stdin.readline().strip(),
+    )
+    print(outcome.json())
+    return outcome.exit_code
 
 
 class LiveManager:
