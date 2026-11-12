@@ -1,6 +1,7 @@
 import os
 import threading
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -220,7 +221,16 @@ def test_a_lock_replaced_while_a_reader_holds_it_stops_the_commit(directory: Pat
         assert positions.get(31) == 5
 
 
-def test_two_recoveries_in_the_same_second_keep_both_pieces_of_evidence(directory: Path) -> None:
+class FrozenClock:
+    @staticmethod
+    def now(tz: object = None) -> datetime:
+        return datetime(2026, 11, 12, 18, 0, 0, 123456, tzinfo=UTC)
+
+
+def test_two_recoveries_at_the_same_instant_keep_both_pieces_of_evidence(
+    directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cursors, "datetime", FrozenClock)
     with locked(directory, OLD) as positions:
         positions.advance(31, 5)
         path = directory / OLD / "31.json"
@@ -230,5 +240,37 @@ def test_two_recoveries_in_the_same_second_keep_both_pieces_of_evidence(director
         path.write_text("second garbage")
         second = positions.set_aside(31)
 
-    assert first != second
+    assert first.name.endswith("-0") and second.name.endswith("-1"), "the counter retry was not exercised"
     assert first.read_text() == "first garbage" and second.read_text() == "second garbage"
+
+
+def test_a_second_reader_on_a_replaced_lock_cannot_be_overwritten_by_the_first(directory: Path) -> None:
+    first_inside, second_done = threading.Event(), threading.Event()
+    outcome: dict[str, CursorError | None] = {}
+
+    def first_reader() -> None:
+        with locked(directory, OLD) as positions:
+            positions.advance(31, 5)
+            first_inside.set()
+            second_done.wait(5)
+            try:
+                positions.advance(31, 7)
+                outcome["first"] = None
+            except CursorError as error:
+                outcome["first"] = error
+
+    reader = threading.Thread(target=first_reader)
+    reader.start()
+    first_inside.wait(5)
+    lock = directory / f"{OLD}.lock"
+    lock.unlink()
+    with locked(directory, OLD, timeout=1) as positions:
+        positions.advance(31, 9)
+    second_done.set()
+    reader.join()
+
+    assert isinstance(outcome["first"], CursorUnsafe), (
+        "the first reader committed after its lock was replaced"
+    )
+    with locked(directory, OLD) as positions:
+        assert positions.get(31) == 9
