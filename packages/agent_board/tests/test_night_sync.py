@@ -642,3 +642,27 @@ def test_reconciliation_keeps_refusing_an_unusable_replay(rig: Rig) -> None:
 
     assert rig.sync.reconcile() == "capture_refused:capture_reply_mismatch"
     assert [each.action for each in rig.ledger.unacknowledged()] == ["capture"], "the receipt was dropped"
+
+
+def test_a_refused_capture_freezes_but_an_outage_does_not(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    original = rig.board.capture
+
+    def outage(run_id: str, payload: Any) -> CaptureReply:
+        raise BoardUnavailable("down")
+
+    monkeypatch.setattr(rig.board, "capture", outage)
+    with pytest.raises(BoardUnavailable):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    assert rig.sync.frozen is None, "an outage before any reply is not a mismatch"
+
+    def counted_then_refused(run_id: str, payload: Any) -> CaptureReply:
+        original(run_id, payload)
+        raise BoardRefused("invalid_capture")
+
+    monkeypatch.setattr(rig.board, "capture", counted_then_refused)
+    with pytest.raises(BoardRefused):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    assert rig.sync.frozen == "capture_denied:invalid_capture"
+    assert [each.action for each in rig.ledger.unacknowledged()] == ["capture"]

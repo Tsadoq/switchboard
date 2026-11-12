@@ -213,6 +213,9 @@ class BoardSync:
             except CaptureRefused as error:
                 self.frozen = f"capture_refused:{error}"
                 raise
+            except BoardRefused as error:
+                self.frozen = f"capture_denied:{error}"
+                raise
             stored = self._ledger.captured(record.run_id)
             if not isinstance(stored, CapturedAssignment):
                 raise SyncError("capture_not_stored")

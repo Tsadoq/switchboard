@@ -2,7 +2,14 @@ from collections.abc import Mapping
 from typing import Any
 from uuid import UUID
 
-from agent_board.night.sync import Ack, BoardRefused, BoardState, BoardUnavailable, CaptureReply
+from agent_board.night.sync import (
+    Ack,
+    BoardRefused,
+    BoardState,
+    BoardUnavailable,
+    CaptureRefused,
+    CaptureReply,
+)
 from agent_board.night_authority import AuthorityRefused, GrantUnavailable, NightAuthorityClient, ServerGrant
 
 SERVER_STOPPING = "stopping"
@@ -58,8 +65,12 @@ class SignedBoard:
     def capture(self, run_id: str, payload: Mapping[str, Any]) -> CaptureReply:
         data = self._request("night.capture", run_id, payload)
         if frozenset(data) != CAPTURE_FIELDS:
-            raise BoardRefused("invalid_capture")
-        return CaptureReply(_ack(data), data)
+            raise CaptureRefused("invalid_capture")
+        try:
+            ack = _ack(data)
+        except BoardRefused:
+            raise CaptureRefused("invalid_capture_ack") from None
+        return CaptureReply(ack, data)
 
     def _request(self, action: str, target: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         try:

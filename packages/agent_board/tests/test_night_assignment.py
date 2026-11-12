@@ -1,12 +1,17 @@
 import fcntl
 import json
 import os
+import subprocess
+import sys
 from dataclasses import asdict, replace
 from typing import Any
 from uuid import uuid4
 
 import pytest
 from agent_board.night.assignment import (
+    F_ADD_SEALS,
+    F_SEAL_GROW,
+    F_SEAL_SHRINK,
     MAX_ASSIGNMENT_BYTES,
     AssignmentError,
     NightPolicy,
@@ -165,7 +170,7 @@ def test_a_sealed_memfd_hands_over_exactly_the_bytes_and_cannot_be_changed() -> 
         with pytest.raises(PermissionError):
             os.ftruncate(fd, 1)
         with pytest.raises(PermissionError):
-            fcntl.fcntl(fd, fcntl.F_ADD_SEALS, 0)
+            fcntl.fcntl(fd, F_ADD_SEALS, 0)
     finally:
         os.close(fd)
 
@@ -174,7 +179,7 @@ def test_an_unsealed_memfd_is_refused() -> None:
     fd = os.memfd_create("unsealed", os.MFD_ALLOW_SEALING)
     try:
         os.write(fd, b"{}")
-        fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK)
+        fcntl.fcntl(fd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SHRINK)
         with pytest.raises(AssignmentError, match="fully sealed"):
             read_sealed(fd)
     finally:
@@ -204,24 +209,24 @@ def test_an_empty_sealed_memfd_is_refused() -> None:
         os.close(fd)
 
 
-def test_a_python_without_the_seal_names_still_seals_through_the_linux_abi(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import importlib
+def test_a_python_without_the_seal_names_still_seals_through_the_linux_abi() -> None:
+    probe = (
+        "import errno, fcntl, os\n"
+        "for name in ('F_ADD_SEALS', 'F_GET_SEALS', 'F_SEAL_SEAL', 'F_SEAL_SHRINK', 'F_SEAL_GROW', 'F_SEAL_WRITE'):\n"
+        "    if hasattr(fcntl, name):\n"
+        "        delattr(fcntl, name)\n"
+        "from agent_board.night.assignment import read_sealed, seal\n"
+        "fd = seal(b'{\"x\": 1}')\n"
+        "assert read_sealed(fd) == b'{\"x\": 1}'\n"
+        "try:\n"
+        "    os.write(fd, b'y')\n"
+        "except PermissionError:\n"
+        "    print('sealed')\n"
+    )
 
-    from agent_board.night import assignment
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", probe], capture_output=True, text=True, timeout=60, check=False
+    )
 
-    for name in ("F_ADD_SEALS", "F_GET_SEALS", "F_SEAL_SEAL", "F_SEAL_SHRINK", "F_SEAL_GROW", "F_SEAL_WRITE"):
-        monkeypatch.delattr(fcntl, name, raising=False)
-    reloaded = importlib.reload(assignment)
-    try:
-        fd = reloaded.seal(b'{"x": 1}')
-        try:
-            assert reloaded.read_sealed(fd) == b'{"x": 1}'
-            with pytest.raises(PermissionError):
-                os.write(fd, b"y")
-        finally:
-            os.close(fd)
-    finally:
-        monkeypatch.undo()
-        importlib.reload(assignment)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "sealed", "the kernel accepted a write to the sealed memfd"
