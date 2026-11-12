@@ -13,6 +13,7 @@ from agent_board.night.assignment import (
     F_SEAL_GROW,
     F_SEAL_SHRINK,
     MAX_ASSIGNMENT_BYTES,
+    MFD_ALLOW_SEALING,
     AssignmentError,
     NightPolicy,
     build_assignment,
@@ -176,7 +177,7 @@ def test_a_sealed_memfd_hands_over_exactly_the_bytes_and_cannot_be_changed() -> 
 
 
 def test_an_unsealed_memfd_is_refused() -> None:
-    fd = os.memfd_create("unsealed", os.MFD_ALLOW_SEALING)
+    fd = os.memfd_create("unsealed", MFD_ALLOW_SEALING)
     try:
         os.write(fd, b"{}")
         fcntl.fcntl(fd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SHRINK)
