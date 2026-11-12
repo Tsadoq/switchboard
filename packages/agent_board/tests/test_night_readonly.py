@@ -206,3 +206,56 @@ def test_the_view_cannot_write(state: State) -> None:
     view = readonly._read_only(state.journal_path, readonly.JOURNAL_VERSION, readonly.JOURNAL_TABLES)
     with view as conn, pytest.raises(sqlite3.OperationalError, match="readonly"):
         conn.execute("UPDATE runs SET stop_requested = 1")
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        pytest.param(
+            "UPDATE receipts SET action = 'binding' WHERE action = 'capture'", id="receipt-of-another-action"
+        ),
+        pytest.param(
+            "UPDATE receipts SET run_id = 'another' WHERE action = 'capture'", id="receipt-of-another-run"
+        ),
+    ],
+)
+def test_a_capture_joined_to_the_wrong_receipt_is_not_usable(state: State, statement: str) -> None:
+    state.acknowledge_capture()
+    _tamper(state.ledger_path, statement)
+
+    with pytest.raises(ReadOnlyError, match="no_usable_capture"):
+        state.bound()
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        pytest.param("UPDATE captures SET snapshot = '123'", id="snapshot-not-an-object"),
+        pytest.param("UPDATE captures SET assignment = 'not-bytes'", id="assignment-stored-as-text"),
+        pytest.param("UPDATE identity SET acked_counter = 0.5", id="fractional-counter"),
+        pytest.param("UPDATE bindings SET uid = 'two thousand'", id="uid-stored-as-text"),
+    ],
+)
+def test_a_persisted_value_of_the_wrong_type_is_a_typed_refusal(state: State, statement: str) -> None:
+    state.acknowledge_capture()
+    _tamper(state.ledger_path, statement)
+
+    with pytest.raises(ReadOnlyError):
+        state.bound()
+        ReadOnlyLedger(state.ledger_path).identity()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        pytest.param({"utc": True}, id="boolean-clock"),
+        pytest.param({"boottime": 10**1000}, id="overflowing-clock"),
+        pytest.param({"grace": "5"}, id="string-grace"),
+        pytest.param({"grace": -1.0}, id="negative-grace"),
+    ],
+)
+def test_a_malformed_clock_is_a_typed_refusal(state: State, changes: dict[str, Any]) -> None:
+    state.acknowledge_capture()
+
+    with pytest.raises(ReadOnlyError, match="invalid_clock"):
+        state.bound(**changes)

@@ -1,3 +1,4 @@
+import json
 import math
 import sqlite3
 from collections.abc import Iterator, Mapping
@@ -74,13 +75,29 @@ class ReadOnlyLedger:
             row = conn.execute("SELECT journal_id, acked_counter FROM identity").fetchone()
             if row is None:
                 raise ReadOnlyError("ledger_identity_missing")
-            return Identity(row["journal_id"], row["acked_counter"])
+            journal_id, counter = row["journal_id"], row["acked_counter"]
+            if (
+                (journal_id is not None and not isinstance(journal_id, str))
+                or type(counter) is not int
+                or counter < 0
+            ):
+                raise ReadOnlyError("ledger_row_corrupt")
+            return Identity(journal_id, counter)
 
     def binding(self, run_id: str) -> RecordedBinding | None:
         with _read_only(self._path, LEDGER_VERSION, LEDGER_TABLES) as conn:
             row = conn.execute("SELECT * FROM bindings WHERE run_id = ?", (run_id,)).fetchone()
             if row is None:
                 return None
+            if (
+                type(row["uid"]) is not int
+                or row["server_acked"] not in (0, 1)
+                or type(row["server_acked"]) is not int
+                or not all(
+                    isinstance(row[key], str) for key in ("run_id", "boot_id", "invocation_id", "cgroup")
+                )
+            ):
+                raise ReadOnlyError("ledger_row_corrupt")
             return RecordedBinding(
                 row["run_id"],
                 row["uid"],
@@ -96,11 +113,14 @@ class ReadOnlyLedger:
             row = conn.execute(
                 "SELECT c.receipt_id, c.snapshot, c.assignment, r.acked, a.parent_receipt_id AS aborted "
                 "FROM captures c JOIN receipts r ON r.receipt_id = c.receipt_id "
+                "AND r.action = 'capture' AND r.run_id = c.run_id "
                 "LEFT JOIN capture_aborts a ON a.parent_receipt_id = c.receipt_id WHERE c.run_id = ?",
                 (run_id,),
             ).fetchone()
-            if row is None or not row["acked"] or row["aborted"] is not None or row["assignment"] is None:
+            if row is None or row["acked"] != 1 or row["aborted"] is not None or row["assignment"] is None:
                 return None
+            if not isinstance(row["assignment"], bytes) or not _snapshot(row["snapshot"]):
+                raise ReadOnlyError("ledger_row_corrupt")
             return CapturedAssignment(run_id, row["receipt_id"], row["snapshot"], row["assignment"])
 
 
@@ -136,7 +156,8 @@ def bound_run(
         or record.boot_id != boot_id
     ):
         raise ReadOnlyError("run_not_running")
-    if not all(math.isfinite(value) for value in (boottime, utc, grace)) or grace < 0:
+    clock = [_finite(value) for value in (boottime, utc, grace)]
+    if any(value is None for value in clock) or (clock[2] is not None and clock[2] < 0):
         raise ReadOnlyError("invalid_clock")
     if boottime >= record.deadline_boottime - grace or utc >= record.deadline_utc - grace:
         raise ReadOnlyError("run_past_deadline")
@@ -154,6 +175,26 @@ def bound_run(
     if capture is None:
         raise ReadOnlyError("no_usable_capture")
     return BoundRun(record, binding, capture)
+
+
+def _finite(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _snapshot(text: object) -> bool:
+    if not isinstance(text, str):
+        return False
+    try:
+        value = json.loads(text)
+    except (ValueError, RecursionError):
+        return False
+    return isinstance(value, dict) and isinstance(value.get("wakes"), list)
 
 
 @contextmanager
