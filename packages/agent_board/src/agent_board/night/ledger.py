@@ -9,13 +9,13 @@ from typing import Any, Literal
 from agent_board.night.assignment import NightPolicy, policy_from
 from agent_board.night_state import StateError, check_private_file, prepare_private_file
 
-LEDGER_VERSION = 2
+LEDGER_VERSION = 3
 _RECEIPTS = (
     "CREATE TABLE IF NOT EXISTS receipts (seq INTEGER PRIMARY KEY AUTOINCREMENT, receipt_id TEXT NOT NULL UNIQUE, "
-    "action TEXT NOT NULL CHECK(action IN ('bootstrap', 'binding', 'evidence', 'capture')), run_id TEXT, "
-    "payload TEXT NOT NULL, acked INTEGER NOT NULL DEFAULT 0 CHECK(acked IN (0, 1)))"
+    "action TEXT NOT NULL CHECK(action IN ('bootstrap', 'binding', 'evidence', 'capture', 'capture_abort')), "
+    "run_id TEXT, payload TEXT NOT NULL, acked INTEGER NOT NULL DEFAULT 0 CHECK(acked IN (0, 1)))"
 )
-_FROM_VERSION_1 = (
+_REBUILD_RECEIPTS = (
     "ALTER TABLE receipts RENAME TO receipts_v1",
     _RECEIPTS,
     (
@@ -34,6 +34,11 @@ _SCHEMA = (
     ("CREATE UNIQUE INDEX IF NOT EXISTS one_evidence_per_run ON receipts (run_id) WHERE action = 'evidence'"),
     ("CREATE UNIQUE INDEX IF NOT EXISTS one_capture_per_run ON receipts (run_id) WHERE action = 'capture'"),
     (
+        "CREATE TABLE IF NOT EXISTS capture_aborts (parent_receipt_id TEXT PRIMARY KEY, "
+        "abort_receipt_id TEXT NOT NULL UNIQUE, outcome TEXT CHECK(outcome IN ('aborted', 'applied')), "
+        "proof TEXT, CHECK((outcome IS NULL) = (proof IS NULL)))"
+    ),
+    (
         "CREATE TABLE IF NOT EXISTS captures (run_id TEXT PRIMARY KEY, receipt_id TEXT NOT NULL UNIQUE, "
         "principal TEXT NOT NULL, cutoff_utc REAL NOT NULL, policy TEXT NOT NULL, snapshot TEXT, "
         "assignment BLOB, CHECK(assignment IS NULL OR snapshot IS NOT NULL))"
@@ -49,7 +54,7 @@ _SCHEMA = (
     ),
 )
 
-type Action = Literal["bootstrap", "binding", "evidence", "capture"]
+type Action = Literal["bootstrap", "binding", "evidence", "capture", "capture_abort"]
 
 
 class LedgerError(StateError):
@@ -91,12 +96,26 @@ class CaptureContext:
 
 @dataclass(frozen=True)
 class CapturedAssignment:
-    """An acknowledged capture: the server's snapshot and the assignment derived from it, None when empty."""
+    """An acknowledged capture: the server's snapshot and the assignment derived from it, None when empty.
+
+    `aborted_after_apply` marks a capture recovered through an abort that found it already applied: its run
+    was being stopped, so its assignment must never be launched.
+    """
 
     run_id: str
     receipt_id: str
     snapshot: str
     assignment: bytes | None
+    aborted_after_apply: bool = False
+
+
+@dataclass(frozen=True)
+class CaptureAborted:
+    """A capture the board proved it never applied; it can never yield an assignment."""
+
+    run_id: str
+    receipt_id: str
+    proof: str
 
 
 @dataclass(frozen=True)
@@ -120,10 +139,10 @@ class Ledger:
         self._path = path
         with self._transaction(initialize=True) as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, LEDGER_VERSION):
+            if version not in (0, 1, 2, LEDGER_VERSION):
                 raise LedgerError("unsupported_ledger_version")
-            if version == 1:
-                for statement in _FROM_VERSION_1:
+            if version in (1, 2):
+                for statement in _REBUILD_RECEIPTS:
                     conn.execute(statement)
             for statement in _SCHEMA:
                 conn.execute(statement)
@@ -177,23 +196,126 @@ class Ledger:
                 raise LedgerError("unknown_capture")
             return CaptureContext(row["principal"], row["cutoff_utc"], policy_from(json.loads(row["policy"])))
 
-    def captured(self, run_id: str) -> CapturedAssignment | Pending | None:
-        """The acknowledged capture for a run, its still-unacknowledged receipt, or None if none was composed."""
+    def captured(self, run_id: str) -> CapturedAssignment | CaptureAborted | Pending | None:
+        """The run's resolved capture, the receipt still to send for it, or None if none was composed.
+
+        Once an abort is linked, the receipt to send is the abort, never its parent capture again.
+        """
         with self._transaction() as conn:
             row = conn.execute(
-                "SELECT c.receipt_id, c.snapshot, c.assignment, r.payload, r.acked FROM captures c "
-                "JOIN receipts r ON r.receipt_id = c.receipt_id WHERE c.run_id = ?",
+                "SELECT c.receipt_id, c.snapshot, c.assignment, r.payload, r.acked, a.abort_receipt_id, a.outcome, "
+                "a.proof, ar.payload AS abort_payload FROM captures c "
+                "JOIN receipts r ON r.receipt_id = c.receipt_id "
+                "LEFT JOIN capture_aborts a ON a.parent_receipt_id = c.receipt_id "
+                "LEFT JOIN receipts ar ON ar.receipt_id = a.abort_receipt_id WHERE c.run_id = ?",
                 (run_id,),
             ).fetchone()
             if row is None:
                 return None
+            if row["outcome"] == "aborted":
+                return CaptureAborted(run_id, row["receipt_id"], row["proof"])
+            if row["abort_receipt_id"] is not None and row["outcome"] is None:
+                return Pending(
+                    row["abort_receipt_id"], "capture_abort", run_id, json.loads(row["abort_payload"])
+                )
             if not row["acked"]:
                 return Pending(row["receipt_id"], "capture", run_id, json.loads(row["payload"]))
-            return CapturedAssignment(run_id, row["receipt_id"], row["snapshot"], row["assignment"])
+            return CapturedAssignment(
+                run_id, row["receipt_id"], row["snapshot"], row["assignment"], row["outcome"] == "applied"
+            )
+
+    def persist_abort(self, parent_receipt_id: str, abort: Pending) -> None:
+        """The abort receipt and its link to the unacknowledged parent capture, in one transaction."""
+        if abort.action != "capture_abort" or abort.run_id is None:
+            raise LedgerError("not_an_abort")
+        with self._transaction() as conn:
+            parent = conn.execute(
+                "SELECT run_id, acked FROM receipts WHERE receipt_id = ? AND action = 'capture'",
+                (parent_receipt_id,),
+            ).fetchone()
+            if parent is None or parent["acked"] or parent["run_id"] != abort.run_id:
+                raise LedgerError("abort_parent_not_pending")
+            if conn.execute(
+                "SELECT 1 FROM capture_aborts WHERE parent_receipt_id = ?", (parent_receipt_id,)
+            ).fetchone():
+                raise LedgerError("abort_exists")
+            conn.execute(
+                "INSERT INTO receipts (receipt_id, action, run_id, payload) VALUES (?, 'capture_abort', ?, ?)",
+                (abort.receipt_id, abort.run_id, json.dumps(dict(abort.payload), sort_keys=True)),
+            )
+            conn.execute(
+                "INSERT INTO capture_aborts (parent_receipt_id, abort_receipt_id) VALUES (?, ?)",
+                (parent_receipt_id, abort.receipt_id),
+            )
+
+    def abort_parent(self, abort_receipt_id: str) -> Pending:
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT r.receipt_id, r.run_id, r.payload FROM capture_aborts a "
+                "JOIN receipts r ON r.receipt_id = a.parent_receipt_id WHERE a.abort_receipt_id = ?",
+                (abort_receipt_id,),
+            ).fetchone()
+            if row is None:
+                raise LedgerError("unknown_abort")
+            return Pending(row["receipt_id"], "capture", row["run_id"], json.loads(row["payload"]))
+
+    def resolve_abort(
+        self,
+        abort_receipt_id: str,
+        *,
+        journal_id: str,
+        counter: int,
+        proof: str,
+        applied: tuple[str, bytes | None] | None,
+    ) -> None:
+        """Resolves the abort and its parent together: aborted acknowledges only the abort, while applied
+        acknowledges the parent with its snapshot and assignment and supersedes the abort."""
+        with self._transaction() as conn:
+            current = conn.execute("SELECT journal_id, acked_counter FROM identity").fetchone()
+            if current["journal_id"] != journal_id:
+                raise LedgerError("journal_identity_mismatch")
+            if counter < current["acked_counter"]:
+                raise LedgerError("counter_regressed")
+            link = conn.execute(
+                "SELECT parent_receipt_id FROM capture_aborts WHERE abort_receipt_id = ? AND outcome IS NULL",
+                (abort_receipt_id,),
+            ).fetchone()
+            if link is None:
+                raise LedgerError("unknown_abort")
+            parent = link["parent_receipt_id"]
+            acked = conn.execute(
+                "UPDATE receipts SET acked = 1 WHERE receipt_id = ? AND acked = 0", (abort_receipt_id,)
+            )
+            if acked.rowcount != 1:
+                raise LedgerError("unknown_abort")
+            if applied is not None:
+                snapshot, assignment = applied
+                if (
+                    conn.execute(
+                        "UPDATE receipts SET acked = 1 WHERE receipt_id = ? AND acked = 0", (parent,)
+                    ).rowcount
+                    != 1
+                ):
+                    raise LedgerError("abort_parent_not_pending")
+                stored = conn.execute(
+                    "UPDATE captures SET snapshot = ?, assignment = ? WHERE receipt_id = ? AND snapshot IS NULL",
+                    (snapshot, assignment, parent),
+                )
+                if stored.rowcount != 1:
+                    raise LedgerError("unknown_capture")
+            conn.execute(
+                "UPDATE capture_aborts SET outcome = ?, proof = ? WHERE abort_receipt_id = ?",
+                ("applied" if applied is not None else "aborted", proof, abort_receipt_id),
+            )
+            conn.execute("UPDATE identity SET acked_counter = ?", (counter,))
 
     def unacknowledged(self) -> tuple[Pending, ...]:
+        """Receipts still to send, in order; a capture with a linked abort is replaced by that abort."""
         with self._transaction() as conn:
-            rows = conn.execute("SELECT * FROM receipts WHERE acked = 0 ORDER BY seq").fetchall()
+            rows = conn.execute(
+                "SELECT * FROM receipts WHERE acked = 0 AND receipt_id NOT IN "
+                "(SELECT parent_receipt_id FROM capture_aborts) ORDER BY seq"
+            ).fetchall()
             return tuple(
                 Pending(row["receipt_id"], row["action"], row["run_id"], json.loads(row["payload"]))
                 for row in rows

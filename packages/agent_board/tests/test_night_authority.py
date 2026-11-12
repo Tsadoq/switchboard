@@ -244,3 +244,48 @@ def test_an_authority_denial_of_a_capture_stays_a_board_refusal() -> None:
         with pytest.raises(BoardRefused) as caught:
             board.capture("00000000-0000-4000-8000-000000000001", {})
     assert not isinstance(caught.value, CaptureRefused)
+
+
+def _abort_reply(**changes: Any) -> dict[str, Any]:
+    return {
+        "journal_id": "00000000-0000-4000-8000-000000000009",
+        "run_id": "00000000-0000-4000-8000-000000000001",
+        "abort_id": "00000000-0000-4000-8000-000000000007",
+        "capture_id": "00000000-0000-4000-8000-000000000008",
+        "capture_counter": 2,
+        "counter": 3,
+        "outcome": "aborted",
+        "capture": None,
+        **changes,
+    }
+
+
+def _abort_with(reply: dict[str, Any]) -> Any:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=reply)
+
+    with httpx.Client(base_url=Config().board_url, transport=httpx.MockTransport(handle)) as http:
+        board = SignedBoard(
+            "dev", NightAuthorityClient(Config(), http=http, signer=lambda _: "test-signature")
+        )
+        return board.capture_abort("00000000-0000-4000-8000-000000000001", {})
+
+
+def test_board_adapter_returns_the_abort_proof_with_its_acknowledgement() -> None:
+    reply = _abort_with(_abort_reply())
+
+    assert (reply.ack.journal_id, reply.ack.counter) == ("00000000-0000-4000-8000-000000000009", 3)
+    assert reply.proof["outcome"] == "aborted"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        pytest.param(_abort_reply(fence="f" * 43), id="extra-field"),
+        pytest.param({k: v for k, v in _abort_reply().items() if k != "capture"}, id="missing-field"),
+        pytest.param(_abort_reply(counter=True), id="boolean-counter"),
+    ],
+)
+def test_a_malformed_abort_reply_is_a_capture_refusal(reply: dict[str, Any]) -> None:
+    with pytest.raises(CaptureRefused):
+        _abort_with(reply)

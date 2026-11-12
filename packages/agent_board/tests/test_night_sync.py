@@ -9,8 +9,9 @@ from uuid import uuid4
 import pytest
 from agent_board import night_state
 from agent_board.night.assignment import NightPolicy, decode
-from agent_board.night.ledger import CapturedAssignment, Ledger, LedgerError, Pending
+from agent_board.night.ledger import CaptureAborted, CapturedAssignment, Ledger, LedgerError, Pending
 from agent_board.night.sync import (
+    AbortReply,
     Ack,
     BoardRefused,
     BoardState,
@@ -59,6 +60,12 @@ class Board:
         self.capture_calls = 0
         self.reply_changes: dict[str, Any] = {}
         self.run_deadline = 5_000.0
+        self.deny_capture = False
+        self.capture_outage = False
+        self.tombstones: set[str] = set()
+        self.aborts: dict[str, dict[str, Any]] = {}
+        self.abort_changes: dict[str, Any] = {}
+        self.lose_next_abort_reply = False
 
     def state(self) -> BoardState:
         if self.unreadable:
@@ -107,6 +114,12 @@ class Board:
         self.calls.append("capture")
         self.capture_calls += 1
         receipt_id = payload["receipt_id"]
+        if receipt_id in self.tombstones:
+            raise BoardRefused("capture_aborted")
+        if self.capture_outage:
+            raise BoardUnavailable("down before the capture arrived")
+        if self.deny_capture and receipt_id not in self.captures:
+            raise BoardRefused("not_running")
         if receipt_id in self.captures:
             snapshot = self.captures[receipt_id]
             return CaptureReply(self._reply(Ack(snapshot["journal_id"], snapshot["counter"])), snapshot)
@@ -134,6 +147,42 @@ class Board:
         if ack is None:
             raise BoardUnavailable("reply lost")
         return CaptureReply(ack, snapshot)
+
+    def capture_abort(self, run_id: str, payload: Mapping[str, Any]) -> AbortReply:
+        self.calls.append("capture_abort")
+        abort_id = payload["receipt_id"]
+        if abort_id in self.aborts:
+            proof = self.aborts[abort_id]
+        else:
+            parent, parent_counter = payload["capture_receipt_id"], payload["capture_counter"]
+            if payload["counter"] != parent_counter or payload["journal_id"] != self.journal_id:
+                raise BoardRefused("stale_counter")
+            if parent in self.captures:
+                if self.counter != parent_counter + 1:
+                    raise BoardRefused("counter_diverged")
+                outcome, capture = "applied", self.captures[parent]
+            else:
+                if self.counter != parent_counter:
+                    raise BoardRefused("counter_diverged")
+                self.tombstones.add(parent)
+                self._apply(abort_id)
+                outcome, capture = "aborted", None
+            proof = {
+                "journal_id": self.journal_id,
+                "run_id": run_id,
+                "abort_id": abort_id,
+                "capture_id": parent,
+                "capture_counter": parent_counter,
+                "counter": parent_counter + 1,
+                "outcome": outcome,
+                "capture": capture,
+                **self.abort_changes,
+            }
+            self.aborts[abort_id] = proof
+        if self.lose_next_abort_reply:
+            self.lose_next_abort_reply = False
+            raise BoardUnavailable("abort reply lost")
+        return AbortReply(Ack(proof["journal_id"], proof["counter"]), proof)
 
     def _apply(self, receipt_id: str) -> Ack:
         assert self.journal_id is not None
@@ -666,3 +715,267 @@ def test_a_refused_capture_freezes_but_an_outage_does_not(rig: Rig, monkeypatch:
         rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
     assert rig.sync.frozen == "capture_denied:invalid_capture"
     assert [each.action for each in rig.ledger.unacknowledged()] == ["capture"]
+
+
+def _stopping(rig: Rig, record: Any) -> Any:
+    rig.journal.request_stop(record.run_id, FENCE)
+    return next(each for each in rig.journal.active() if each.run_id == record.run_id)
+
+
+def _evidence_counters(rig: Rig) -> list[int]:
+    return [payload["counter"] for payload in rig.board.evidence_payloads]
+
+
+def test_an_outage_blocks_no_read_but_every_new_receipt_waits_for_the_pending_capture(rig: Rig) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    rig.board.capture_outage = True
+    with pytest.raises(BoardUnavailable):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    assert rig.sync.frozen is None, "an outage is not a mismatch"
+    rig.board.capture_outage = False
+    counter_before = rig.board.counter
+
+    rig.bind(record.run_id)
+
+    assert rig.board.calls[-2:] == ["capture", "binding"], (
+        "the new binding went out before the pending capture"
+    )
+    assert rig.board.counter == counter_before + 2
+    assert rig.ledger.identity().acked_counter == rig.board.counter
+    assert rig.ledger.unacknowledged() == ()
+
+
+def test_a_capture_denied_by_a_stop_race_is_aborted_and_then_evidence_settles(rig: Rig) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    rig.board.deny_capture = True
+    with pytest.raises(BoardRefused):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    assert rig.sync.frozen == "capture_denied:not_running"
+    parent_counter = rig.ledger.identity().acked_counter
+
+    assert rig.sync.settle(_stopping(rig, record), "preempted")
+
+    assert rig.board.calls[-2:] == ["capture_abort", "evidence"]
+    assert isinstance(rig.ledger.captured(record.run_id), CaptureAborted)
+    assert _evidence_counters(rig) == [parent_counter + 1], "evidence did not follow the abort's counter"
+    assert rig.sync.frozen is None, "the denial freeze outlived a clean resolution"
+    assert rig.ledger.identity().acked_counter == parent_counter + 2
+
+
+def test_a_capture_the_board_already_applied_resolves_as_applied_and_is_never_launchable(rig: Rig) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    rig.board.lose_next_reply = True
+    with pytest.raises(BoardUnavailable):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    parent_counter = rig.ledger.unacknowledged()[0].payload["counter"]
+
+    assert rig.sync.settle(_stopping(rig, record), "preempted")
+
+    stored = rig.ledger.captured(record.run_id)
+    assert (
+        isinstance(stored, CapturedAssignment)
+        and stored.assignment is not None
+        and stored.aborted_after_apply
+    )
+    assert rig.board.counter == parent_counter + 2, "the applied resolution counted a second mutation"
+    assert _evidence_counters(rig) == [parent_counter + 1]
+    with pytest.raises(SyncError, match="capture_aborted"):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+
+
+def test_once_an_abort_is_linked_the_parent_is_never_sent_again(rig: Rig, tmp_path: Path) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    rig.board.capture_outage = True
+    with pytest.raises(BoardUnavailable):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    rig.board.lose_next_abort_reply = True
+    stopping = _stopping(rig, record)
+    assert not rig.sync.settle(stopping, "preempted")
+    rig.board.capture_outage = False
+    captures_before = rig.board.capture_calls
+
+    restarted = BoardSync(
+        "dev", Ledger(rig.state_dir / "ledger.sqlite3"), rig.board, rig.inspector, rig.journal
+    )
+    assert restarted.reconcile() is None
+    with pytest.raises(SyncError, match="capture_aborted"):
+        restarted.capture(record, POLICY, cutoff_utc=1_850.0)
+
+    assert rig.board.capture_calls == captures_before, "a parent with a linked abort was resent"
+    assert isinstance(restarted._ledger.captured(record.run_id), CaptureAborted)
+    assert restarted.settle(stopping, "preempted")
+
+
+@pytest.mark.parametrize("boundary", ["before-capture-send", "before-abort-send", "abort-reply-lost"])
+def test_a_crash_at_each_boundary_resumes_into_one_resolution(rig: Rig, boundary: str) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    rig.board.capture_outage = True
+    with pytest.raises(BoardUnavailable):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    rig.board.capture_outage = False
+    stopping = _stopping(rig, record)
+    if boundary == "before-abort-send":
+        parent = rig.ledger.unacknowledged()[0]
+        abort_id = str(uuid4())
+        rig.ledger.persist_abort(
+            parent.receipt_id,
+            Pending(
+                abort_id,
+                "capture_abort",
+                record.run_id,
+                {
+                    **parent.payload,
+                    "receipt_id": abort_id,
+                    "capture_receipt_id": parent.receipt_id,
+                    "capture_counter": parent.payload["counter"],
+                },
+            ),
+        )
+    if boundary == "abort-reply-lost":
+        rig.board.lose_next_abort_reply = True
+        assert not rig.sync.settle(stopping, "preempted")
+
+    restarted = BoardSync(
+        "dev", Ledger(rig.state_dir / "ledger.sqlite3"), rig.board, rig.inspector, rig.journal
+    )
+    assert restarted.reconcile() is None
+    assert restarted.settle(stopping, "preempted")
+
+    resolved = restarted._ledger.captured(record.run_id)
+    if boundary == "before-capture-send":
+        assert isinstance(resolved, CapturedAssignment) and not rig.board.tombstones, (
+            "with no abort linked yet, reconcile resends the unchanged capture"
+        )
+    else:
+        assert isinstance(resolved, CaptureAborted) and len(rig.board.tombstones) == 1
+    assert len(rig.board.evidence_payloads) == 1
+    assert restarted._ledger.unacknowledged() == ()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"abort_id": str(uuid4())}, id="other-abort"),
+        pytest.param({"capture_id": str(uuid4())}, id="other-parent"),
+        pytest.param({"run_id": str(uuid4())}, id="other-run"),
+        pytest.param({"journal_id": str(uuid4())}, id="other-journal"),
+        pytest.param({"counter": 999}, id="counter-jump"),
+        pytest.param({"capture_counter": 0}, id="other-parent-counter"),
+        pytest.param({"outcome": "dropped"}, id="unknown-outcome"),
+        pytest.param({"capture": {"wakes": []}}, id="aborted-with-a-capture"),
+    ],
+)
+def test_a_malformed_abort_proof_stays_pending_and_frozen(rig: Rig, change: dict[str, Any]) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    rig.board.deny_capture = True
+    with pytest.raises(BoardRefused):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    rig.board.abort_changes = change
+
+    assert not rig.sync.settle(_stopping(rig, record), "preempted")
+
+    assert rig.sync.frozen is not None and rig.sync.frozen.startswith("capture_refused:"), rig.sync.frozen
+    assert [each.action for each in rig.ledger.unacknowledged()] == ["capture_abort"]
+    assert rig.board.evidence_payloads == [], "evidence went out before the capture was resolved"
+
+
+def test_an_applied_capture_with_unrelated_divergence_stays_denied(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    rig.board.lose_next_reply = True
+    with pytest.raises(BoardUnavailable):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    rig.board.counter += 1
+
+    assert not rig.sync.settle(_stopping(rig, record), "preempted")
+
+    assert rig.sync.frozen == "capture_denied:counter_diverged"
+    assert [each.action for each in rig.ledger.unacknowledged()] == ["capture_abort"]
+    assert rig.board.evidence_payloads == []
+
+
+def test_a_capture_denial_survives_a_stop_poll_and_still_recovers(rig: Rig) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    rig.board.deny_capture = True
+    with pytest.raises(BoardRefused):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    stopping = _stopping(rig, record)
+    rig.board.stopping.add(record.run_id)
+
+    assert record.run_id in rig.sync.requested_stops()
+    assert rig.sync.frozen == "capture_denied:not_running", "a reconcile erased the typed denial"
+
+    assert rig.sync.settle(stopping, "preempted"), rig.sync.frozen
+
+
+def test_a_restart_before_the_abort_link_keeps_the_denial_recoverable(rig: Rig) -> None:
+    record = _bound(rig)
+    rig.board.deny_capture = True
+    with pytest.raises(BoardRefused):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    stopping = _stopping(rig, record)
+    restarted = BoardSync(
+        "dev", Ledger(rig.state_dir / "ledger.sqlite3"), rig.board, rig.inspector, rig.journal
+    )
+
+    assert restarted.reconcile() == "capture_denied:not_running"
+    assert restarted.settle(stopping, "preempted"), restarted.frozen
+    assert restarted.frozen is None
+
+
+@pytest.mark.parametrize("field", ["capture_counter", "counter"])
+def test_abort_proof_counters_must_be_exact_integers(rig: Rig, field: str) -> None:
+    record = _bound(rig)
+    rig.board.deny_capture = True
+    with pytest.raises(BoardRefused):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    counter = rig.ledger.identity().acked_counter
+    rig.board.abort_changes = {field: float(counter if field == "capture_counter" else counter + 1)}
+
+    assert not rig.sync.settle(_stopping(rig, record), "preempted")
+
+    assert rig.board.evidence_payloads == []
+    assert [each.action for each in rig.ledger.unacknowledged()] == ["capture_abort"]
+
+
+def test_an_applied_snapshot_counter_must_be_an_exact_integer(rig: Rig) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    rig.board.lose_next_reply = True
+    with pytest.raises(BoardUnavailable):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    parent = next(iter(rig.board.captures))
+    rig.board.captures[parent] = {**rig.board.captures[parent], "counter": float(rig.board.counter)}
+
+    assert not rig.sync.settle(_stopping(rig, record), "preempted")
+
+    assert rig.sync.frozen is not None and rig.sync.frozen.startswith("capture_refused:"), rig.sync.frozen
+    assert rig.board.evidence_payloads == []
+
+
+def test_no_abort_is_composed_for_an_unlatched_or_still_running_run(rig: Rig) -> None:
+    record = _bound(rig)
+    rig.board.capture_outage = True
+    with pytest.raises(BoardUnavailable):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    rig.board.capture_outage = False
+    rig.inspector.not_stopped = InspectionError("still_running")
+
+    assert not rig.sync.settle(record, "completed")
+    rig.inspector.not_stopped = None
+    assert not rig.sync.settle(record, "completed"), (
+        "an abort was composed for a run whose stop is not latched"
+    )
+
+    captured = rig.ledger.captured(record.run_id)
+    assert isinstance(captured, Pending) and captured.action == "capture"
+    assert "capture_abort" not in rig.board.calls

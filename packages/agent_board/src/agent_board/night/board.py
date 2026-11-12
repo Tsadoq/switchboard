@@ -3,6 +3,8 @@ from typing import Any
 from uuid import UUID
 
 from agent_board.night.sync import (
+    ABORT_FIELDS,
+    AbortReply,
     Ack,
     BoardRefused,
     BoardState,
@@ -71,6 +73,16 @@ class SignedBoard:
         except BoardRefused:
             raise CaptureRefused("invalid_capture_ack") from None
         return CaptureReply(ack, data)
+
+    def capture_abort(self, run_id: str, payload: Mapping[str, Any]) -> AbortReply:
+        data = self._request("night.capture_abort", run_id, payload)
+        if frozenset(data) != ABORT_FIELDS:
+            raise CaptureRefused("invalid_capture_abort")
+        try:
+            ack = _ack(data)
+        except BoardRefused:
+            raise CaptureRefused("invalid_capture_abort_ack") from None
+        return AbortReply(ack, data)
 
     def _request(self, action: str, target: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         try:
