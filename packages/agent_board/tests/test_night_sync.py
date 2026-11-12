@@ -8,8 +8,17 @@ from uuid import uuid4
 
 import pytest
 from agent_board import night_state
-from agent_board.night.ledger import Ledger, LedgerError, Pending
-from agent_board.night.sync import Ack, BoardRefused, BoardState, BoardSync, BoardUnavailable, SyncError
+from agent_board.night.assignment import NightPolicy, decode
+from agent_board.night.ledger import CapturedAssignment, Ledger, LedgerError, Pending
+from agent_board.night.sync import (
+    Ack,
+    BoardRefused,
+    BoardState,
+    BoardSync,
+    BoardUnavailable,
+    CaptureReply,
+    SyncError,
+)
 from agent_board.night_inspection import ROOT_EXEC, Binding, EmptyObservation, Execution, InspectionError
 from agent_board.night_state import ClockReading, Grant, LocalJournal
 
@@ -45,6 +54,11 @@ class Board:
         self.evidence_payloads: list[dict[str, Any]] = []
         self.stopping: set[str] = set()
         self.unreadable = False
+        self.held_wakes: list[dict[str, Any]] = []
+        self.captures: dict[str, dict[str, Any]] = {}
+        self.capture_calls = 0
+        self.reply_changes: dict[str, Any] = {}
+        self.run_deadline = 5_000.0
 
     def state(self) -> BoardState:
         if self.unreadable:
@@ -88,6 +102,38 @@ class Board:
         if self.drift_after_evidence:
             self.counter += 1
         return ack
+
+    def capture(self, run_id: str, payload: Mapping[str, Any]) -> CaptureReply:
+        self.calls.append("capture")
+        self.capture_calls += 1
+        receipt_id = payload["receipt_id"]
+        if receipt_id in self.captures:
+            snapshot = self.captures[receipt_id]
+            return CaptureReply(self._reply(Ack(snapshot["journal_id"], snapshot["counter"])), snapshot)
+        if (
+            payload["journal_id"] != self.journal_id
+            or payload["counter"] != self.counter
+            or run_id not in self.active
+        ):
+            raise BoardRefused("stale_counter")
+        ack = self._apply(receipt_id) if not self.lose_next_reply else None
+        if ack is None:
+            self.lose_next_reply = False
+            self._apply(receipt_id)
+        snapshot = {
+            "journal_id": self.journal_id,
+            "counter": self.counter,
+            "capture_id": receipt_id,
+            "run_id": run_id,
+            "principal": "pi@dev",
+            "deadline": self.run_deadline,
+            "wakes": list(self.held_wakes),
+            **self.reply_changes,
+        }
+        self.captures[receipt_id] = snapshot
+        if ack is None:
+            raise BoardUnavailable("reply lost")
+        return CaptureReply(ack, snapshot)
 
     def _apply(self, receipt_id: str) -> Ack:
         assert self.journal_id is not None
@@ -406,3 +452,217 @@ def test_a_counter_the_ledger_did_not_produce_freezes_new_starts(rig: Rig) -> No
     rig.sync.requested_stops()
 
     assert rig.sync.frozen == "counter_mismatch"
+
+
+POLICY = NightPolicy("sb-runner", "a" * 40, "claude", None, "default", 600)
+WAKE = {
+    "id": 9,
+    "reason": "mention",
+    "source_ref": "post:1",
+    "summary": "please review",
+    "summary_truncated": False,
+    "thread_id": 31,
+    "topic_id": 31,
+}
+
+
+def _bound(rig: Rig) -> Any:
+    assert rig.sync.reconcile() is None
+    run_id = rig.reserve()
+    rig.journal.claim_start(run_id, FENCE)
+    rig.bind(run_id)
+    return next(record for record in rig.journal.active() if record.run_id == run_id)
+
+
+def test_a_capture_is_stored_with_its_assignment_in_the_same_acknowledgement(rig: Rig) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    before = rig.ledger.identity().acked_counter
+
+    stored = rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+
+    assert stored.assignment is not None
+    assignment = decode(stored.assignment)
+    assert assignment.run_id == record.run_id and assignment.principal == "pi@dev"
+    assert assignment.repository_key == "sb-runner" and assignment.base_commit == "a" * 40
+    assert assignment.deadline_utc == 1_850.0, "the server deadline must never extend the local cutoff"
+    assert rig.ledger.identity().acked_counter == before + 1 == rig.board.counter
+    assert rig.ledger.unacknowledged() == ()
+
+
+def test_an_acknowledged_capture_is_never_captured_again_or_rebuilt(rig: Rig) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    first = rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    rig.board.held_wakes = [{**WAKE, "id": 10}]
+
+    again = rig.sync.capture(
+        record, NightPolicy("other", "b" * 40, "claude", None, "auto", 60), cutoff_utc=9e9
+    )
+
+    assert again == first
+    assert rig.board.capture_calls == 1
+
+
+def test_a_lost_capture_reply_is_resent_unchanged_and_built_from_the_first_choices(rig: Rig) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    rig.board.lose_next_reply = True
+
+    with pytest.raises(BoardUnavailable):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    pending = rig.ledger.unacknowledged()
+    assert [each.action for each in pending] == ["capture"]
+    rig.board.held_wakes = []
+
+    stored = rig.sync.capture(
+        record, NightPolicy("other", "b" * 40, "claude", None, "auto", 60), cutoff_utc=9e9
+    )
+
+    assert stored.receipt_id == pending[0].receipt_id
+    assert stored.assignment is not None
+    assignment = decode(stored.assignment)
+    assert (assignment.repository_key, assignment.turn_seconds) == ("sb-runner", 600), (
+        "retry re-resolved policy"
+    )
+    assert '"id": 9' in assignment.prompt, "the replayed snapshot was not the one the server stored"
+
+
+def test_reconciliation_completes_a_capture_whose_reply_was_lost(rig: Rig) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    rig.board.lose_next_reply = True
+    with pytest.raises(BoardUnavailable):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+
+    assert rig.sync.reconcile() is None
+
+    stored = rig.ledger.captured(record.run_id)
+    assert isinstance(stored, CapturedAssignment) and stored.assignment is not None
+
+
+def test_an_empty_capture_is_stored_as_no_assignment(rig: Rig) -> None:
+    record = _bound(rig)
+
+    stored = rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+
+    assert stored.assignment is None
+    assert rig.ledger.identity().acked_counter == rig.board.counter
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"principal": "claude@dev"}, id="other-principal"),
+        pytest.param({"run_id": str(uuid4())}, id="other-run"),
+        pytest.param({"capture_id": str(uuid4())}, id="other-receipt"),
+        pytest.param({"deadline": float("nan")}, id="nan-deadline"),
+        pytest.param({"deadline": True}, id="boolean-deadline"),
+        pytest.param({"wakes": [{**WAKE, "command": "rm"}]}, id="wake-outside-the-contract"),
+        pytest.param({"deadline": -1}, id="negative-deadline"),
+        pytest.param({"deadline": 10**400}, id="overflowing-deadline"),
+        pytest.param({"counter": 999}, id="snapshot-counter-jump"),
+    ],
+)
+def test_a_capture_reply_that_disagrees_is_never_stored(rig: Rig, change: dict[str, Any]) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    rig.board.reply_changes = change
+    before = rig.ledger.identity().acked_counter
+
+    with pytest.raises(SyncError):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+
+    assert not isinstance(rig.ledger.captured(record.run_id), CapturedAssignment)
+    assert rig.ledger.identity().acked_counter == before, "an unusable reply moved the ledger counter"
+    assert rig.sync.frozen is not None and rig.sync.frozen.startswith("capture_refused:"), rig.sync.frozen
+
+
+def test_a_capture_needs_a_board_acknowledged_binding_and_an_unfrozen_sync(rig: Rig) -> None:
+    assert rig.sync.reconcile() is None
+    run_id = rig.reserve()
+    rig.journal.claim_start(run_id, FENCE)
+    record = rig.journal.active()[0]
+
+    with pytest.raises(SyncError, match="not_bound"):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    rig.sync.frozen = "counter_mismatch"
+    with pytest.raises(SyncError, match="frozen"):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    assert rig.board.capture_calls == 0
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"deadline": -1}, id="negative-deadline"),
+        pytest.param({"deadline": 10**400}, id="overflowing-deadline"),
+        pytest.param({"deadline": 0}, id="zero-deadline"),
+    ],
+)
+def test_an_empty_capture_still_needs_a_valid_deadline(rig: Rig, change: dict[str, Any]) -> None:
+    record = _bound(rig)
+    rig.board.reply_changes = change
+
+    with pytest.raises(SyncError):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+
+    assert not isinstance(rig.ledger.captured(record.run_id), CapturedAssignment)
+
+
+def test_an_acknowledgement_that_jumps_the_counter_is_refused_and_freezes(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    original = rig.board.capture
+
+    def jump(run_id: str, payload: Any) -> CaptureReply:
+        reply = original(run_id, payload)
+        return CaptureReply(Ack(reply.ack.journal_id, 999), {**reply.snapshot, "counter": 999})
+
+    monkeypatch.setattr(rig.board, "capture", jump)
+    before = rig.ledger.identity().acked_counter
+
+    with pytest.raises(SyncError, match="capture_counter_mismatch"):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+
+    assert rig.ledger.identity().acked_counter == before
+    assert rig.sync.frozen == "capture_refused:capture_counter_mismatch"
+    with pytest.raises(SyncError, match="frozen"):
+        rig.bind(record.run_id)
+
+
+def test_reconciliation_keeps_refusing_an_unusable_replay(rig: Rig) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    rig.board.reply_changes = {"principal": "claude@dev"}
+    with pytest.raises(SyncError):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+
+    assert rig.sync.reconcile() == "capture_refused:capture_reply_mismatch"
+    assert [each.action for each in rig.ledger.unacknowledged()] == ["capture"], "the receipt was dropped"
+
+
+def test_a_refused_capture_freezes_but_an_outage_does_not(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    original = rig.board.capture
+
+    def outage(run_id: str, payload: Any) -> CaptureReply:
+        raise BoardUnavailable("down")
+
+    monkeypatch.setattr(rig.board, "capture", outage)
+    with pytest.raises(BoardUnavailable):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    assert rig.sync.frozen is None, "an outage before any reply is not a mismatch"
+
+    def counted_then_refused(run_id: str, payload: Any) -> CaptureReply:
+        original(run_id, payload)
+        raise BoardRefused("invalid_capture")
+
+    monkeypatch.setattr(rig.board, "capture", counted_then_refused)
+    with pytest.raises(BoardRefused):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    assert rig.sync.frozen == "capture_denied:invalid_capture"
+    assert [each.action for each in rig.ledger.unacknowledged()] == ["capture"]

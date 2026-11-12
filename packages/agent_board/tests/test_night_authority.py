@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 import pytest
 from agent_board.night.board import SignedBoard
-from agent_board.night.sync import BoardRefused, BoardUnavailable
+from agent_board.night.sync import BoardRefused, BoardUnavailable, CaptureRefused
 from agent_board.night_authority import GrantUnavailable, NightAuthorityClient
 
 
@@ -184,3 +184,63 @@ def test_board_adapter_reports_only_server_stopping_rows_as_stop_requests() -> N
 
     assert fresh.active_run_ids == {running, stopping}
     assert fresh.stop_requested == {stopping}
+
+
+def _capture_reply(**changes: Any) -> dict[str, Any]:
+    return {
+        "journal_id": "00000000-0000-4000-8000-000000000009",
+        "counter": 3,
+        "capture_id": "00000000-0000-4000-8000-000000000008",
+        "run_id": "00000000-0000-4000-8000-000000000001",
+        "principal": "pi@dev",
+        "deadline": 5_000.0,
+        "wakes": [],
+        **changes,
+    }
+
+
+def _capture_with(reply: dict[str, Any]) -> Any:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=reply)
+
+    with httpx.Client(base_url=Config().board_url, transport=httpx.MockTransport(handle)) as http:
+        board = SignedBoard(
+            "dev", NightAuthorityClient(Config(), http=http, signer=lambda _: "test-signature")
+        )
+        return board.capture("00000000-0000-4000-8000-000000000001", {})
+
+
+def test_board_adapter_returns_the_capture_snapshot_with_its_acknowledgement() -> None:
+    reply = _capture_with(_capture_reply())
+
+    assert (reply.ack.journal_id, reply.ack.counter) == ("00000000-0000-4000-8000-000000000009", 3)
+    assert reply.snapshot["wakes"] == []
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        pytest.param(_capture_reply(fence="f" * 43), id="extra-field-such-as-a-fence"),
+        pytest.param({k: v for k, v in _capture_reply().items() if k != "wakes"}, id="missing-wakes"),
+        pytest.param(_capture_reply(counter=-1), id="bad-counter"),
+        pytest.param(_capture_reply(journal_id="bad"), id="bad-journal"),
+    ],
+)
+def test_a_malformed_successful_capture_reply_is_a_capture_refusal_not_an_authority_one(
+    reply: dict[str, Any],
+) -> None:
+    with pytest.raises(CaptureRefused):
+        _capture_with(reply)
+
+
+def test_an_authority_denial_of_a_capture_stays_a_board_refusal() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"reason": "counter_mismatch"})
+
+    with httpx.Client(base_url=Config().board_url, transport=httpx.MockTransport(handle)) as http:
+        board = SignedBoard(
+            "dev", NightAuthorityClient(Config(), http=http, signer=lambda _: "test-signature")
+        )
+        with pytest.raises(BoardRefused) as caught:
+            board.capture("00000000-0000-4000-8000-000000000001", {})
+    assert not isinstance(caught.value, CaptureRefused)

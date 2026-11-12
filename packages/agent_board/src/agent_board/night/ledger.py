@@ -2,25 +2,42 @@ import json
 import sqlite3
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from agent_board.night.assignment import NightPolicy, policy_from
 from agent_board.night_state import StateError, check_private_file, prepare_private_file
 
-LEDGER_VERSION = 1
+LEDGER_VERSION = 2
+_RECEIPTS = (
+    "CREATE TABLE IF NOT EXISTS receipts (seq INTEGER PRIMARY KEY AUTOINCREMENT, receipt_id TEXT NOT NULL UNIQUE, "
+    "action TEXT NOT NULL CHECK(action IN ('bootstrap', 'binding', 'evidence', 'capture')), run_id TEXT, "
+    "payload TEXT NOT NULL, acked INTEGER NOT NULL DEFAULT 0 CHECK(acked IN (0, 1)))"
+)
+_FROM_VERSION_1 = (
+    "ALTER TABLE receipts RENAME TO receipts_v1",
+    _RECEIPTS,
+    (
+        "INSERT INTO receipts (seq, receipt_id, action, run_id, payload, acked) "
+        "SELECT seq, receipt_id, action, run_id, payload, acked FROM receipts_v1"
+    ),
+    "DROP TABLE receipts_v1",
+)
 _SCHEMA = (
     (
         "CREATE TABLE IF NOT EXISTS identity (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), journal_id TEXT, "
         "acked_counter INTEGER NOT NULL CHECK(acked_counter >= 0))"
     ),
     "INSERT OR IGNORE INTO identity (singleton, journal_id, acked_counter) VALUES (1, NULL, 0)",
-    (
-        "CREATE TABLE IF NOT EXISTS receipts (seq INTEGER PRIMARY KEY AUTOINCREMENT, receipt_id TEXT NOT NULL UNIQUE, "
-        "action TEXT NOT NULL CHECK(action IN ('bootstrap', 'binding', 'evidence')), run_id TEXT, "
-        "payload TEXT NOT NULL, acked INTEGER NOT NULL DEFAULT 0 CHECK(acked IN (0, 1)))"
-    ),
+    _RECEIPTS,
     ("CREATE UNIQUE INDEX IF NOT EXISTS one_evidence_per_run ON receipts (run_id) WHERE action = 'evidence'"),
+    ("CREATE UNIQUE INDEX IF NOT EXISTS one_capture_per_run ON receipts (run_id) WHERE action = 'capture'"),
+    (
+        "CREATE TABLE IF NOT EXISTS captures (run_id TEXT PRIMARY KEY, receipt_id TEXT NOT NULL UNIQUE, "
+        "principal TEXT NOT NULL, cutoff_utc REAL NOT NULL, policy TEXT NOT NULL, snapshot TEXT, "
+        "assignment BLOB, CHECK(assignment IS NULL OR snapshot IS NOT NULL))"
+    ),
     (
         "CREATE TABLE IF NOT EXISTS bindings (run_id TEXT PRIMARY KEY, uid INTEGER NOT NULL, boot_id TEXT NOT NULL, "
         "invocation_id TEXT NOT NULL, cgroup TEXT NOT NULL, "
@@ -32,7 +49,7 @@ _SCHEMA = (
     ),
 )
 
-type Action = Literal["bootstrap", "binding", "evidence"]
+type Action = Literal["bootstrap", "binding", "evidence", "capture"]
 
 
 class LedgerError(StateError):
@@ -64,6 +81,25 @@ class RecordedBinding:
 
 
 @dataclass(frozen=True)
+class CaptureContext:
+    """Fixed when the capture receipt is persisted, so a retry builds the assignment from the same choices."""
+
+    principal: str
+    cutoff_utc: float
+    policy: NightPolicy
+
+
+@dataclass(frozen=True)
+class CapturedAssignment:
+    """An acknowledged capture: the server's snapshot and the assignment derived from it, None when empty."""
+
+    run_id: str
+    receipt_id: str
+    snapshot: str
+    assignment: bytes | None
+
+
+@dataclass(frozen=True)
 class Arm:
     run_id: str
     guard_boot_id: str
@@ -84,8 +120,11 @@ class Ledger:
         self._path = path
         with self._transaction(initialize=True) as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, LEDGER_VERSION):
+            if version not in (0, 1, LEDGER_VERSION):
                 raise LedgerError("unsupported_ledger_version")
+            if version == 1:
+                for statement in _FROM_VERSION_1:
+                    conn.execute(statement)
             for statement in _SCHEMA:
                 conn.execute(statement)
             conn.execute(f"PRAGMA user_version = {LEDGER_VERSION}")
@@ -107,6 +146,51 @@ class Ledger:
                 ),
             )
 
+    def persist_capture(self, pending: Pending, context: CaptureContext) -> None:
+        """The capture receipt and the choices its assignment will use, in one transaction."""
+        if pending.action != "capture" or pending.run_id is None:
+            raise LedgerError("not_a_capture")
+        with self._transaction() as conn:
+            if conn.execute("SELECT 1 FROM captures WHERE run_id = ?", (pending.run_id,)).fetchone():
+                raise LedgerError("capture_exists")
+            conn.execute(
+                "INSERT INTO receipts (receipt_id, action, run_id, payload) VALUES (?, 'capture', ?, ?)",
+                (pending.receipt_id, pending.run_id, json.dumps(dict(pending.payload), sort_keys=True)),
+            )
+            conn.execute(
+                "INSERT INTO captures (run_id, receipt_id, principal, cutoff_utc, policy) VALUES (?, ?, ?, ?, ?)",
+                (
+                    pending.run_id,
+                    pending.receipt_id,
+                    context.principal,
+                    context.cutoff_utc,
+                    json.dumps(asdict(context.policy), sort_keys=True),
+                ),
+            )
+
+    def capture_context(self, receipt_id: str) -> CaptureContext:
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT principal, cutoff_utc, policy FROM captures WHERE receipt_id = ?", (receipt_id,)
+            ).fetchone()
+            if row is None:
+                raise LedgerError("unknown_capture")
+            return CaptureContext(row["principal"], row["cutoff_utc"], policy_from(json.loads(row["policy"])))
+
+    def captured(self, run_id: str) -> CapturedAssignment | Pending | None:
+        """The acknowledged capture for a run, its still-unacknowledged receipt, or None if none was composed."""
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT c.receipt_id, c.snapshot, c.assignment, r.payload, r.acked FROM captures c "
+                "JOIN receipts r ON r.receipt_id = c.receipt_id WHERE c.run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            if not row["acked"]:
+                return Pending(row["receipt_id"], "capture", run_id, json.loads(row["payload"]))
+            return CapturedAssignment(run_id, row["receipt_id"], row["snapshot"], row["assignment"])
+
     def unacknowledged(self) -> tuple[Pending, ...]:
         with self._transaction() as conn:
             rows = conn.execute("SELECT * FROM receipts WHERE acked = 0 ORDER BY seq").fetchall()
@@ -127,7 +211,16 @@ class Ledger:
             pending = Pending(row["receipt_id"], row["action"], row["run_id"], json.loads(row["payload"]))
             return pending, bool(row["acked"])
 
-    def acknowledge(self, receipt_id: str, *, journal_id: str, counter: int) -> None:
+    def acknowledge(
+        self,
+        receipt_id: str,
+        *,
+        journal_id: str,
+        counter: int,
+        capture: tuple[str, bytes | None] | None = None,
+    ) -> None:
+        """Marks a receipt acknowledged and moves the counter; a capture's snapshot and derived assignment are
+        stored in the same transaction, so no acknowledged capture can exist without them."""
         with self._transaction() as conn:
             current = conn.execute("SELECT journal_id, acked_counter FROM identity").fetchone()
             if current["journal_id"] not in (None, journal_id):
@@ -145,6 +238,16 @@ class Ledger:
             ).fetchone()
             if pending["action"] == "binding":
                 conn.execute("UPDATE bindings SET server_acked = 1 WHERE run_id = ?", (pending["run_id"],))
+            if (pending["action"] == "capture") != (capture is not None):
+                raise LedgerError("capture_acknowledgement_mismatch")
+            if capture is not None:
+                snapshot, assignment = capture
+                stored = conn.execute(
+                    "UPDATE captures SET snapshot = ?, assignment = ? WHERE receipt_id = ? AND snapshot IS NULL",
+                    (snapshot, assignment, receipt_id),
+                )
+                if stored.rowcount != 1:
+                    raise LedgerError("unknown_capture")
 
     def record_binding(self, run_id: str, *, uid: int, boot_id: str, invocation_id: str, cgroup: str) -> None:
         with self._transaction() as conn:

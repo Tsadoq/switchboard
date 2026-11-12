@@ -1,11 +1,14 @@
+import json
 import logging
+import math
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import uuid4
 
-from agent_board.night.ledger import Ledger, LedgerError, Pending
+from agent_board.night.assignment import AssignmentError, NightPolicy, build_assignment, encode, parse_wakes
+from agent_board.night.ledger import CaptureContext, CapturedAssignment, Ledger, LedgerError, Pending
 from agent_board.night_inspection import ROOT_EXEC, Binding, EmptyObservation, Execution, InspectionError
 from agent_board.night_state import LocalJournal, Record, StateError
 
@@ -24,6 +27,10 @@ class BoardUnavailable(SyncError):
     pass
 
 
+class CaptureRefused(SyncError):
+    """The board counted a capture whose reply this box will not use; new starts stay frozen."""
+
+
 @dataclass(frozen=True)
 class BoardState:
     box: str
@@ -39,6 +46,12 @@ class Ack:
     counter: int
 
 
+@dataclass(frozen=True)
+class CaptureReply:
+    ack: Ack
+    snapshot: Mapping[str, Any]
+
+
 class VerifierBoard(Protocol):
     """The verifier's signed /api/night/verifier actions; each raises BoardRefused or BoardUnavailable."""
 
@@ -49,6 +62,8 @@ class VerifierBoard(Protocol):
     def binding(self, run_id: str, payload: Mapping[str, Any]) -> Ack: ...
 
     def evidence(self, run_id: str, payload: Mapping[str, Any]) -> Ack: ...
+
+    def capture(self, run_id: str, payload: Mapping[str, Any]) -> CaptureReply: ...
 
 
 class BindingInspector(Protocol):
@@ -87,6 +102,8 @@ class BoardSync:
     def _reconcile_locked(self) -> str | None:
         try:
             self.frozen = self._reconcile()
+        except CaptureRefused as error:
+            self.frozen = f"capture_refused:{error}"
         except (SyncError, LedgerError) as error:
             self.frozen = f"reconcile_failed:{error}"
         if self.frozen is not None:
@@ -156,6 +173,53 @@ class BoardSync:
                 },
             )
         )
+
+    def capture(self, record: Record, policy: NightPolicy, cutoff_utc: float) -> CapturedAssignment:
+        """The run's held wakes, captured once and turned into an immutable assignment under `policy`.
+
+        An acknowledged capture is returned as stored, never captured again or rebuilt; a receipt whose reply
+        was lost is resent unchanged and gets the server's identical snapshot. The result is data only: it
+        neither authorizes a launch nor acknowledges a wake, and None as its assignment means launch nothing.
+        """
+        with self._lock:
+            if self.frozen is not None:
+                raise SyncError(f"frozen:{self.frozen}")
+            existing = self._ledger.captured(record.run_id)
+            if isinstance(existing, CapturedAssignment):
+                return existing
+            if existing is None:
+                recorded = self._ledger.binding(record.run_id)
+                identity = self._ledger.identity()
+                if recorded is None or not recorded.server_acked or identity.journal_id is None:
+                    raise SyncError("not_bound")
+                receipt_id = str(uuid4())
+                existing = Pending(
+                    receipt_id,
+                    "capture",
+                    record.run_id,
+                    {
+                        "fence": record.fence,
+                        "journal_id": identity.journal_id,
+                        "counter": identity.acked_counter,
+                        "receipt_id": receipt_id,
+                        "boot_id": recorded.boot_id,
+                        "invocation_id": recorded.invocation_id,
+                        "cgroup": recorded.cgroup,
+                    },
+                )
+                self._ledger.persist_capture(existing, CaptureContext(record.principal, cutoff_utc, policy))
+            try:
+                self._send_and_acknowledge(existing)
+            except CaptureRefused as error:
+                self.frozen = f"capture_refused:{error}"
+                raise
+            except BoardRefused as error:
+                self.frozen = f"capture_denied:{error}"
+                raise
+            stored = self._ledger.captured(record.run_id)
+            if not isinstance(stored, CapturedAssignment):
+                raise SyncError("capture_not_stored")
+            return stored
 
     def settle(self, record: Record, reason: str) -> bool:
         with self._lock:
@@ -272,6 +336,16 @@ class BoardSync:
             ack = self._board.binding(pending.run_id, pending.payload)
         elif pending.action == "evidence" and pending.run_id is not None:
             ack = self._board.evidence(pending.run_id, pending.payload)
+        elif pending.action == "capture" and pending.run_id is not None:
+            reply = self._board.capture(pending.run_id, pending.payload)
+            derived = _derive(pending, reply, self._ledger.capture_context(pending.receipt_id))
+            self._ledger.acknowledge(
+                pending.receipt_id,
+                journal_id=reply.ack.journal_id,
+                counter=reply.ack.counter,
+                capture=derived,
+            )
+            return
         else:
             raise SyncError("malformed_pending_receipt")
         self._ledger.acknowledge(pending.receipt_id, journal_id=ack.journal_id, counter=ack.counter)
@@ -279,3 +353,57 @@ class BoardSync:
 
 def _pending_bootstrap(pending: Sequence[Pending]) -> Pending | None:
     return next((each for each in pending if each.action == "bootstrap"), None)
+
+
+def _derive(pending: Pending, reply: CaptureReply, context: CaptureContext) -> tuple[str, bytes | None]:
+    """Checks the reply against the receipt and builds the assignment from the receipt's stored choices.
+
+    A reply that disagrees is refused before anything is stored; the server already counted it, so the box
+    freezes rather than act on data it cannot vouch for, and only a validated replay can recover it.
+    """
+    snapshot = reply.snapshot
+    expected_counter = pending.payload.get("counter")
+    journal_id = pending.payload.get("journal_id")
+    if (
+        type(expected_counter) is not int
+        or not isinstance(journal_id, str)
+        or reply.ack != Ack(journal_id, expected_counter + 1)
+        or snapshot.get("journal_id") != journal_id
+        or snapshot.get("counter") != expected_counter + 1
+    ):
+        raise CaptureRefused("capture_counter_mismatch")
+    deadline = _finite_positive(snapshot.get("deadline"))
+    cutoff = _finite_positive(context.cutoff_utc)
+    if (
+        pending.run_id is None
+        or snapshot.get("run_id") != pending.run_id
+        or snapshot.get("capture_id") != pending.receipt_id
+        or snapshot.get("principal") != context.principal
+        or deadline is None
+        or cutoff is None
+    ):
+        raise CaptureRefused("capture_reply_mismatch")
+    try:
+        wakes = parse_wakes(snapshot.get("wakes"))
+        assignment = build_assignment(
+            run_id=pending.run_id,
+            principal=context.principal,
+            wakes=wakes,
+            policy=context.policy,
+            deadline_utc=min(deadline, cutoff),
+        )
+        encoded = None if assignment is None else encode(assignment)
+        stored = json.dumps(dict(snapshot), sort_keys=True, ensure_ascii=True, allow_nan=False)
+    except (AssignmentError, ValueError, TypeError, RecursionError) as error:
+        raise CaptureRefused(f"capture_unusable:{type(error).__name__}") from None
+    return stored, encoded
+
+
+def _finite_positive(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) and number > 0 else None

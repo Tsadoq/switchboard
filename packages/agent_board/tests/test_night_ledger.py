@@ -5,7 +5,8 @@ from uuid import uuid4
 
 import pytest
 from agent_board import night_state
-from agent_board.night.ledger import Arm, Ledger, LedgerError, Pending
+from agent_board.night.assignment import NightPolicy
+from agent_board.night.ledger import Arm, CaptureContext, CapturedAssignment, Ledger, LedgerError, Pending
 
 BOOT = str(uuid4())
 JOURNAL = str(uuid4())
@@ -128,3 +129,79 @@ def test_an_unknown_ledger_version_is_refused(tmp_path: Path) -> None:
 
     with pytest.raises(LedgerError, match="unsupported_ledger_version"):
         Ledger(path)
+
+
+POLICY = NightPolicy("sb-runner", "a" * 40, "claude", None, "default", 600)
+
+
+def _capture_receipt(run_id: str) -> Pending:
+    return Pending(str(uuid4()), "capture", run_id, {"fence": "f" * 43, "counter": 1, "cgroup": CGROUP})
+
+
+def test_a_capture_is_acknowledged_only_together_with_its_snapshot_and_assignment(ledger: Ledger) -> None:
+    run_id = str(uuid4())
+    receipt = _capture_receipt(run_id)
+    ledger.persist_capture(receipt, CaptureContext("pi@dev", 1_850.0, POLICY))
+    assert ledger.captured(run_id) == receipt
+    assert ledger.capture_context(receipt.receipt_id) == CaptureContext("pi@dev", 1_850.0, POLICY)
+
+    with pytest.raises(LedgerError, match="capture_acknowledgement_mismatch"):
+        ledger.acknowledge(receipt.receipt_id, journal_id=JOURNAL, counter=2)
+    assert ledger.unacknowledged() == (receipt,), "a refused acknowledgement left a partial state"
+    assert ledger.identity().acked_counter == 0
+
+    ledger.acknowledge(receipt.receipt_id, journal_id=JOURNAL, counter=2, capture=('{"wakes": []}', b"{}"))
+
+    assert ledger.captured(run_id) == CapturedAssignment(run_id, receipt.receipt_id, '{"wakes": []}', b"{}")
+    assert ledger.identity().acked_counter == 2
+
+
+def test_a_non_capture_acknowledgement_cannot_carry_capture_data(ledger: Ledger) -> None:
+    receipt = _binding_receipt(str(uuid4()))
+    ledger.persist(receipt)
+
+    with pytest.raises(LedgerError, match="capture_acknowledgement_mismatch"):
+        ledger.acknowledge(receipt.receipt_id, journal_id=JOURNAL, counter=1, capture=("{}", None))
+    assert ledger.unacknowledged() == (receipt,)
+
+
+def test_a_run_has_at_most_one_capture(ledger: Ledger) -> None:
+    run_id = str(uuid4())
+    ledger.persist_capture(_capture_receipt(run_id), CaptureContext("pi@dev", 1_850.0, POLICY))
+
+    with pytest.raises(LedgerError, match="capture_exists"):
+        ledger.persist_capture(_capture_receipt(run_id), CaptureContext("pi@dev", 1_850.0, POLICY))
+
+
+def test_a_version_1_ledger_is_migrated_with_every_receipt_kept(tmp_path: Path) -> None:
+    path = tmp_path / "state" / "ledger.sqlite3"
+    Ledger(path)
+    receipt = _binding_receipt(str(uuid4()))
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE receipts")
+        conn.execute("DROP TABLE captures")
+        conn.execute(
+            "CREATE TABLE receipts (seq INTEGER PRIMARY KEY AUTOINCREMENT, receipt_id TEXT NOT NULL UNIQUE, "
+            "action TEXT NOT NULL CHECK(action IN ('bootstrap', 'binding', 'evidence')), run_id TEXT, "
+            "payload TEXT NOT NULL, acked INTEGER NOT NULL DEFAULT 0 CHECK(acked IN (0, 1)))"
+        )
+        conn.execute(
+            "INSERT INTO receipts (seq, receipt_id, action, run_id, payload) VALUES (7, ?, 'binding', ?, ?)",
+            (
+                receipt.receipt_id,
+                receipt.run_id,
+                '{"cgroup": "' + CGROUP + '", "counter": 0, "fence": "' + "f" * 43 + '"}',
+            ),
+        )
+        conn.execute("PRAGMA user_version = 1")
+
+    migrated = Ledger(path)
+
+    assert migrated.unacknowledged() == (receipt,)
+    run_id = str(uuid4())
+    migrated.persist_capture(_capture_receipt(run_id), CaptureContext("pi@dev", 1_850.0, POLICY))
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute(
+            "SELECT seq FROM receipts WHERE receipt_id = ?", (receipt.receipt_id,)
+        ).fetchone() == (7,)
