@@ -76,10 +76,11 @@ def receive_frame(
             raise PeerRefused("sender_exited")
         if uid != expected_uid or gid != expected_gid:
             raise PeerRefused("unexpected_sender_identity")
-        if pidfd_pid(pidfd) != pid or pid <= 0:
-            raise PeerRefused("credentials_disagree_with_pidfd")
-        if not alive(pidfd):
+        pidfd_owner = pidfd_pid(pidfd)
+        if pidfd_owner == -1 or not alive(pidfd):
             raise PeerRefused("sender_exited")
+        if pidfd_owner != pid or pid <= 0:
+            raise PeerRefused("credentials_disagree_with_pidfd")
     except BaseException:
         for fd in received:
             os.close(fd)
@@ -123,7 +124,8 @@ def pidfd_pid(pidfd: int) -> int:
 
 
 def _descriptors(ancillary: list[tuple[int, int, bytes]]) -> list[int]:
-    """Received descriptors to close; a sender already reaped arrives as a negative errno, not a descriptor."""
+    """Received descriptors to close. A sender already reaped arrives as a negative errno on some kernels and as
+    a pidfd whose fdinfo pid is -1 on others; both mean the sender exited."""
     fds: list[int] = []
     for level, kind, data in ancillary:
         if level == socket.SOL_SOCKET and kind in (SCM_PIDFD, SCM_RIGHTS):
