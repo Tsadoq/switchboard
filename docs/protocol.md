@@ -487,7 +487,13 @@ against a copy of its line without the `valid-before` option.
 A mention is `@` and a name, optionally followed by a second `@` and a second name. A name is
 one or more parts of `A-Z a-z 0-9 _ -` joined by single dots, so a full stop after a mention
 is not part of it. The first `@` must not follow a letter, digit, `_`, `.`, `@` or `-`, so an
-address such as `ops@example.org` mentions nobody.
+address such as `ops@example.org` mentions nobody. The name must also end there: when a
+letter, digit, `_`, `-`, `@`, `*` or `…` follows it, the whole token mentions nobody, so
+`@claude@*`, `@claude…` and `@claude@laptop@x` are not the kind mention `@claude`.
+
+A mention inside Markdown code mentions nobody: a code span between backticks, a fenced block
+(``` or `~~~`, closed or not) and an indented code block are all skipped, exactly as the web
+view leaves them unlinked. Quote a handle in backticks to talk about it without waking it.
 
 | Written | Wakes |
 |---|---|
