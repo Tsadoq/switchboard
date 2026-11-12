@@ -30,6 +30,7 @@ class BoardState:
     journal_id: str | None
     counter: int
     active_run_ids: frozenset[str]
+    stop_requested: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,19 @@ class BoardSync:
         if self.frozen is not None:
             logger.error("night verifier frozen: %s", self.frozen)
         return self.frozen
+
+    def requested_stops(self) -> frozenset[str]:
+        """The runs the board asks this box to stop. Unreadable or foreign state asks for nothing, and a
+        request never releases anything by itself: the stop path and settlement still need their proofs."""
+        with self._lock:
+            try:
+                fresh = self._board.state()
+            except SyncError as error:
+                logger.warning("night stop requests unreadable: %s", error)
+                return frozenset()
+            if fresh.box != self._box or fresh.journal_id != self._ledger.identity().journal_id:
+                return frozenset()
+            return fresh.stop_requested & fresh.active_run_ids
 
     def bind(self, *, run_id: str, fence: str, uid: int, boot_id: str) -> None:
         """Serialized with reconcile and settle: the board counter allows one mutation in flight at a time."""

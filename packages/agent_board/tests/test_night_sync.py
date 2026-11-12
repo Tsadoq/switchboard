@@ -43,9 +43,15 @@ class Board:
         self.keep_held = False
         self.drift_after_evidence = False
         self.evidence_payloads: list[dict[str, Any]] = []
+        self.stopping: set[str] = set()
+        self.unreadable = False
 
     def state(self) -> BoardState:
-        return BoardState("dev", self.journal_id, self.counter, frozenset(self.active))
+        if self.unreadable:
+            raise BoardUnavailable("board down")
+        return BoardState(
+            "dev", self.journal_id, self.counter, frozenset(self.active), frozenset(self.stopping)
+        )
 
     def bootstrap(self, payload: Mapping[str, Any]) -> Ack:
         self.calls.append("bootstrap")
@@ -350,3 +356,27 @@ def test_the_runtime_always_captures_root_exec_units_with_the_native_uid(rig: Ri
     assert rig.inspector.executions == [ROOT_EXEC]
     recorded = rig.ledger.binding(run_id)
     assert recorded is not None and recorded.uid == UID, "the native uid was not kept for accounting"
+
+
+def test_stop_requests_are_the_boards_stopping_runs_for_this_journal(rig: Rig) -> None:
+    rig.sync.reconcile()
+    run_id = rig.reserve()
+    rig.journal.claim_start(run_id, FENCE)
+    rig.bind(run_id)
+    rig.board.stopping = {run_id, str(uuid4())}
+
+    assert rig.sync.requested_stops() == {run_id}, "a stop for a run the board no longer holds was passed on"
+
+
+def test_unreadable_or_foreign_board_state_requests_no_stop(rig: Rig) -> None:
+    rig.sync.reconcile()
+    run_id = rig.reserve()
+    rig.journal.claim_start(run_id, FENCE)
+    rig.bind(run_id)
+    rig.board.stopping = {run_id}
+
+    rig.board.unreadable = True
+    assert rig.sync.requested_stops() == frozenset()
+    rig.board.unreadable = False
+    rig.board.journal_id = str(uuid4())
+    assert rig.sync.requested_stops() == frozenset()

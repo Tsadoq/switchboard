@@ -62,6 +62,8 @@ class RunBinder(Protocol):
 
     def reconcile(self) -> str | None: ...
 
+    def requested_stops(self) -> frozenset[str]: ...
+
 
 TRANSIENT_FREEZES = ("not_reconciled", "reconcile_failed:")
 
@@ -212,18 +214,33 @@ class Controller:
         return Response(request.request_id, request.run_id, "stopped")
 
     def sweep(self) -> None:
-        """Retries a reconciliation that only failed transiently and settles runs the guard stopped."""
+        """Retries a reconciliation that only failed transiently, stops runs the board asks to stop, and
+        settles runs that are stopped."""
         frozen = self._binder.frozen
         if frozen is not None and frozen.startswith(TRANSIENT_FREEZES):
             self._binder.reconcile()
+        requested = self._binder.requested_stops()
         for record in self._journal.active():
+            if record.run_id in requested and record.state in ("reserved", "starting"):
+                record = self._server_stop(record)
             if not record.launch_claimed:
                 continue
             if record.state == "starting":
                 record = self._finished(record) or record
             if record.state in ("stopping", "quarantined"):
-                reason = "deadline" if record.reason == "deadline_passed" else "completed"
-                self._binder.settle(record, reason)
+                self._binder.settle(record, _settle_reason(record, requested))
+
+    def _server_stop(self, record: Record) -> Record:
+        """The same path as a local stop: the journal latch is durable before the first kill."""
+        record = self._journal.request_stop(record.run_id, record.fence)
+        if not record.launch_claimed:
+            return record
+        try:
+            self._runs.stop(unit_name(record.run_id))
+        except _MANAGER_FAILURES as error:
+            logger.error("stopping night run %s for the board failed: %s", record.run_id, error)
+            return self._journal.quarantine(record.run_id, record.fence, "proof_incomplete")
+        return record
 
     def _finished(self, record: Record) -> Record | None:
         """A running run whose unit already exited on its own; never stops healthy work."""
@@ -277,3 +294,9 @@ class Controller:
     @staticmethod
     def _refuse(request: Request, reason: str) -> Response:
         return Response(request.request_id, request.run_id, "refused", reason)
+
+
+def _settle_reason(record: Record, requested: frozenset[str]) -> str:
+    if record.reason == "deadline_passed":
+        return "deadline"
+    return "preempted" if record.run_id in requested else "completed"

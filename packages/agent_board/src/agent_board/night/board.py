@@ -5,6 +5,8 @@ from uuid import UUID
 from agent_board.night.sync import Ack, BoardRefused, BoardState, BoardUnavailable
 from agent_board.night_authority import AuthorityRefused, GrantUnavailable, NightAuthorityClient, ServerGrant
 
+SERVER_STOPPING = "stopping"
+
 
 class SignedBoard:
     def __init__(self, box: str, client: NightAuthorityClient) -> None:
@@ -27,11 +29,16 @@ class SignedBoard:
         if not isinstance(active, list):
             raise BoardRefused("invalid_state")
         ids: set[str] = set()
+        stopping: set[str] = set()
         for record in active:
             if not isinstance(record, dict) or not _uuid(record.get("id")) or record["id"] in ids:
                 raise BoardRefused("invalid_state")
+            if not isinstance(record.get("state"), str) or not record["state"]:
+                raise BoardRefused("invalid_state")
             ids.add(record["id"])
-        return BoardState(self._box, journal_id, counter, frozenset(ids))
+            if record["state"] == SERVER_STOPPING:
+                stopping.add(record["id"])
+        return BoardState(self._box, journal_id, counter, frozenset(ids), frozenset(stopping))
 
     def bootstrap(self, payload: Mapping[str, Any]) -> Ack:
         data = self._request("night.bootstrap", "self", payload)
