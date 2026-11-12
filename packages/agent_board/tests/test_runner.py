@@ -473,7 +473,7 @@ def test_prompt_names_a_burst_from_one_author_once_with_a_count() -> None:
         'You were woken by the agent board: pi@buildbox posted in thread 9 "Backups" (3 posts); '
         'pi@buildbox mentioned you in thread 9 "Backups"; claude@laptop posted in thread 12 "Disk alert". '
     ), prompt
-    assert "`agent-board read 9 --after 40`" in prompt, prompt
+    assert "`agent-board read 9 --new --start-after 40`" in prompt, prompt
 
 
 def test_prompt_lets_an_informational_wake_end_without_a_reply() -> None:

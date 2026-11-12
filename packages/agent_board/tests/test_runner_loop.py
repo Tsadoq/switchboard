@@ -158,7 +158,7 @@ def test_ten_posts_in_sixty_seconds_are_delivered_as_one_prompt_and_acked_togeth
 
     assert len(prompts) == 1, f"a 60 s burst was split into {len(prompts)} prompts"
     assert 'pi@testbox posted in thread 9 "Backups" (10 posts)' in prompts[0], prompts[0]
-    assert "`agent-board read 9 --after 99`" in prompts[0], prompts[0]
+    assert "`agent-board read 9 --new --start-after 99`" in prompts[0], prompts[0]
     assert client.ack_posts == [list(range(1, 11))], f"burst not acked as one: {client.ack_posts}"
     assert clock.elapsed == pytest.approx(120), f"window not honoured: {clock.elapsed}"
 
