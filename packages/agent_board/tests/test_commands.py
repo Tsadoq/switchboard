@@ -412,3 +412,71 @@ def test_dash_body_waits_for_a_slow_stdin_writer(claude_and_pi_on_board: "BoardS
         [str(AGENT_BOARD), "read", thread_id], capture_output=True, text=True, timeout=60, check=False
     )
     assert "late but valid" in thread.stdout, f"stdin body not posted: {thread.stdout}"
+
+
+def _thread_with_replies(agent_board: "AgentBoard", count: int) -> tuple[int, list[int]]:
+    opened = _parsed(agent_board("post", "general", "--title", "Delta reads", "--json", "post 0"), "post")
+    ids = [opened["post_id"]]
+    for number in range(1, count + 1):
+        ids.append(
+            _parsed(agent_board("reply", str(opened["thread_id"]), "--json", f"post {number}"), "reply")[
+                "post_id"
+            ]
+        )
+    return opened["thread_id"], ids
+
+
+def test_read_after_a_boundary_shows_the_post_that_follows_it_and_everything_newer(
+    claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard"
+) -> None:
+    thread_id, ids = _thread_with_replies(agent_board, 3)
+
+    shown = _parsed(agent_board("read", str(thread_id), "--after", str(ids[1] - 1), "--json"), "read")
+
+    assert [post["id"] for post in shown["posts"]] == ids[1:], "the triggering post or a newer one is missing"
+    assert shown["more_after"] is None and shown["after"] == ids[1] - 1
+    text = agent_board("read", str(thread_id), "--after", str(ids[1] - 1)).stdout
+    assert f"--- post {ids[1]} " in text and f"--- post {ids[0]} " not in text, text
+    assert "3 new posts after post" in text, text
+
+
+def test_read_after_the_newest_post_shows_nothing_new(
+    claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard"
+) -> None:
+    thread_id, ids = _thread_with_replies(agent_board, 1)
+
+    shown = _parsed(agent_board("read", str(thread_id), "--after", str(ids[-1]), "--json"), "read")
+
+    assert shown["posts"] == [] and shown["more_after"] is None
+
+
+def test_read_with_a_limit_says_where_to_continue(
+    claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard"
+) -> None:
+    thread_id, ids = _thread_with_replies(agent_board, 3)
+
+    first = _parsed(agent_board("read", str(thread_id), "--after", "0", "--limit", "2", "--json"), "read")
+    rest = _parsed(agent_board("read", str(thread_id), "--after", str(first["more_after"]), "--json"), "read")
+
+    assert [post["id"] for post in first["posts"]] == ids[:2] and first["more_after"] == ids[1]
+    assert [post["id"] for post in rest["posts"]] == ids[2:] and rest["more_after"] is None
+    text = agent_board("read", str(thread_id), "--after", "0", "--limit", "2").stdout
+    assert f"more posts follow: agent-board read {thread_id} --after {ids[1]}" in text, text
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param(["--limit", "5"], id="limit-without-after"),
+        pytest.param(["--after", "-1"], id="negative-cursor"),
+        pytest.param(["--after", "01"], id="non-canonical-cursor"),
+        pytest.param(["--after", "0", "--limit", "0"], id="zero-limit"),
+        pytest.param(["--after", "0", "--limit", "1001"], id="limit-over-the-cap"),
+    ],
+)
+def test_read_refuses_a_malformed_boundary(
+    claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard", arguments: list[str]
+) -> None:
+    result = agent_board("read", "1", *arguments)
+
+    assert result.returncode != 0, result.stdout

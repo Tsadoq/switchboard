@@ -42,6 +42,7 @@ _WEEKLY_REVIEW = (
     "left open, and act on what needs it."
 )
 _SUMMARY = re.compile(r"(?P<author>\S+) (?:mentioned you|posted) in thread (?P<thread>\d+)\b")
+_POST_REF = re.compile(r"post:(?P<post>[1-9][0-9]{0,18})")
 _DIGEST_THREADS = 5
 _DIGEST_AUTHORS = 3
 _DIGEST_BYTES = 400
@@ -60,11 +61,30 @@ type Deliver = Callable[[list[Wake]], Iterator[list[int | None]]]
 def prompt_for(wakes: Sequence[Wake]) -> str:
     summaries = "; ".join(wake["summary"] for wake in wakes)
     sentences = [f"You were woken by the agent board: {summaries}.", _ALREADY_ACKED, _ANSWER_THREADS]
+    first = first_new_posts(wakes)
+    if first:
+        commands = "; ".join(
+            f"`agent-board read {thread} --after {post - 1}`" for thread, post in sorted(first.items())
+        )
+        sentences.append(f"To read only the posts that woke you and anything newer: {commands}.")
     if any(wake["reason"] == TIMER_REASON for wake in wakes):
         sentences.append(_CHECK_TICKETS)
     if any(wake["reason"] == WEEKLY_REASON for wake in wakes):
         sentences.append(_WEEKLY_REVIEW)
     return " ".join(sentences)
+
+
+def first_new_posts(wakes: Sequence[Wake]) -> dict[int, int]:
+    """The earliest triggering post per thread, from wakes that name a post; others are left out."""
+    first: dict[int, int] = {}
+    for wake in wakes:
+        thread, ref = wake.get("thread_id"), wake.get("source_ref")
+        match = _POST_REF.fullmatch(ref) if isinstance(ref, str) else None
+        if type(thread) is not int or thread <= 0 or match is None:
+            continue
+        post = int(match["post"])
+        first[thread] = min(first.get(thread, post), post)
+    return first
 
 
 def session_key(wake: Wake, scope: str) -> str | None:

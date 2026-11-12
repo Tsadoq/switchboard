@@ -2,7 +2,7 @@ import argparse
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import quote
 
 from agent_board import output
@@ -13,6 +13,12 @@ _HUMAN_DURATION = re.compile(
     r"(?:(?P<W>\d+)w)?(?:(?P<D>\d+)d)?(?:(?P<H>\d+)h)?(?:(?P<M>\d+)m)?(?:(?P<S>\d+)s)?"
 )
 _POSTED_FIELDS = ("thread_id", "post_id")
+PAGE_MAX = 200
+READ_LIMIT_MAX = 1000
+
+
+class ThreadPages(Protocol):
+    def get(self, path: str, **params: Any) -> Any: ...
 
 
 def register(subcommands: Subcommands) -> None:
@@ -40,6 +46,18 @@ def register(subcommands: Subcommands) -> None:
     )
     read = add_command(subcommands, "read", "show a thread, each post marked verified or unsigned", _read)
     read.add_argument("thread_id", type=int, metavar="THREAD_ID")
+    read.add_argument(
+        "--after",
+        type=_post_cursor,
+        metavar="POST",
+        help="only the posts after POST, oldest first; a wake names the post to start from",
+    )
+    read.add_argument(
+        "--limit",
+        type=_read_limit,
+        metavar="N",
+        help=f"with --after, at most N posts (1 to {READ_LIMIT_MAX}); the rest are counted, not shown",
+    )
     post = add_command(subcommands, "post", "open a signed thread in a subforum", _post)
     post.add_argument("subforum", metavar="SUBFORUM")
     post.add_argument("--title", required=True)
@@ -101,10 +119,39 @@ def _threads(args: argparse.Namespace) -> int:
 
 
 def _read(args: argparse.Namespace) -> int:
+    if args.limit is not None and args.after is None:
+        raise SystemExit("agent-board read: --limit needs --after")
     with board_client(args) as client:
-        thread = client.get(f"/api/threads/{args.thread_id}")
+        thread = (
+            client.get(f"/api/threads/{args.thread_id}") if args.after is None else _read_after(client, args)
+        )
     output.emit_text(_thread_text(thread), thread, args.json)
     return 0
+
+
+def _read_after(client: ThreadPages, args: argparse.Namespace) -> dict[str, Any]:
+    """Follows the server's pages from `--after` until the newest post or the limit, oldest first."""
+    wanted = args.limit if args.limit is not None else READ_LIMIT_MAX
+    posts: list[dict[str, Any]] = []
+    cursor = args.after
+    more = False
+    thread: dict[str, Any] = {}
+    while len(posts) < wanted:
+        thread = client.get(
+            f"/api/threads/{args.thread_id}",
+            after=cursor,
+            limit=min(PAGE_MAX, wanted - len(posts)),
+        )
+        posts.extend(thread["posts"])
+        more = bool(thread["page"]["newer"]) and bool(thread["posts"])
+        if not more:
+            break
+        cursor = thread["posts"][-1]["id"]
+    return {key: value for key, value in thread.items() if key != "page"} | {
+        "posts": posts,
+        "after": args.after,
+        "more_after": cursor if more else None,
+    }
 
 
 def _post(args: argparse.Namespace) -> int:
@@ -166,13 +213,31 @@ def _flat_agent(agent: dict[str, Any]) -> dict[str, Any]:
 
 def _thread_text(thread: dict[str, Any]) -> str:
     lines = [f"thread {thread['id']} in {thread['subforum']} ({thread['kind']}): {thread['title']}"]
+    if "after" in thread:
+        shown = len(thread["posts"])
+        lines.append(f"{shown} new post{'' if shown == 1 else 's'} after post {thread['after']}")
     for post in thread["posts"]:
         marker = "verified" if post["verified"] else "unsigned"
         byline = f"by {post['author']} ({post['author_kind']}) at {post['created_at']}"
         lines += ["", f"--- post {post['id']} {byline} [{marker}]", post["body"].rstrip("\n")]
         if post["files"]:
             lines.append(f"files: {', '.join(post['files'])}")
+    if thread.get("more_after") is not None:
+        more = thread["more_after"]
+        lines += ["", f"more posts follow: agent-board read {thread['id']} --after {more}"]
     return "\n".join(lines)
+
+
+def _post_cursor(text: str) -> int:
+    if re.fullmatch(r"0|[1-9][0-9]{0,18}", text) is None or int(text) > 2**63 - 1:
+        raise argparse.ArgumentTypeError(f"not a post id: {text!r}")
+    return int(text)
+
+
+def _read_limit(text: str) -> int:
+    if re.fullmatch(r"[1-9][0-9]{0,3}", text) is None or int(text) > READ_LIMIT_MAX:
+        raise argparse.ArgumentTypeError(f"--limit must be 1 to {READ_LIMIT_MAX}: {text!r}")
+    return int(text)
 
 
 def _aware_datetime(text: str) -> datetime:
