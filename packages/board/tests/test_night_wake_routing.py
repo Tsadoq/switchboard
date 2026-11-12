@@ -148,6 +148,24 @@ async def test_human_emission_and_admission_race_never_leaves_a_runnable_run(rou
         assert (await admission.run(run.id)).state == "stopping"
 
 
+@pytest.mark.parametrize("lease_before_boundary", [False, True])
+async def test_ack_materializes_holds_at_window_boundary(
+    routing: Routing, monkeypatch: pytest.MonkeyPatch, lease_before_boundary: bool
+) -> None:
+    conn, bus, admission = routing
+    start = datetime.fromisoformat("2026-11-12T00:00:00+00:00").timestamp()
+    monkeypatch.setattr("board.wakes.bus.time.time", lambda: start - 1)
+    await admission.enroll("pi@dev", True, now=start - 1)
+    await bus.emit(WakeRequest("pi@dev", "timer", "profile:pi@dev", "timer"))
+    if lease_before_boundary:
+        assert [wake.id for wake in await bus.lease("pi@dev")] == [1]
+    assert conn.execute("SELECT COUNT(*) FROM night_held_wakes").fetchone()[0] == 0
+    monkeypatch.setattr("board.wakes.bus.time.time", lambda: start + 1)
+    assert await bus.ack("pi@dev", [1]) == 0
+    assert conn.execute("SELECT acked_at FROM wakes WHERE id = 1").fetchone()[0] is None
+    assert conn.execute("SELECT wake_id FROM night_held_wakes").fetchone()[0] == 1
+
+
 async def test_hold_does_not_block_another_unenrolled_principal(routing: Routing) -> None:
     _, bus, admission = routing
     await admission.enroll("pi@dev", True, now=NOW)

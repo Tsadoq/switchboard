@@ -93,6 +93,7 @@ class WakeBus:
         now = time.time()
 
         def stamp(conn: sqlite3.Connection) -> int:
+            hold_wakes_in_transaction(conn, now, principal)
             cursor = conn.executemany(
                 "UPDATE wakes SET acked_at = ? WHERE id = ? AND principal = ? AND acked_at IS NULL "
                 "AND NOT EXISTS (SELECT 1 FROM night_held_wakes h WHERE h.wake_id = wakes.id)",
