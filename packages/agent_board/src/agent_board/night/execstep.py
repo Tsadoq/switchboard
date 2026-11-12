@@ -124,7 +124,9 @@ def exec_native(
     if account.uid != exec_uid or account.uid <= 0 or account.gid <= 0:
         raise ExecRefused("account_mismatch")
     if agent.night_gid is not None and (
-        account.gid != agent.night_gid or system.supplementary_groups(account) != []
+        account.gid != agent.night_gid
+        or system.supplementary_groups(account) != []
+        or agent.night_gid in _requesting_groups(config, system)
     ):
         raise ExecRefused("night_account_not_dedicated")
     system.drop_to(Account(account.name, exec_uid, account.gid))
@@ -154,6 +156,19 @@ def exec_native(
     if config.launcher_happier is not None:
         environment[HAPPIER_BIN_ENV] = str(config.launcher_happier)
     system.execve(python, [python, "-I", "-m", config.launcher_module, run_id], environment)
+
+
+def _requesting_groups(config: VerifierConfig, system: System) -> set[int]:
+    """Every primary and supplementary group of every configured requesting account."""
+    groups: set[int] = set()
+    for uid in {agent.uid for agent in config.agents.values()}:
+        try:
+            day = system.account(uid)
+        except KeyError:
+            raise ExecRefused("requesting_account_unknown") from None
+        groups.add(day.gid)
+        groups.update(system.supplementary_groups(day))
+    return groups
 
 
 class LiveSystem:

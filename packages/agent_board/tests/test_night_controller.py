@@ -681,3 +681,11 @@ def test_a_native_launcher_needs_a_night_identity_but_the_stub_does_not() -> Non
     )
     assert stub.agents["pi@dev"].exec_uid == PI_UID
     assert parse(_config_table()).agents["pi@dev"].exec_uid == 3001
+
+
+def test_two_principals_cannot_share_a_night_primary_group() -> None:
+    table = _config_table()
+    table["agents"]["claude@dev"]["night_gid"] = table["agents"]["pi@dev"]["night_gid"]
+
+    with pytest.raises(VerifierConfigError, match="night_gid is shared"):
+        parse(table)

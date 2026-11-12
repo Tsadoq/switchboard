@@ -323,3 +323,28 @@ def test_a_night_account_that_is_not_dedicated_is_refused_before_dropping(
         rig.run()
 
     assert rig.system.calls == []
+
+
+@pytest.mark.parametrize("via", ["primary", "supplementary"])
+def test_a_night_group_any_requesting_account_belongs_to_is_refused_before_dropping(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, via: str
+) -> None:
+    original_account, original_groups = rig.system.account, rig.system.supplementary_groups
+
+    def account(uid: int) -> Account:
+        if uid == UID and via == "primary":
+            return Account("agent", UID, NIGHT_GID)
+        return original_account(uid)
+
+    def supplementary_groups(account: Account) -> list[int]:
+        if account.uid == UID and via == "supplementary":
+            return [NIGHT_GID]
+        return original_groups(account)
+
+    monkeypatch.setattr(rig.system, "account", account)
+    monkeypatch.setattr(rig.system, "supplementary_groups", supplementary_groups)
+
+    with pytest.raises(ExecRefused, match="night_account_not_dedicated"):
+        rig.run()
+
+    assert rig.system.calls == []

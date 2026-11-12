@@ -228,14 +228,18 @@ def _night_identities(agents: Mapping[str, Agent], launcher: Mapping[str, Any]) 
     native = launcher.get("module") != ACCEPTANCE_STUB
     day_uids = {agent.uid for agent in agents.values()}
     night_uids: set[int] = set()
+    night_gids: set[int] = set()
     for agent in agents.values():
-        if agent.night_uid is None:
+        if agent.night_uid is None or agent.night_gid is None:
             if native:
                 raise VerifierConfigError(f"agents.{agent.principal} needs a night_uid for a native launcher")
             continue
         if agent.night_uid in day_uids or agent.night_uid in night_uids:
             raise VerifierConfigError(f"agents.{agent.principal}.night_uid is shared with another identity")
+        if agent.night_gid in night_gids:
+            raise VerifierConfigError(f"agents.{agent.principal}.night_gid is shared with another principal")
         night_uids.add(agent.night_uid)
+        night_gids.add(agent.night_gid)
 
 
 def _unit_name(

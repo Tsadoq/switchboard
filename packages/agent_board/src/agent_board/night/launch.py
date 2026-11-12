@@ -391,13 +391,19 @@ def release_trusted(binary: Path, owner: int = 0) -> bool:
 
 
 def tree_trusted(directory: Path, owner: int = 0) -> bool:
-    """Every entry below `directory` is a regular file or directory `owner` holds and nobody else can write."""
+    """Every entry below `directory` is a regular file or directory `owner` holds, nobody else can write, and
+    no ACL widens; a subtree that cannot be listed is not trusted, never skipped."""
+
+    def unreadable(error: OSError) -> None:
+        raise error
+
     try:
         if has_acl(directory):
             return False
-        for root, directories, files in os.walk(directory):
+        for root, directories, files in os.walk(directory, onerror=unreadable):
             for name in (*directories, *files):
-                if not _owned_unwritable(Path(root, name).lstat(), owner, directory=None):
+                path = Path(root, name)
+                if not _owned_unwritable(path.lstat(), owner, directory=None) or has_acl(path):
                     return False
     except OSError:
         return False

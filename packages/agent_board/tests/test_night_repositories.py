@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from agent_board.night import launch
 from agent_board.night.launch import EXIT_ASSIGNMENT, LaunchRefused
 from agent_board.night.repositories import MirrorPolicy
 
@@ -160,3 +161,22 @@ def test_an_acl_on_the_policy_refuses(tree: Tree, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(os, "getxattr", getxattr)
 
     _refused(tree, "repository_policy_untrusted")
+
+
+def test_an_acl_on_any_entry_inside_a_mirror_refuses(tree: Tree, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = tree.mirror / "objects"
+    monkeypatch.setattr(launch, "has_acl", lambda path: path == target)
+
+    _refused(tree, "repository_mirror_untrusted")
+
+
+def test_a_subtree_that_cannot_be_listed_is_never_trusted(tree: Tree) -> None:
+    hidden = tree.mirror / "objects" / "sealed"
+    hidden.mkdir()
+    (hidden / "untrusted").write_text("not inspected")
+    (hidden / "untrusted").chmod(0o666)
+    hidden.chmod(0)
+    try:
+        _refused(tree, "repository_mirror_untrusted")
+    finally:
+        hidden.chmod(0o700)
