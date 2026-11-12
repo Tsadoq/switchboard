@@ -766,6 +766,24 @@ def test_an_agent_writable_container_above_the_private_roots_is_refused(rig: Rig
     assert rig.host.calls == []
 
 
-def test_the_real_root_managed_containers_are_trusted() -> None:
-    assert trusted_containers(Path("/opt/happier/0.2.17/happier"))
-    assert not trusted_containers(Path("/tmp/x/y")), "a world-writable /tmp is not a managed container"
+def test_the_container_chain_is_checked_up_to_and_including_the_filesystem_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[Path] = []
+    managed = os.stat_result((stat.S_IFDIR | 0o755, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+    world_writable = os.stat_result((stat.S_IFDIR | 0o1777, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+
+    def lstat(self: Path) -> os.stat_result:
+        seen.append(self)
+        return world_writable if self == Path("/") and "/" in writable else managed
+
+    writable: set[str] = set()
+    monkeypatch.setattr(Path, "lstat", lstat)
+
+    assert trusted_containers(Path("/var/lib/switchboard-night/happier/claude"))
+    assert seen == [
+        Path("/var/lib/switchboard-night/happier"),
+        *Path("/var/lib/switchboard-night/happier").parents,
+    ]
+    writable.add("/")
+    assert not trusted_containers(Path("/var/lib/switchboard-night/happier/claude"))
