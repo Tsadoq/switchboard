@@ -45,6 +45,7 @@ class NightVerifier:
             "night.binding": self._binding,
             "night.evidence": self._evidence,
             "night.capture": self._capture,
+            "night.capture_abort": self._capture_abort,
         }
         handler = handlers.get(envelope.action)
         if handler is None:
@@ -227,6 +228,94 @@ class NightVerifier:
         persist_capture(conn, payload["receipt_id"], run.id, now, batch)
         return response
 
+    def _capture_abort(
+        self, conn: sqlite3.Connection, box: str, target: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        _fields(
+            payload,
+            {
+                "fence",
+                "journal_id",
+                "counter",
+                "receipt_id",
+                "boot_id",
+                "invocation_id",
+                "cgroup",
+                "capture_receipt_id",
+                "capture_counter",
+            },
+        )
+        run = self._run(conn, box, target, payload["fence"])
+        self._roles.require_agent(run.principal)
+        _binding_fields(target, payload)
+        _uuid(payload["capture_receipt_id"])
+        if payload["capture_receipt_id"] == payload["receipt_id"]:
+            raise Denied("invalid_capture_abort")
+        capture_counter = payload["capture_counter"]
+        if type(capture_counter) is not int or capture_counter < 0:
+            raise Denied("invalid_capture_counter")
+        cached = self._cached(conn, box, target, payload, "night.capture_abort")
+        if cached is not None:
+            return cached
+        state = self._journal(conn, box, payload["journal_id"])
+        if type(payload["counter"]) is not int or payload["counter"] != capture_counter:
+            raise Denied("invalid_capture_counter")
+        binding = conn.execute("SELECT * FROM night_verifier_bindings WHERE run_id = ?", (target,)).fetchone()
+        if binding is None or any(
+            binding[key] != payload[key] for key in ("journal_id", "boot_id", "invocation_id", "cgroup")
+        ):
+            raise Denied("missing_or_conflicting_binding")
+        original = {
+            key: value
+            for key, value in payload.items()
+            if key not in ("capture_receipt_id", "capture_counter")
+        }
+        original["receipt_id"] = payload["capture_receipt_id"]
+        original["counter"] = capture_counter
+        applied = self._cached(conn, box, target, original, "night.capture")
+        counter = capture_counter + 1
+        if applied is not None:
+            if state["counter"] != counter or applied.get("counter") != counter:
+                raise Denied("counter_mismatch")
+        else:
+            if state["counter"] != capture_counter:
+                raise Denied("counter_mismatch")
+            conn.execute("UPDATE night_verifier_state SET counter = ? WHERE box = ?", (counter, box))
+        response = self._save(
+            conn,
+            box,
+            target,
+            payload,
+            "night.capture_abort",
+            {
+                "journal_id": payload["journal_id"],
+                "counter": counter,
+                "run_id": target,
+                "capture_id": payload["capture_receipt_id"],
+                "capture_counter": capture_counter,
+                "abort_id": payload["receipt_id"],
+                "outcome": "applied" if applied is not None else "aborted",
+                "capture": applied,
+            },
+        )
+        if applied is not None:
+            return response
+        conn.execute(
+            "INSERT INTO night_capture_aborts "
+            "(capture_receipt_id, abort_receipt_id, box, journal_id, run_id, capture_digest, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                payload["capture_receipt_id"],
+                payload["receipt_id"],
+                box,
+                payload["journal_id"],
+                target,
+                _digest("night.capture", target, original),
+                self._clock(),
+            ),
+        )
+        return response
+
     def _evidence(
         self, conn: sqlite3.Connection, box: str, target: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
@@ -319,6 +408,17 @@ class NightVerifier:
         self, conn: sqlite3.Connection, box: str, target: str, payload: dict[str, Any], action: str
     ) -> dict[str, Any] | None:
         _uuid(payload["receipt_id"])
+        aborted = conn.execute(
+            "SELECT * FROM night_capture_aborts WHERE capture_receipt_id = ?", (payload["receipt_id"],)
+        ).fetchone()
+        if aborted is not None:
+            if (
+                aborted["box"] != box
+                or aborted["journal_id"] != payload["journal_id"]
+                or aborted["capture_digest"] != _digest(action, target, payload)
+            ):
+                raise Denied("receipt_conflict")
+            raise Denied("capture_aborted")
         row = conn.execute(
             "SELECT * FROM night_verifier_receipts WHERE receipt_id = ?", (payload["receipt_id"],)
         ).fetchone()
