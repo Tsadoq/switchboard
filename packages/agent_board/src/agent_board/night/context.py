@@ -79,7 +79,9 @@ class Post:
 
     post_id: int
     author: str
+    author_truncated: bool
     author_kind: str
+    author_kind_truncated: bool
     created_at: float
     body: bytes
     body_total_bytes: int
@@ -154,6 +156,8 @@ class ContextReader:
                 raise ContextRefused("post_changed_while_reading")
             if following.chunk.body_offset != len(body):
                 raise ContextRefused("body_not_contiguous")
+            if _metadata(following.chunk) != _metadata(first.chunk):
+                raise ContextRefused("post_changed_while_reading")
             chunk = following.chunk
             body.extend(chunk.body)
         complete = chunk.body_end_reached and len(body) == chunk.body_total_bytes
@@ -166,7 +170,9 @@ class ContextReader:
         return Post(
             post_id=chunk.post_id,
             author=chunk.author,
+            author_truncated=chunk.author_truncated,
             author_kind=chunk.author_kind,
+            author_kind_truncated=chunk.author_kind_truncated,
             created_at=chunk.created_at,
             body=bytes(body),
             body_total_bytes=chunk.body_total_bytes,
@@ -221,8 +227,8 @@ def _chunk(post: Any, *, post_id: int | None, body_offset: int) -> Chunk:
         raise ContextRefused("context_mismatch")
     author, author_truncated = _bounded_text(post["author"], post["author_truncated"], MAX_AUTHOR_CHARS)
     kind, kind_truncated = _bounded_text(post["author_kind"], post["author_kind_truncated"], MAX_KIND_CHARS)
-    created = post["created_at"]
-    if isinstance(created, bool) or not isinstance(created, (int, float)) or not math.isfinite(created):
+    created = _finite(post["created_at"])
+    if created is None:
         raise ContextRefused("invalid_created_at")
     encoded = post["body_base64"]
     if not isinstance(encoded, str) or len(encoded) % 4 or _BASE64.fullmatch(encoded) is None:
@@ -259,7 +265,7 @@ def _chunk(post: Any, *, post_id: int | None, body_offset: int) -> Chunk:
         author_truncated=author_truncated,
         author_kind=kind,
         author_kind_truncated=kind_truncated,
-        created_at=float(created),
+        created_at=created,
         body=body,
         body_offset=offset,
         body_total_bytes=total,
@@ -267,6 +273,29 @@ def _chunk(post: Any, *, post_id: int | None, body_offset: int) -> Chunk:
         body_end_reached=end_reached,
         body_limit_reached=limit_reached,
     )
+
+
+def _metadata(chunk: Chunk) -> tuple[object, ...]:
+    """What may not change between chunks of one post."""
+    return (
+        chunk.post_id,
+        chunk.author,
+        chunk.author_truncated,
+        chunk.author_kind,
+        chunk.author_kind_truncated,
+        chunk.created_at,
+        chunk.body_total_bytes,
+    )
+
+
+def _finite(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _bounded_text(value: Any, truncated: Any, limit: int) -> tuple[str, bool]:

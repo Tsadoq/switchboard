@@ -1254,3 +1254,71 @@ def test_no_read_touches_the_ledger_counter_or_wakes(context: Context) -> None:
     assert context.rig.ledger.identity() == before
     assert context.rig.ledger.unacknowledged() == ()
     assert FENCE == context.record.fence
+
+
+def test_a_post_keeps_the_servers_metadata_truncation_flags(context: Context) -> None:
+    context.server.conn.execute(
+        "INSERT INTO posts (thread_id, author, author_kind, body, created_at) VALUES (?, ?, ?, ?, ?)",
+        (THREAD, "a" * 200, "k" * 50, "body", 1_000.0),
+    )
+
+    post = context.reader.post(context.record, THREAD, None)
+
+    assert post is not None
+    assert post.author == "a" * 128 and post.author_truncated
+    assert post.author_kind == "k" * 32 and post.author_kind_truncated
+
+
+def _on_later_chunks(**changes: Any) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    def tamper(data: dict[str, Any]) -> dict[str, Any]:
+        if data["post"]["body_offset"] == 0:
+            return data
+        return {**data, "post": {**data["post"], **changes}}
+
+    return tamper
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        pytest.param({"author": "claude@dev"}, id="author"),
+        pytest.param({"author_kind": "human"}, id="author-kind"),
+        pytest.param({"author_truncated": True}, id="author-truncation"),
+        pytest.param({"created_at": 2_000.0}, id="created-at"),
+    ],
+)
+def test_post_metadata_that_changes_between_chunks_is_refused(
+    context: Context, changes: dict[str, Any]
+) -> None:
+    context.server.post("é" * 5000)
+    context.server.tamper = _on_later_chunks(**changes)
+
+    with pytest.raises(ContextRefused, match="post_changed_while_reading"):
+        context.reader.post(context.record, THREAD, None)
+
+
+def test_a_total_that_shrinks_between_chunks_is_refused(
+    context: Context, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    post_id = context.server.post("é" * 3000)
+    real = context.server.thread_read
+    calls = {"n": 0}
+
+    def shrinking(run_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            context.server.conn.execute("UPDATE posts SET body = ? WHERE id = ?", ("é" * 2500, post_id))
+        return real(run_id, payload)
+
+    monkeypatch.setattr(context.server, "thread_read", shrinking)
+
+    with pytest.raises(ContextRefused, match="post_changed_while_reading"):
+        context.reader.post(context.record, THREAD, None)
+
+
+def test_an_overflowing_created_at_is_a_typed_refusal(context: Context) -> None:
+    context.server.post("x")
+    context.server.tamper = _set_post(created_at=10**1000)
+
+    with pytest.raises(ContextRefused, match="invalid_created_at"):
+        context.reader.post(context.record, THREAD, None)
