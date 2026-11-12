@@ -202,3 +202,26 @@ def test_an_empty_sealed_memfd_is_refused() -> None:
             read_sealed(fd)
     finally:
         os.close(fd)
+
+
+def test_a_python_without_the_seal_names_still_seals_through_the_linux_abi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib
+
+    from agent_board.night import assignment
+
+    for name in ("F_ADD_SEALS", "F_GET_SEALS", "F_SEAL_SEAL", "F_SEAL_SHRINK", "F_SEAL_GROW", "F_SEAL_WRITE"):
+        monkeypatch.delattr(fcntl, name, raising=False)
+    reloaded = importlib.reload(assignment)
+    try:
+        fd = reloaded.seal(b'{"x": 1}')
+        try:
+            assert reloaded.read_sealed(fd) == b'{"x": 1}'
+            with pytest.raises(PermissionError):
+                os.write(fd, b"y")
+        finally:
+            os.close(fd)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(assignment)

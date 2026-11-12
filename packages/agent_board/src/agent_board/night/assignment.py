@@ -14,7 +14,15 @@ MAX_TURN_SECONDS = 3600
 MAX_WAKES = 20
 MAX_SUMMARY_CHARS = 1024
 MAX_ASSIGNMENT_BYTES = 128 * 1024
-REQUIRED_SEALS = fcntl.F_SEAL_SEAL | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE
+F_ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1033)
+F_GET_SEALS = getattr(fcntl, "F_GET_SEALS", 1034)
+F_SEAL_SEAL = getattr(fcntl, "F_SEAL_SEAL", 0x1)
+F_SEAL_SHRINK = getattr(fcntl, "F_SEAL_SHRINK", 0x2)
+F_SEAL_GROW = getattr(fcntl, "F_SEAL_GROW", 0x4)
+F_SEAL_WRITE = getattr(fcntl, "F_SEAL_WRITE", 0x8)
+MFD_CLOEXEC = getattr(os, "MFD_CLOEXEC", 0x1)
+MFD_ALLOW_SEALING = getattr(os, "MFD_ALLOW_SEALING", 0x2)
+REQUIRED_SEALS = F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 _REPOSITORY_KEY = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
@@ -196,14 +204,23 @@ def policy_from(value: Mapping[str, Any]) -> NightPolicy:
 
 
 def seal(data: bytes) -> int:
-    """A memfd holding exactly `data`, sealed so no holder can change or resize it; the caller owns the fd."""
-    fd = os.memfd_create("switchboard-night-assignment", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    """A memfd holding exactly `data`, sealed so no holder can change or resize it; the caller owns the fd.
+
+    The seal values are the Linux ABI's, used when a Python build does not export them; the kernel enforces the
+    seals either way, and read_sealed checks them back.
+    """
+    if not hasattr(os, "memfd_create"):
+        raise AssignmentError("memfd_create is unavailable")
+    try:
+        fd = os.memfd_create("switchboard-night-assignment", MFD_CLOEXEC | MFD_ALLOW_SEALING)
+    except OSError as error:
+        raise AssignmentError(f"memfd_create failed: {error.errno}") from None
     try:
         view = memoryview(data)
         while view:
             written = os.write(fd, view)
             view = view[written:]
-        fcntl.fcntl(fd, fcntl.F_ADD_SEALS, REQUIRED_SEALS)
+        fcntl.fcntl(fd, F_ADD_SEALS, REQUIRED_SEALS)
         os.lseek(fd, 0, os.SEEK_SET)
     except BaseException:
         os.close(fd)
@@ -214,7 +231,7 @@ def seal(data: bytes) -> int:
 def read_sealed(fd: int) -> bytes:
     """Reads an inherited assignment fd only if it is a fully sealed, bounded memfd."""
     try:
-        seals = fcntl.fcntl(fd, fcntl.F_GET_SEALS)
+        seals = fcntl.fcntl(fd, F_GET_SEALS)
         size = os.fstat(fd).st_size
     except OSError:
         raise AssignmentError("assignment fd is not a sealed memfd") from None

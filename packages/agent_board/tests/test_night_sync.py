@@ -559,6 +559,9 @@ def test_an_empty_capture_is_stored_as_no_assignment(rig: Rig) -> None:
         pytest.param({"deadline": float("nan")}, id="nan-deadline"),
         pytest.param({"deadline": True}, id="boolean-deadline"),
         pytest.param({"wakes": [{**WAKE, "command": "rm"}]}, id="wake-outside-the-contract"),
+        pytest.param({"deadline": -1}, id="negative-deadline"),
+        pytest.param({"deadline": 10**400}, id="overflowing-deadline"),
+        pytest.param({"counter": 999}, id="snapshot-counter-jump"),
     ],
 )
 def test_a_capture_reply_that_disagrees_is_never_stored(rig: Rig, change: dict[str, Any]) -> None:
@@ -572,6 +575,7 @@ def test_a_capture_reply_that_disagrees_is_never_stored(rig: Rig, change: dict[s
 
     assert not isinstance(rig.ledger.captured(record.run_id), CapturedAssignment)
     assert rig.ledger.identity().acked_counter == before, "an unusable reply moved the ledger counter"
+    assert rig.sync.frozen is not None and rig.sync.frozen.startswith("capture_refused:"), rig.sync.frozen
 
 
 def test_a_capture_needs_a_board_acknowledged_binding_and_an_unfrozen_sync(rig: Rig) -> None:
@@ -586,3 +590,55 @@ def test_a_capture_needs_a_board_acknowledged_binding_and_an_unfrozen_sync(rig: 
     with pytest.raises(SyncError, match="frozen"):
         rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
     assert rig.board.capture_calls == 0
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"deadline": -1}, id="negative-deadline"),
+        pytest.param({"deadline": 10**400}, id="overflowing-deadline"),
+        pytest.param({"deadline": 0}, id="zero-deadline"),
+    ],
+)
+def test_an_empty_capture_still_needs_a_valid_deadline(rig: Rig, change: dict[str, Any]) -> None:
+    record = _bound(rig)
+    rig.board.reply_changes = change
+
+    with pytest.raises(SyncError):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+
+    assert not isinstance(rig.ledger.captured(record.run_id), CapturedAssignment)
+
+
+def test_an_acknowledgement_that_jumps_the_counter_is_refused_and_freezes(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    original = rig.board.capture
+
+    def jump(run_id: str, payload: Any) -> CaptureReply:
+        reply = original(run_id, payload)
+        return CaptureReply(Ack(reply.ack.journal_id, 999), {**reply.snapshot, "counter": 999})
+
+    monkeypatch.setattr(rig.board, "capture", jump)
+    before = rig.ledger.identity().acked_counter
+
+    with pytest.raises(SyncError, match="capture_counter_mismatch"):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+
+    assert rig.ledger.identity().acked_counter == before
+    assert rig.sync.frozen == "capture_refused:capture_counter_mismatch"
+    with pytest.raises(SyncError, match="frozen"):
+        rig.bind(record.run_id)
+
+
+def test_reconciliation_keeps_refusing_an_unusable_replay(rig: Rig) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    rig.board.reply_changes = {"principal": "claude@dev"}
+    with pytest.raises(SyncError):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+
+    assert rig.sync.reconcile() == "capture_refused:capture_reply_mismatch"
+    assert [each.action for each in rig.ledger.unacknowledged()] == ["capture"], "the receipt was dropped"

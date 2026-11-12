@@ -27,6 +27,10 @@ class BoardUnavailable(SyncError):
     pass
 
 
+class CaptureRefused(SyncError):
+    """The board counted a capture whose reply this box will not use; new starts stay frozen."""
+
+
 @dataclass(frozen=True)
 class BoardState:
     box: str
@@ -98,6 +102,8 @@ class BoardSync:
     def _reconcile_locked(self) -> str | None:
         try:
             self.frozen = self._reconcile()
+        except CaptureRefused as error:
+            self.frozen = f"capture_refused:{error}"
         except (SyncError, LedgerError) as error:
             self.frozen = f"reconcile_failed:{error}"
         if self.frozen is not None:
@@ -202,7 +208,11 @@ class BoardSync:
                     },
                 )
                 self._ledger.persist_capture(existing, CaptureContext(record.principal, cutoff_utc, policy))
-            self._send_and_acknowledge(existing)
+            try:
+                self._send_and_acknowledge(existing)
+            except CaptureRefused as error:
+                self.frozen = f"capture_refused:{error}"
+                raise
             stored = self._ledger.captured(record.run_id)
             if not isinstance(stored, CapturedAssignment):
                 raise SyncError("capture_not_stored")
@@ -325,7 +335,7 @@ class BoardSync:
             ack = self._board.evidence(pending.run_id, pending.payload)
         elif pending.action == "capture" and pending.run_id is not None:
             reply = self._board.capture(pending.run_id, pending.payload)
-            derived = _derive(pending, reply.snapshot, self._ledger.capture_context(pending.receipt_id))
+            derived = _derive(pending, reply, self._ledger.capture_context(pending.receipt_id))
             self._ledger.acknowledge(
                 pending.receipt_id,
                 journal_id=reply.ack.journal_id,
@@ -342,28 +352,34 @@ def _pending_bootstrap(pending: Sequence[Pending]) -> Pending | None:
     return next((each for each in pending if each.action == "bootstrap"), None)
 
 
-def _derive(
-    pending: Pending, snapshot: Mapping[str, Any], context: CaptureContext
-) -> tuple[str, bytes | None]:
+def _derive(pending: Pending, reply: CaptureReply, context: CaptureContext) -> tuple[str, bytes | None]:
     """Checks the reply against the receipt and builds the assignment from the receipt's stored choices.
 
     A reply that disagrees is refused before anything is stored; the server already counted it, so the box
-    stays out of step and frozen rather than act on data it cannot vouch for.
+    freezes rather than act on data it cannot vouch for, and only a validated replay can recover it.
     """
-    raw_deadline = snapshot.get("deadline")
-    deadline = (
-        float(raw_deadline)
-        if isinstance(raw_deadline, (int, float)) and not isinstance(raw_deadline, bool)
-        else math.nan
-    )
+    snapshot = reply.snapshot
+    expected_counter = pending.payload.get("counter")
+    journal_id = pending.payload.get("journal_id")
     if (
-        snapshot.get("run_id") != pending.run_id
+        type(expected_counter) is not int
+        or not isinstance(journal_id, str)
+        or reply.ack != Ack(journal_id, expected_counter + 1)
+        or snapshot.get("journal_id") != journal_id
+        or snapshot.get("counter") != expected_counter + 1
+    ):
+        raise CaptureRefused("capture_counter_mismatch")
+    deadline = _finite_positive(snapshot.get("deadline"))
+    cutoff = _finite_positive(context.cutoff_utc)
+    if (
+        pending.run_id is None
+        or snapshot.get("run_id") != pending.run_id
         or snapshot.get("capture_id") != pending.receipt_id
         or snapshot.get("principal") != context.principal
-        or not math.isfinite(deadline)
-        or pending.run_id is None
+        or deadline is None
+        or cutoff is None
     ):
-        raise SyncError("capture_reply_mismatch")
+        raise CaptureRefused("capture_reply_mismatch")
     try:
         wakes = parse_wakes(snapshot.get("wakes"))
         assignment = build_assignment(
@@ -371,9 +387,20 @@ def _derive(
             principal=context.principal,
             wakes=wakes,
             policy=context.policy,
-            deadline_utc=min(deadline, context.cutoff_utc),
+            deadline_utc=min(deadline, cutoff),
         )
         encoded = None if assignment is None else encode(assignment)
-    except AssignmentError as error:
-        raise SyncError(f"capture_unusable:{error}") from None
-    return json.dumps(dict(snapshot), sort_keys=True, ensure_ascii=True), encoded
+        stored = json.dumps(dict(snapshot), sort_keys=True, ensure_ascii=True, allow_nan=False)
+    except (AssignmentError, ValueError, TypeError, RecursionError) as error:
+        raise CaptureRefused(f"capture_unusable:{type(error).__name__}") from None
+    return stored, encoded
+
+
+def _finite_positive(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) and number > 0 else None
