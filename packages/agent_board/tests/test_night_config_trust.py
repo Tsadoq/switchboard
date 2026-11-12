@@ -86,3 +86,52 @@ def test_a_symlinked_config_is_refused_even_when_root_owned(tree: Tree) -> None:
 
     with pytest.raises(VerifierConfigError):
         trusted_file(tree.add("etc/verifier.toml", LINK))
+
+
+def _config_with_happier(tree: Tree, happier_mode: int) -> Path:
+    for directory in ("etc", "opt", "opt/bin", "opt/happier"):
+        tree.add(directory, ROOT_DIR)
+    python = tree.add("opt/bin/python", ROOT_FILE | 0o111)
+    happier = tree.add("opt/happier/happier", happier_mode)
+    config = tree.add("etc/verifier.toml", ROOT_FILE)
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f"""
+box = "huginn"
+principal = "verifier@huginn"
+namespace = "switchboard"
+board_url = "https://board.test.invalid"
+signer_key = "/etc/switchboard-night/verifier_ed25519"
+state_path = "/var/lib/switchboard-night/journal.sqlite3"
+slice = "switchboard-night.slice"
+
+[launcher]
+python = "{python}"
+module = "agent_board.night.launch"
+happier = "{happier}"
+
+[agents."claude@huginn"]
+uid = 1001
+home = "/var/lib/switchboard-night/happier/claude/home"
+happier_home = "/var/lib/switchboard-night/happier/claude"
+workdir_root = "/srv/night/claude"
+
+[limits]
+memory_max = "600M"
+tasks_max = 128
+cpu_quota = "100%"
+stop_grace_seconds = 5
+"""
+    )
+    return config
+
+
+def test_the_launcher_happier_binary_is_held_to_the_trusted_file_rule(tree: Tree) -> None:
+    config = night_config.load(_config_with_happier(tree, ROOT_FILE | 0o111))
+
+    assert config.launcher_happier == tree.base / "opt/happier/happier"
+
+
+def test_a_symlinked_happier_binary_is_refused(tree: Tree) -> None:
+    with pytest.raises(VerifierConfigError, match="regular root-owned file"):
+        night_config.load(_config_with_happier(tree, LINK))

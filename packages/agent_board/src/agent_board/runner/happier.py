@@ -59,6 +59,7 @@ class Happier:
         prompt: str,
         permission_mode: str,
         model: str | None = None,
+        terminal_json: str | None = None,
     ) -> Session:
         data = self._envelope(
             "session",
@@ -76,6 +77,7 @@ class Happier:
             "--permission-mode",
             permission_mode,
             *_model_flag(model),
+            *(() if terminal_json is None else ("--terminal-json", terminal_json)),
             "--json",
         )
         try:

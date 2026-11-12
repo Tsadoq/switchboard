@@ -38,7 +38,7 @@ _TOP_KEYS = {
     "verifier_unit",
     "verifier_socket",
 }
-_LAUNCHER_KEYS = {"python", "module"}
+_LAUNCHER_KEYS = {"python", "module", "happier"}
 _AGENT_KEYS = {"uid", "home", "happier_home", "workdir_root"}
 _LIMIT_KEYS = {"memory_max", "tasks_max", "cpu_quota", "stop_grace_seconds"}
 _MEMORY = re.compile(r"[1-9][0-9]*[KMG]")
@@ -80,6 +80,7 @@ class VerifierConfig:
     launcher_module: str
     agents: Mapping[str, Agent]
     limits: Limits
+    launcher_happier: Path | None = None
     guard_unit: str = PRODUCTION_GUARD_UNIT
     verifier_unit: str = PRODUCTION_VERIFIER_UNIT
     verifier_socket: str = PRODUCTION_VERIFIER_SOCKET
@@ -99,6 +100,8 @@ def load(path: Path) -> VerifierConfig:
         raise VerifierConfigError(f"unreadable config {path}: {error}") from None
     config = parse(table)
     trusted_file(config.launcher_python)
+    if config.launcher_happier is not None:
+        trusted_file(config.launcher_happier)
     return config
 
 
@@ -142,7 +145,7 @@ def parse(table: Mapping[str, Any]) -> VerifierConfig:
     if not board_url.startswith("https://"):
         raise VerifierConfigError("board_url must be https")
     launcher = _table(table["launcher"], "launcher")
-    _keys(launcher, _LAUNCHER_KEYS, "launcher")
+    _keys(launcher, _LAUNCHER_KEYS, "launcher", optional={"happier"})
     agents_table = _table(table["agents"], "agents")
     if not agents_table:
         raise VerifierConfigError("agents must name at least one principal")
@@ -158,6 +161,9 @@ def parse(table: Mapping[str, Any]) -> VerifierConfig:
         slice=_night_slice(table["slice"]),
         launcher_python=_absolute(launcher["python"], "launcher.python"),
         launcher_module=_match(launcher["module"], _MODULE, "launcher.module"),
+        launcher_happier=_absolute(launcher["happier"], "launcher.happier")
+        if "happier" in launcher
+        else None,
         agents=agents,
         limits=_limits(_table(table["limits"], "limits")),
         guard_unit=_unit_name(
