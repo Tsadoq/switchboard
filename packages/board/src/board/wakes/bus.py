@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from board.constants import HUMAN
 from board.db import Database
 from board.forum.fanout import WakeRequest
+from board.night import hold_wakes_in_transaction
+from board.wakes.origins import classify_origin
 
 LEASE_BATCH = 20
 DISCONNECT_CHECK_SECONDS = 1.0
@@ -39,8 +41,8 @@ class WakeBus:
     async def emit(self, request: WakeRequest) -> None:
         def store(conn: sqlite3.Connection) -> None:
             conn.execute(
-                "INSERT INTO wakes (principal, reason, source_ref, summary, created_at, thread_id, topic_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO wakes (principal, reason, source_ref, summary, created_at, thread_id, topic_id, origin_kind) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     request.principal,
                     request.reason,
@@ -49,8 +51,11 @@ class WakeBus:
                     time.time(),
                     request.thread_id,
                     request.topic_id,
+                    classify_origin(conn, request),
                 ),
             )
+            hold_wakes_in_transaction(conn, time.time(), request.principal)
+            _request_human_preemption(conn, request.principal)
 
         await self._db.transact(store)
         self._arrivals[request.principal].set()
@@ -60,6 +65,8 @@ class WakeBus:
         leased_until = now + self._lease_seconds
 
         def take(conn: sqlite3.Connection) -> list[Wake]:
+            hold_wakes_in_transaction(conn, now, principal)
+            _request_human_preemption(conn, principal)
             batch_limit = limit
             if principal == HUMAN and self._human_digest_seconds > 0:
                 if not _digest_due(conn, now, self._human_digest_seconds):
@@ -70,7 +77,9 @@ class WakeBus:
             rows = conn.execute(
                 "SELECT id, principal, reason, source_ref, summary, created_at, thread_id, topic_id FROM wakes "
                 "WHERE principal = ? AND acked_at IS NULL AND (leased_until IS NULL OR leased_until < ?) "
-                "ORDER BY id LIMIT ?",
+                "AND NOT EXISTS (SELECT 1 FROM night_held_wakes h WHERE h.wake_id = wakes.id) "
+                "AND NOT EXISTS (SELECT 1 FROM night_runs r WHERE r.principal = wakes.principal "
+                "AND r.state != 'finished') ORDER BY id LIMIT ?",
                 (principal, now, batch_limit),
             ).fetchall()
             conn.executemany(
@@ -84,8 +93,10 @@ class WakeBus:
         now = time.time()
 
         def stamp(conn: sqlite3.Connection) -> int:
+            hold_wakes_in_transaction(conn, now, principal)
             cursor = conn.executemany(
-                "UPDATE wakes SET acked_at = ? WHERE id = ? AND principal = ? AND acked_at IS NULL",
+                "UPDATE wakes SET acked_at = ? WHERE id = ? AND principal = ? AND acked_at IS NULL "
+                "AND NOT EXISTS (SELECT 1 FROM night_held_wakes h WHERE h.wake_id = wakes.id)",
                 [(now, wake_id, principal) for wake_id in ids],
             )
             return cursor.rowcount
@@ -111,6 +122,15 @@ class WakeBus:
                     break
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(arrival.wait(), min(remaining, DISCONNECT_CHECK_SECONDS))
+
+
+def _request_human_preemption(conn: sqlite3.Connection, principal: str) -> None:
+    conn.execute(
+        "UPDATE night_runs SET state = 'stopping' WHERE principal = ? "
+        "AND state IN ('admitted', 'running') AND EXISTS "
+        "(SELECT 1 FROM wakes WHERE principal = ? AND acked_at IS NULL AND origin_kind = 'human')",
+        (principal, principal),
+    )
 
 
 def _digest_due(conn: sqlite3.Connection, now: float, digest_seconds: int) -> bool:
