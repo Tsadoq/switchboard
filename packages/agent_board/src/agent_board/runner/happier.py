@@ -3,6 +3,7 @@ import logging
 import os
 import shlex
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,7 @@ class Happier:
         permission_mode: str,
         model: str | None = None,
         terminal_json: str | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> Session:
         data = self._envelope(
             "session",
@@ -78,6 +80,7 @@ class Happier:
             permission_mode,
             *_model_flag(model),
             *(() if terminal_json is None else ("--terminal-json", terminal_json)),
+            *(part for name, value in sorted((env or {}).items()) for part in ("--env", f"{name}={value}")),
             "--json",
         )
         try:

@@ -1,13 +1,16 @@
 import argparse
+import os
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote
 
-from agent_board import output
+from agent_board import cursors, identity, output
 from agent_board.client import Client
 from agent_board.commands import Handler, Subcommands, add_command, board_client, read_body
+from agent_board.cursors import CONSUMER_ENV, CURSOR_DIR, consumer_id
 
 _HUMAN_DURATION = re.compile(
     r"(?:(?P<W>\d+)w)?(?:(?P<D>\d+)d)?(?:(?P<H>\d+)h)?(?:(?P<M>\d+)m)?(?:(?P<S>\d+)s)?"
@@ -52,6 +55,24 @@ def register(subcommands: Subcommands) -> None:
         metavar="POST",
         help="only the posts after POST, oldest first; a wake names the post to start from",
     )
+    read.add_argument(
+        "--new",
+        action="store_true",
+        help=f"only posts this session has not printed yet; the session is named by ${CONSUMER_ENV}",
+    )
+    read.add_argument(
+        "--start-after",
+        type=_post_cursor,
+        metavar="POST",
+        help="with --new, also show posts after POST, even ones behind the cursor (a wake's starting point)",
+    )
+    read.add_argument(
+        "--recover-after",
+        type=_post_cursor,
+        metavar="POST",
+        help="with --new, replace an unreadable or missing cursor for this thread, then show posts after POST",
+    )
+    read.add_argument("--consumer", metavar="ID", help=f"the reading session, instead of ${CONSUMER_ENV}")
     read.add_argument(
         "--limit",
         type=_read_limit,
@@ -127,6 +148,10 @@ def _threads(args: argparse.Namespace) -> int:
 
 
 def _read(args: argparse.Namespace) -> int:
+    if args.new:
+        return _read_new(args)
+    if args.start_after is not None or args.recover_after is not None or args.consumer is not None:
+        raise SystemExit("agent-board read: --start-after, --recover-after and --consumer need --new")
     if args.limit is not None and args.after is None:
         raise SystemExit("agent-board read: --limit needs --after")
     with board_client(args) as client:
@@ -135,6 +160,72 @@ def _read(args: argparse.Namespace) -> int:
         )
     output.emit_text(_thread_text(thread), thread, args.json)
     return 0
+
+
+def _read_new(args: argparse.Namespace) -> int:
+    """Shows what this session has not printed, then records it, only once it was written out and flushed."""
+    if args.after is not None:
+        raise SystemExit("agent-board read: --new reads after its own cursor; use --start-after, not --after")
+    me = identity.resolve(args.as_kind)
+    try:
+        consumer = consumer_id(args.consumer or os.environ.get(CONSUMER_ENV))
+        with cursors.locked(identity.ensure_state_dir(me.kind) / CURSOR_DIR, consumer) as positions:
+            if positions.retired:
+                raise SystemExit(
+                    "agent-board read: this session was handed over to another; it reads no more"
+                )
+            base, shown = _new_boundary(positions, args)
+            with board_client(args, me) as client:
+                thread = _read_after(
+                    client, argparse.Namespace(thread_id=args.thread_id, after=base, limit=args.limit)
+                )
+            for post in thread["posts"]:
+                post["behind_cursor"] = shown is not None and post["id"] <= shown
+            thread["new"] = True
+            positions.verify()
+            try:
+                output.emit_text(_thread_text(thread), thread, args.json)
+                sys.stdout.flush()
+            except OSError:
+                return 1
+            if thread["posts"]:
+                positions.advance(args.thread_id, thread["posts"][-1]["id"])
+    except cursors.CursorError as error:
+        raise SystemExit(f"agent-board read: {error}") from None
+    return 0
+
+
+def _new_boundary(positions: cursors.Cursors, args: argparse.Namespace) -> tuple[int, int | None]:
+    """Where to read from, and the stored position, so replayed posts can be marked as behind the cursor.
+
+    Behind the cursor is not "printed before": a cursor that started at a wake's boundary never showed older posts.
+    """
+    try:
+        stored = positions.get(args.thread_id)
+    except cursors.CursorCorrupt:
+        if args.recover_after is None:
+            raise SystemExit(
+                f"agent-board read: the read cursor for thread {args.thread_id} is unreadable; recover it with "
+                f"`agent-board read {args.thread_id} --new --recover-after <post>`"
+            ) from None
+        positions.set_aside(args.thread_id)
+        return args.recover_after, None
+    if args.recover_after is not None:
+        if stored is not None:
+            raise SystemExit(
+                "agent-board read: this thread's read cursor is valid; there is nothing to recover"
+            )
+        return args.recover_after, None
+    if stored is None and args.start_after is None:
+        raise SystemExit(
+            f"agent-board read: no read cursor yet for thread {args.thread_id}; "
+            "give the wake's --start-after, or use --after"
+        )
+    if stored is None:
+        return args.start_after, None
+    if args.start_after is None:
+        return stored, stored
+    return min(stored, args.start_after), stored
 
 
 def _read_after(client: ThreadPages, args: argparse.Namespace) -> dict[str, Any]:
@@ -232,6 +323,8 @@ def _thread_text(thread: dict[str, Any]) -> str:
         lines.append(f"{shown} new post{'' if shown == 1 else 's'} after post {thread['after']}")
     for post in thread["posts"]:
         marker = "verified" if post["verified"] else "unsigned"
+        if post.get("behind_cursor"):
+            marker += ", at or behind your read cursor"
         byline = f"by {post['author']} ({post['author_kind']}) at {post['created_at']}"
         lines += ["", f"--- post {post['id']} {byline} [{marker}]", post["body"].rstrip("\n")]
         if post["files"]:

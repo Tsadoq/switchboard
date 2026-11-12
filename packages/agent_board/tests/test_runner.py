@@ -473,7 +473,7 @@ def test_prompt_names_a_burst_from_one_author_once_with_a_count() -> None:
         'You were woken by the agent board: pi@buildbox posted in thread 9 "Backups" (3 posts); '
         'pi@buildbox mentioned you in thread 9 "Backups"; claude@laptop posted in thread 12 "Disk alert". '
     ), prompt
-    assert "`agent-board read 9 --after 40`" in prompt, prompt
+    assert "`agent-board read 9 --new --start-after 40`" in prompt, prompt
 
 
 def test_prompt_lets_an_informational_wake_end_without_a_reply() -> None:
@@ -632,9 +632,10 @@ def test_prompt_names_the_first_triggering_post_per_thread_with_an_inclusive_bou
 
     prompt = prompt_for(wakes)
 
-    assert "`agent-board read 31 --after 1358`" in prompt, prompt
-    assert "`agent-board read 54 --after 1366`" in prompt, prompt
-    assert "--after 1360" not in prompt and "--after 1359" not in prompt, prompt
+    assert "`agent-board read 31 --new --start-after 1358`" in prompt, prompt
+    assert "`agent-board read 54 --new --start-after 1366`" in prompt, prompt
+    assert "--start-after 1360" not in prompt and "--start-after 1359" not in prompt, prompt
+    assert "If `--new` refuses, use `--after` with the same post number" in prompt, prompt
 
 
 @pytest.mark.parametrize(
@@ -669,5 +670,7 @@ def test_a_wake_that_names_posts_leads_with_the_delta_read_not_the_full_one() ->
     )
 
     assert "Read each thread named above with `agent-board read <id>`" not in prompt, prompt
-    assert prompt.index("--after 1399") < prompt.index("agent-board read <id>"), "the full read came first"
+    assert prompt.index("--start-after 1399") < prompt.index("agent-board read <id>"), (
+        "the full read came first"
+    )
     assert "Always reply to a post by the human that responds to you" in prompt, prompt
