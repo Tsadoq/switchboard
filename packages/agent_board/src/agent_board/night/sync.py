@@ -21,6 +21,7 @@ from agent_board.night_state import LocalJournal, Record, StateError
 
 logger = logging.getLogger(__name__)
 CAPTURE_DENIED = "capture_denied:"
+LATCHED_STATES = ("stopping", "quarantined")
 ABORT_FIELDS = frozenset(
     ("journal_id", "run_id", "abort_id", "capture_id", "capture_counter", "counter", "outcome", "capture")
 )
@@ -36,6 +37,10 @@ class BoardRefused(SyncError):
 
 class BoardUnavailable(SyncError):
     pass
+
+
+class CaptureDenied(BoardRefused):
+    """The board refused a capture or abort; only stop-path recovery for that run may proceed."""
 
 
 class CaptureRefused(SyncError):
@@ -123,6 +128,8 @@ class BoardSync:
             self.frozen = self._reconcile()
         except CaptureRefused as error:
             self.frozen = f"capture_refused:{error}"
+        except CaptureDenied as error:
+            self.frozen = f"{CAPTURE_DENIED}{error}"
         except (SyncError, LedgerError) as error:
             self.frozen = f"reconcile_failed:{error}"
         if self.frozen is not None:
@@ -260,10 +267,10 @@ class BoardSync:
             return False
         binding = Binding(record.run_id, recorded.uid, recorded.boot_id, recorded.invocation_id, ROOT_EXEC)
         try:
+            self._inspector.stopped(binding)
             self._resolve_pending_capture(record)
             if self.frozen is not None:
                 return False
-            self._inspector.stopped(binding)
             self._report(record, binding, recorded.cgroup, reason)
             if not self._board_released(record.run_id):
                 return False
@@ -285,6 +292,8 @@ class BoardSync:
         if not isinstance(pending, Pending):
             return
         if pending.action == "capture":
+            if not (record.stop_requested or record.state in LATCHED_STATES):
+                raise SyncError("capture_pending_for_an_unlatched_run")
             receipt_id = str(uuid4())
             self._ledger.persist_abort(
                 pending.receipt_id,
@@ -403,7 +412,7 @@ class BoardSync:
             raise
         except BoardRefused as error:
             self.frozen = f"{CAPTURE_DENIED}{error}"
-            raise
+            raise CaptureDenied(str(error)) from None
 
     def _send_mutation(self, pending: Pending) -> None:
         if pending.action == "bootstrap":
@@ -437,6 +446,8 @@ class BoardSync:
         if (
             type(capture_counter) is not int
             or not isinstance(journal_id, str)
+            or type(proof.get("capture_counter")) is not int
+            or type(proof.get("counter")) is not int
             or frozenset(proof) != ABORT_FIELDS
             or proof["journal_id"] != journal_id
             or proof["run_id"] != pending.run_id
@@ -488,6 +499,7 @@ def _derive(pending: Pending, reply: CaptureReply, context: CaptureContext) -> t
         or not isinstance(journal_id, str)
         or reply.ack != Ack(journal_id, expected_counter + 1)
         or snapshot.get("journal_id") != journal_id
+        or type(snapshot.get("counter")) is not int
         or snapshot.get("counter") != expected_counter + 1
     ):
         raise CaptureRefused("capture_counter_mismatch")

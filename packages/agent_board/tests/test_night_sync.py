@@ -900,3 +900,82 @@ def test_an_applied_capture_with_unrelated_divergence_stays_denied(
     assert rig.sync.frozen == "capture_denied:counter_diverged"
     assert [each.action for each in rig.ledger.unacknowledged()] == ["capture_abort"]
     assert rig.board.evidence_payloads == []
+
+
+def test_a_capture_denial_survives_a_stop_poll_and_still_recovers(rig: Rig) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    rig.board.deny_capture = True
+    with pytest.raises(BoardRefused):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    stopping = _stopping(rig, record)
+    rig.board.stopping.add(record.run_id)
+
+    assert record.run_id in rig.sync.requested_stops()
+    assert rig.sync.frozen == "capture_denied:not_running", "a reconcile erased the typed denial"
+
+    assert rig.sync.settle(stopping, "preempted"), rig.sync.frozen
+
+
+def test_a_restart_before_the_abort_link_keeps_the_denial_recoverable(rig: Rig) -> None:
+    record = _bound(rig)
+    rig.board.deny_capture = True
+    with pytest.raises(BoardRefused):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    stopping = _stopping(rig, record)
+    restarted = BoardSync(
+        "dev", Ledger(rig.state_dir / "ledger.sqlite3"), rig.board, rig.inspector, rig.journal
+    )
+
+    assert restarted.reconcile() == "capture_denied:not_running"
+    assert restarted.settle(stopping, "preempted"), restarted.frozen
+    assert restarted.frozen is None
+
+
+@pytest.mark.parametrize("field", ["capture_counter", "counter"])
+def test_abort_proof_counters_must_be_exact_integers(rig: Rig, field: str) -> None:
+    record = _bound(rig)
+    rig.board.deny_capture = True
+    with pytest.raises(BoardRefused):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    counter = rig.ledger.identity().acked_counter
+    rig.board.abort_changes = {field: float(counter if field == "capture_counter" else counter + 1)}
+
+    assert not rig.sync.settle(_stopping(rig, record), "preempted")
+
+    assert rig.board.evidence_payloads == []
+    assert [each.action for each in rig.ledger.unacknowledged()] == ["capture_abort"]
+
+
+def test_an_applied_snapshot_counter_must_be_an_exact_integer(rig: Rig) -> None:
+    record = _bound(rig)
+    rig.board.held_wakes = [WAKE]
+    rig.board.lose_next_reply = True
+    with pytest.raises(BoardUnavailable):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    parent = next(iter(rig.board.captures))
+    rig.board.captures[parent] = {**rig.board.captures[parent], "counter": float(rig.board.counter)}
+
+    assert not rig.sync.settle(_stopping(rig, record), "preempted")
+
+    assert rig.sync.frozen is not None and rig.sync.frozen.startswith("capture_refused:"), rig.sync.frozen
+    assert rig.board.evidence_payloads == []
+
+
+def test_no_abort_is_composed_for_an_unlatched_or_still_running_run(rig: Rig) -> None:
+    record = _bound(rig)
+    rig.board.capture_outage = True
+    with pytest.raises(BoardUnavailable):
+        rig.sync.capture(record, POLICY, cutoff_utc=1_850.0)
+    rig.board.capture_outage = False
+    rig.inspector.not_stopped = InspectionError("still_running")
+
+    assert not rig.sync.settle(record, "completed")
+    rig.inspector.not_stopped = None
+    assert not rig.sync.settle(record, "completed"), (
+        "an abort was composed for a run whose stop is not latched"
+    )
+
+    captured = rig.ledger.captured(record.run_id)
+    assert isinstance(captured, Pending) and captured.action == "capture"
+    assert "capture_abort" not in rig.board.calls
