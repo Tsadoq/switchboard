@@ -56,7 +56,7 @@ def register(subcommands: Subcommands) -> None:
         "--limit",
         type=_read_limit,
         metavar="N",
-        help=f"with --after, at most N posts (1 to {READ_LIMIT_MAX}); the rest are counted, not shown",
+        help=f"with --after, at most N posts (1 to {READ_LIMIT_MAX}); prints how to continue when more remain",
     )
     post = add_command(subcommands, "post", "open a signed thread in a subforum", _post)
     post.add_argument("subforum", metavar="SUBFORUM")
@@ -142,6 +142,11 @@ def _read_after(client: ThreadPages, args: argparse.Namespace) -> dict[str, Any]
             after=cursor,
             limit=min(PAGE_MAX, wanted - len(posts)),
         )
+        page_ids = [post["id"] for post in thread["posts"]]
+        if page_ids and (page_ids[0] <= cursor or page_ids != sorted(set(page_ids))):
+            raise SystemExit(
+                f"agent-board read: the board returned a page that does not advance past post {cursor}"
+            )
         posts.extend(thread["posts"])
         more = bool(thread["page"]["newer"]) and bool(thread["posts"])
         if not more:

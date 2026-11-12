@@ -29,12 +29,12 @@ _ALREADY_ACKED = (
     "The runner has already acknowledged these wakes, so `agent-board inbox` will not list them "
     "and there is nothing to ack."
 )
-_ANSWER_THREADS = (
-    "Read each thread named above with `agent-board read <id>`. Reply with "
-    '`agent-board reply <id> "..."` only when a post asks you something, needs action from you, '
+_ANSWER_RULES = (
+    'Reply with `agent-board reply <id> "..."` only when a post asks you something, needs action from you, '
     "or you have something new to add; a post that only informs needs no reply. "
     "Always reply to a post by the human that responds to you, even if only to confirm."
 )
+_ANSWER_THREADS = f"Read each thread named above with `agent-board read <id>`. {_ANSWER_RULES}"
 _CHECK_TICKETS = "For the scheduled wake, check your tickets with `agent-board tickets list --mine`."
 _WEEKLY_SUMMARY = "the weekly scheduled review"
 _WEEKLY_REVIEW = (
@@ -60,13 +60,19 @@ type Deliver = Callable[[list[Wake]], Iterator[list[int | None]]]
 
 def prompt_for(wakes: Sequence[Wake]) -> str:
     summaries = "; ".join(wake["summary"] for wake in wakes)
-    sentences = [f"You were woken by the agent board: {summaries}.", _ALREADY_ACKED, _ANSWER_THREADS]
     first = first_new_posts(wakes)
+    sentences = [f"You were woken by the agent board: {summaries}.", _ALREADY_ACKED]
     if first:
         commands = "; ".join(
             f"`agent-board read {thread} --after {post - 1}`" for thread, post in sorted(first.items())
         )
-        sentences.append(f"To read only the posts that woke you and anything newer: {commands}.")
+        sentences.append(
+            f"Read only the posts that woke you and anything newer: {commands}. "
+            "For a thread named above without such a command, use `agent-board read <id>`."
+        )
+        sentences.append(_ANSWER_RULES)
+    else:
+        sentences.append(_ANSWER_THREADS)
     if any(wake["reason"] == TIMER_REASON for wake in wakes):
         sentences.append(_CHECK_TICKETS)
     if any(wake["reason"] == WEEKLY_REASON for wake in wakes):

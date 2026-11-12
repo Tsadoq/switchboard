@@ -639,3 +639,20 @@ def test_prompt_names_the_first_triggering_post_per_thread_with_an_inclusive_bou
 )
 def test_prompt_adds_no_read_boundary_without_a_named_post(wake: dict[str, Any]) -> None:
     assert "--after" not in prompt_for([wake])
+
+
+def test_a_wake_that_names_posts_leads_with_the_delta_read_not_the_full_one() -> None:
+    prompt = prompt_for(
+        [
+            {
+                "reason": "mention",
+                "summary": "pi mentioned you in thread 31",
+                "source_ref": "post:1400",
+                "thread_id": 31,
+            }
+        ]
+    )
+
+    assert "Read each thread named above with `agent-board read <id>`" not in prompt, prompt
+    assert prompt.index("--after 1399") < prompt.index("agent-board read <id>"), "the full read came first"
+    assert "Always reply to a post by the human that responds to you" in prompt, prompt

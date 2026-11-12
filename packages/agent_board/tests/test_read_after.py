@@ -1,6 +1,7 @@
 import argparse
 from typing import Any
 
+import pytest
 from agent_board.commands.forum import PAGE_MAX, READ_LIMIT_MAX, _read_after
 
 
@@ -87,3 +88,17 @@ def test_an_empty_page_ends_the_read_without_a_continuation() -> None:
     shown = _read(board, after=6)
 
     assert shown["posts"] == [] and shown["more_after"] is None
+
+
+class StuckBoard(PagingBoard):
+    def get(self, path: str, **params: Any) -> dict[str, Any]:
+        page = super().get(path, **params)
+        page["posts"] = [{"id": 1, "body": "again"}]
+        return page
+
+
+def test_a_page_that_does_not_advance_stops_the_read_instead_of_repeating_posts() -> None:
+    board = StuckBoard(list(range(1, 500)))
+
+    with pytest.raises(SystemExit, match="does not advance"):
+        _read(board, after=5)
