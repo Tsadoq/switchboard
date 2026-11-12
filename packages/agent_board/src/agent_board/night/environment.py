@@ -6,3 +6,7 @@ HOME_DIR_ENV = "HAPPIER_HOME_DIR"
 RUNTIME_DIR_NAME = "run"
 HOME_NAME = "home"
 PLAIN_TERMINAL = '{"mode":"plain"}'
+NIGHT_UID_ENV = "SWITCHBOARD_NIGHT_UID"
+DAY_UID_ENV = "SWITCHBOARD_NIGHT_DAY_UID"
+REPOSITORY_POLICY = "/etc/switchboard-night/repositories.toml"
+MIRROR_ROOT = "/var/lib/switchboard-night/mirrors"

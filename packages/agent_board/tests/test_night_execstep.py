@@ -17,6 +17,7 @@ from agent_board.night_state import ClockReading, Grant, LocalJournal
 
 BOOT = str(uuid4())
 UID, GID = 1001, 2050
+NIGHT_UID, NIGHT_GID = 3001, 3050
 FENCE = "f" * 43
 OWN = "b" * 32
 GUARD = "c" * 32
@@ -39,6 +40,7 @@ class FakeSystem:
         self.skip_drop = False
         self.executed: tuple[str, list[str], Mapping[str, str]] | None = None
         self.looked_up: Account | None = None
+        self.supplementary: list[int] = []
 
     def own_cgroup(self) -> str:
         return self.cgroup
@@ -56,7 +58,10 @@ class FakeSystem:
         return self.now_utc
 
     def account(self, uid: int) -> Account:
-        return self.looked_up or Account("agent", uid, GID)
+        return self.looked_up or Account("agent-night", uid, NIGHT_GID if uid == NIGHT_UID else GID)
+
+    def supplementary_groups(self, account: Account) -> list[int]:
+        return list(self.supplementary)
 
     def drop_to(self, account: Account) -> None:
         self.calls.append("drop")
@@ -109,6 +114,8 @@ def _config() -> Any:
             "agents": {
                 "pi@huginn": {
                     "uid": UID,
+                    "night_uid": NIGHT_UID,
+                    "night_gid": NIGHT_GID,
                     "home": "/home/agent",
                     "happier_home": "/var/lib/switchboard-night/happier/pi",
                     "workdir_root": "/srv/night/pi",
@@ -227,7 +234,7 @@ def test_the_drop_uses_the_accounts_primary_gid_and_clears_supplementary_groups(
     with pytest.raises(Executed):
         rig.run()
 
-    assert rig.system.ids == ((UID, UID, UID), (GID, GID, GID), []), rig.system.ids
+    assert rig.system.ids == ((NIGHT_UID,) * 3, (NIGHT_GID,) * 3, []), rig.system.ids
 
 
 def test_a_failed_drop_never_reaches_the_launcher(rig: Rig) -> None:
@@ -252,8 +259,9 @@ def test_an_unverified_drop_never_reaches_the_launcher(rig: Rig) -> None:
     "looked_up",
     [
         pytest.param(Account("root", 0, 0), id="lookup-returns-root"),
-        pytest.param(Account("other", 1002, GID), id="lookup-returns-another-principal"),
-        pytest.param(Account("agent", UID, 0), id="lookup-returns-root-group"),
+        pytest.param(Account("other", 1002, NIGHT_GID), id="lookup-returns-another-principal"),
+        pytest.param(Account("agent-night", NIGHT_UID, 0), id="lookup-returns-root-group"),
+        pytest.param(Account("agent", UID, GID), id="lookup-returns-the-requesting-day-account"),
     ],
 )
 def test_an_account_lookup_that_disagrees_with_the_configured_uid_is_refused_before_dropping(
@@ -284,3 +292,34 @@ def test_a_late_exec_after_latch_stop_refuses_before_any_drop_or_exec(rig: Rig) 
     with pytest.raises(ExecRefused, match="not_runnable"):
         rig.run()
     assert rig.system.calls == [], "the late exec reached the uid drop or native exec after the latch"
+
+
+def test_the_launcher_learns_both_the_night_and_the_requesting_uid(rig: Rig) -> None:
+    with pytest.raises(Executed):
+        rig.run()
+
+    assert rig.system.executed is not None
+    environment = rig.system.executed[2]
+    assert environment["SWITCHBOARD_NIGHT_UID"] == str(NIGHT_UID)
+    assert environment["SWITCHBOARD_NIGHT_DAY_UID"] == str(UID)
+    assert environment["USER"] == "agent-night"
+
+
+@pytest.mark.parametrize(
+    ("looked_up", "supplementary"),
+    [
+        pytest.param(Account("agent-night", NIGHT_UID, GID), [], id="primary-gid-is-not-the-dedicated-one"),
+        pytest.param(Account("agent-night", NIGHT_UID, NIGHT_GID), [27], id="member-of-sudo"),
+        pytest.param(Account("agent-night", NIGHT_UID, NIGHT_GID), [GID], id="member-of-the-day-group"),
+    ],
+)
+def test_a_night_account_that_is_not_dedicated_is_refused_before_dropping(
+    rig: Rig, looked_up: Account, supplementary: list[int]
+) -> None:
+    rig.system.looked_up = looked_up
+    rig.system.supplementary = supplementary
+
+    with pytest.raises(ExecRefused, match="night_account_not_dedicated"):
+        rig.run()
+
+    assert rig.system.calls == []

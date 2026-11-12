@@ -39,7 +39,7 @@ _TOP_KEYS = {
     "verifier_socket",
 }
 _LAUNCHER_KEYS = {"python", "module", "happier"}
-_AGENT_KEYS = {"uid", "home", "happier_home", "workdir_root"}
+_AGENT_KEYS = {"uid", "night_uid", "night_gid", "home", "happier_home", "workdir_root"}
 _LIMIT_KEYS = {"memory_max", "tasks_max", "cpu_quota", "stop_grace_seconds"}
 _MEMORY = re.compile(r"[1-9][0-9]*[KMG]")
 _QUOTA = re.compile(r"[1-9][0-9]*%")
@@ -56,6 +56,13 @@ class Agent:
     home: Path
     happier_home: Path
     workdir_root: Path
+    night_uid: int | None = None
+    night_gid: int | None = None
+
+    @property
+    def exec_uid(self) -> int:
+        """The uid the run executes as: the dedicated night uid, or the requesting uid for the stub alone."""
+        return self.uid if self.night_uid is None else self.night_uid
 
 
 @dataclass(frozen=True)
@@ -150,6 +157,7 @@ def parse(table: Mapping[str, Any]) -> VerifierConfig:
     if not agents_table:
         raise VerifierConfigError("agents must name at least one principal")
     agents = {name: _agent(name, value, box) for name, value in agents_table.items()}
+    _night_identities(agents, launcher)
     return VerifierConfig(
         box=box,
         principal=principal,
@@ -195,17 +203,39 @@ def _agent(principal: str, value: Any, box: str) -> Agent:
     if principal.partition("@")[2] != box or principal.partition("@")[0].casefold() == "verifier":
         raise VerifierConfigError(f"agent {principal} does not belong to box {box}")
     table = _table(value, f"agents.{principal}")
-    _keys(table, _AGENT_KEYS, f"agents.{principal}")
-    uid = table["uid"]
-    if type(uid) is not int or uid <= 0:
-        raise VerifierConfigError(f"agents.{principal}.uid must be a positive integer")
+    _keys(table, _AGENT_KEYS, f"agents.{principal}", optional={"night_uid", "night_gid"})
+    ids = {key: table[key] for key in ("uid", "night_uid", "night_gid") if key in table}
+    for key, number in ids.items():
+        if type(number) is not int or number <= 0:
+            raise VerifierConfigError(f"agents.{principal}.{key} must be a positive integer")
+    if ("night_uid" in ids) != ("night_gid" in ids):
+        raise VerifierConfigError(f"agents.{principal} needs night_uid and night_gid together")
+    if ids.get("night_uid") == ids["uid"]:
+        raise VerifierConfigError(f"agents.{principal}.night_uid must differ from the requesting uid")
     return Agent(
         principal,
-        uid,
+        ids["uid"],
         _absolute(table["home"], f"agents.{principal}.home"),
         _absolute(table["happier_home"], f"agents.{principal}.happier_home"),
         _absolute(table["workdir_root"], f"agents.{principal}.workdir_root"),
+        ids.get("night_uid"),
+        ids.get("night_gid"),
     )
+
+
+def _night_identities(agents: Mapping[str, Agent], launcher: Mapping[str, Any]) -> None:
+    """A native launcher needs a dedicated night uid per principal, never shared and never a requesting uid."""
+    native = launcher.get("module") != ACCEPTANCE_STUB
+    day_uids = {agent.uid for agent in agents.values()}
+    night_uids: set[int] = set()
+    for agent in agents.values():
+        if agent.night_uid is None:
+            if native:
+                raise VerifierConfigError(f"agents.{agent.principal} needs a night_uid for a native launcher")
+            continue
+        if agent.night_uid in day_uids or agent.night_uid in night_uids:
+            raise VerifierConfigError(f"agents.{agent.principal}.night_uid is shared with another identity")
+        night_uids.add(agent.night_uid)
 
 
 def _unit_name(

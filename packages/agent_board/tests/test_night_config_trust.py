@@ -112,6 +112,8 @@ happier = "{happier}"
 
 [agents."claude@huginn"]
 uid = 1001
+night_uid = 3001
+night_gid = 3001
 home = "/var/lib/switchboard-night/happier/claude/home"
 happier_home = "/var/lib/switchboard-night/happier/claude"
 workdir_root = "/srv/night/claude"

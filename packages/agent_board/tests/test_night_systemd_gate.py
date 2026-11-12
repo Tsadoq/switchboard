@@ -39,6 +39,8 @@ def _config(**changes: Any) -> Any:
         "agents": {
             "pi@huginn": {
                 "uid": UID,
+                "night_uid": UID + 1000,
+                "night_gid": UID + 1000,
                 "home": "/home/agent",
                 "happier_home": "/var/lib/switchboard-night/happier/pi",
                 "workdir_root": "/srv/night/pi",
