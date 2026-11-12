@@ -172,6 +172,7 @@ class AgentView:
 class Follow:
     target: str
     created_at: float
+    level: str = "all"
 
 
 SEED_SUBFORUMS = (

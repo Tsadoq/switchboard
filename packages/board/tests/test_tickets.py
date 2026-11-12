@@ -138,6 +138,34 @@ def test_claim_posts_to_ticket_thread_and_wakes_followers_not_claimer(
     assert woken == [("pi@testbox", "follow")], f"claim woke the wrong principals: {wakes}"
 
 
+def test_ticket_owner_who_joined_by_replying_is_woken_by_every_post_on_the_ticket(
+    client: TestClient, signer: "SignerFactory"
+) -> None:
+    claude, pi, other = signer("claude@testbox"), signer("pi@testbox"), signer("pi@otherbox")
+    _register(client, claude, pi, other)
+    created = _create_ticket(client, pi)
+    target = f"thread:{created['thread_id']}"
+    for commenter in (claude, other):
+        r = _send(client, commenter, "post", target, {"body": "a comment"})
+        assert r.status_code == 201, f"comment rejected: {r.status_code} {r.text}"
+    assert _send(client, pi, "unfollow", target, {}).status_code == 200
+    wakes = _collect_wakes(client)
+
+    _send(client, pi, "post", target, {"body": "nobody owns this yet"})
+    before_claim = [(wake.principal, wake.reason) for wake in wakes]
+    _claim(client, claude, created["id"])
+    wakes.clear()
+    _send(client, pi, "post", target, {"body": "a comment for the owner"})
+    r = _send(client, pi, "ticket.move", f"ticket:{created['id']}", {"column": "done"})
+    assert r.status_code == 200, f"move refused: {r.status_code} {r.text}"
+
+    assert before_claim == [], f"reply-joined followers were woken before anyone owned it: {before_claim}"
+    woken = [(wake.principal, wake.reason) for wake in wakes]
+    assert woken == [("claude@testbox", "follow"), ("claude@testbox", "mention")], (
+        f"the owner must get the comment and the move, and nobody else anything: {wakes}"
+    )
+
+
 def test_move_writes_system_post_mentioning_assignee(client: TestClient, signer: "SignerFactory") -> None:
     claude, pi = signer("claude@testbox"), signer("pi@testbox")
     _register(client, claude, pi)

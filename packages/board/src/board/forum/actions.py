@@ -35,7 +35,7 @@ from board.forum.entities import (
     ThreadPage,
     ThreadTarget,
 )
-from board.forum.fanout import ForumEvent, WakeRequested
+from board.forum.fanout import FOLLOW_LEVELS, FollowLevel, ForumEvent, WakeRequested
 from board.identity import presence
 from board.identity.presence import Presence
 from board.identity.registry import Registry
@@ -122,8 +122,9 @@ class Forum:
         await self._publish_wakes(event)
         return PostResult(event.thread_id, event.post_id)
 
-    async def follow(self, principal: str, target: str) -> str:
+    async def follow(self, principal: str, target: str, level: object = None) -> tuple[str, FollowLevel]:
         parsed = parse_target(target)
+        chosen = _follow_level(level)
 
         def store(conn: sqlite3.Connection) -> None:
             _require_target(conn, parsed)
@@ -131,13 +132,13 @@ class Forum:
                 "DELETE FROM follow_optouts WHERE target = ? AND principal = ?", (str(parsed), principal)
             )
             conn.execute(
-                "INSERT INTO follows (target, principal, created_at) VALUES (?, ?, ?) "
-                "ON CONFLICT (target, principal) DO NOTHING",
-                (str(parsed), principal, time.time()),
+                "INSERT INTO follows (target, principal, created_at, level) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (target, principal) DO UPDATE SET level = excluded.level",
+                (str(parsed), principal, time.time(), chosen),
             )
 
         await self._db.transact(store)
-        return str(parsed)
+        return str(parsed), chosen
 
     async def unfollow(self, principal: str, target: str) -> str:
         parsed = parse_target(target)
@@ -153,13 +154,15 @@ class Forum:
         await self._db.transact(remove)
         return str(parsed)
 
-    async def followers_of(self, thread_id: int, subforum: str) -> set[str]:
-        def read(conn: sqlite3.Connection) -> set[str]:
+    async def followers_of(self, thread_id: int, subforum: str) -> dict[str, FollowLevel]:
+        """Each follower of the thread or its subforum, at the wider of their two levels."""
+
+        def read(conn: sqlite3.Connection) -> dict[str, FollowLevel]:
             rows = conn.execute(
-                "SELECT principal FROM follows WHERE target IN (?, ?)",
+                "SELECT principal, MIN(level) AS level FROM follows WHERE target IN (?, ?) GROUP BY principal",
                 (str(ThreadTarget(thread_id)), str(SubforumTarget(subforum))),
             )
-            return {row["principal"] for row in rows}
+            return {row["principal"]: row["level"] for row in rows}
 
         return await self._db.read(read)
 
@@ -544,9 +547,10 @@ class Forum:
     async def follows(self, principal: str) -> list[Follow]:
         def read(conn: sqlite3.Connection) -> list[Follow]:
             rows = conn.execute(
-                "SELECT target, created_at FROM follows WHERE principal = ? ORDER BY created_at", (principal,)
+                "SELECT target, created_at, level FROM follows WHERE principal = ? ORDER BY created_at",
+                (principal,),
             )
-            return [Follow(row["target"], row["created_at"]) for row in rows]
+            return [Follow(row["target"], row["created_at"], row["level"]) for row in rows]
 
         return await self._db.read(read)
 
@@ -571,6 +575,7 @@ class Forum:
             ).fetchone()
             if live is None:
                 raise Refused("file_not_live")
+        joined_as: FollowLevel = "mentions"
         match target:
             case ThreadTarget(thread_id):
                 thread = conn.execute(
@@ -592,6 +597,7 @@ class Forum:
                     )
                 )
                 topic_id = thread_id
+                joined_as = "all"
         post_id = _row_id(
             conn.execute(
                 "INSERT INTO posts (thread_id, author, author_kind, body, envelope_bytes, signature, "
@@ -611,11 +617,11 @@ class Forum:
         if author_kind == "agent":
             follow_target = str(ThreadTarget(thread_id))
             conn.execute(
-                "INSERT INTO follows (target, principal, created_at) "
-                "SELECT ?, ?, ? WHERE NOT EXISTS "
+                "INSERT INTO follows (target, principal, created_at, level) "
+                "SELECT ?, ?, ?, ? WHERE NOT EXISTS "
                 "(SELECT 1 FROM follow_optouts WHERE target = ? AND principal = ?) "
                 "ON CONFLICT (target, principal) DO NOTHING",
-                (follow_target, author, now, follow_target, author),
+                (follow_target, author, now, joined_as, follow_target, author),
             )
         conn.executemany(
             "INSERT INTO post_files (post_id, file_id) VALUES (?, ?)",
@@ -626,12 +632,32 @@ class Forum:
             "INSERT INTO mentions (post_id, principal) VALUES (?, ?)",
             [(post_id, principal) for principal in sorted(mentioned)],
         )
-        return ForumEvent(author, post_id, thread_id, topic_id, title, subforum, frozenset(mentioned))
+        ticket = conn.execute("SELECT assignee FROM tickets WHERE thread_id = ?", (thread_id,)).fetchone()
+        return ForumEvent(
+            author,
+            post_id,
+            thread_id,
+            topic_id,
+            title,
+            subforum,
+            frozenset(mentioned),
+            by_human=author_kind == "human",
+            ticket_owner=None if ticket is None else ticket["assignee"],
+        )
 
     async def _publish_wakes(self, event: ForumEvent) -> None:
         followers = await self.followers_of(event.thread_id, event.subforum)
         for request in fanout.wake_requests(event, followers):
             await self._hub.publish(WakeRequested(request))
+
+
+def _follow_level(level: object) -> FollowLevel:
+    if level is None:
+        return "all"
+    for known in FOLLOW_LEVELS:
+        if level == known:
+            return known
+    raise Refused("bad_payload")
 
 
 def parse_target(target: str) -> Target:

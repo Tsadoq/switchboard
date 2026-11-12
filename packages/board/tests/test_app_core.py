@@ -60,7 +60,10 @@ def test_participant_follow_migration_backfills_agents_once(tmp_path: Path) -> N
         )
         conn.execute("INSERT INTO follows VALUES ('thread:1', 'bob', 99)")
         migrate(conn)
-        rows = [tuple(row) for row in conn.execute("SELECT * FROM follows ORDER BY principal")]
+        rows = [
+            tuple(row)
+            for row in conn.execute("SELECT target, principal, created_at FROM follows ORDER BY principal")
+        ]
         assert rows == [("thread:1", "alice", 1), ("thread:1", "bob", 99)]
         conn.execute("DELETE FROM follows WHERE principal = 'alice'")
         conn.execute("INSERT INTO follow_optouts VALUES ('thread:1', 'alice')")
