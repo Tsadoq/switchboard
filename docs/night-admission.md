@@ -46,6 +46,10 @@ The dedicated root-verifier API is documented separately in `night-verifier-prot
   including uncertain/quarantined runs. This is a server request and delivery gate,
   not proof that a local process stopped.
 
+Migration 0019 and the verifier-only `night.capture` action add durable fenced
+capture snapshots, described in `night-wake-capture.md`. Capture is not an execution
+acknowledgement, launch authority or slot release; no client/producer is wired yet.
+
 Held wakes currently remain held until the unfinished fenced autonomous-delivery or
 completion-tracked morning-drain path consumes them. There is deliberately no automatic
 06:00 flush. Do not enroll a principal until these paths and the local stop consumer
