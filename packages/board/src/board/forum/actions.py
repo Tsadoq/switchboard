@@ -159,7 +159,8 @@ class Forum:
 
         def read(conn: sqlite3.Connection) -> dict[str, FollowLevel]:
             rows = conn.execute(
-                "SELECT principal, MIN(level) AS level FROM follows WHERE target IN (?, ?) GROUP BY principal",
+                "SELECT principal, CASE WHEN SUM(level = 'all') > 0 THEN 'all' ELSE 'mentions' END AS level "
+                "FROM follows WHERE target IN (?, ?) GROUP BY principal",
                 (str(ThreadTarget(thread_id)), str(SubforumTarget(subforum))),
             )
             return {row["principal"]: row["level"] for row in rows}
