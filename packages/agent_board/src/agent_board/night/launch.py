@@ -161,6 +161,8 @@ class Host(Protocol):
 
     def release_trusted(self, binary: Path) -> bool: ...
 
+    def containers_trusted(self, path: Path) -> bool: ...
+
     def daemon_status(self) -> Mapping[str, Any]: ...
 
     def daemon_sessions(self) -> list[TrackedSession]: ...
@@ -219,8 +221,10 @@ def preflight(settings: Settings, host: Host) -> None:
         raise LaunchRefused(EXIT_PREFLIGHT, "wrong_uid")
     if not host.release_trusted(settings.happier_bin):
         raise LaunchRefused(EXIT_PREFLIGHT, "happier_release_not_root_owned")
-    _private_directory(settings.happier_home, settings.uid, "happier_home")
-    _private_directory(settings.workdir_root, settings.uid, "workdir_root")
+    for root, name in ((settings.happier_home, "happier_home"), (settings.workdir_root, "workdir_root")):
+        if not host.containers_trusted(root):
+            raise LaunchRefused(EXIT_PREFLIGHT, f"{name}_container_not_root_managed")
+        _private_directory(root, settings.uid, name)
     for inner, name in ((settings.home, HOME_NAME), (settings.runtime_dir, RUNTIME_DIR_NAME)):
         if inner != settings.happier_home / name:
             raise LaunchRefused(EXIT_PREFLIGHT, f"{inner} is not happier_home/{name}")
@@ -366,6 +370,21 @@ def _stop_daemon(host: Host, daemon: Daemon) -> None:
         host.sleep(POLL_SECONDS)
 
 
+def trusted_containers(path: Path, owner: int = 0, top: Path = Path("/")) -> bool:
+    """Every directory above `path`, up to and including `top` when it is the root, is a real directory the
+    agent cannot write or replace, so no ancestor link can redirect the private leaf into the day account."""
+    for each in path.parents:
+        if each != Path("/") and each == top:
+            return True
+        try:
+            metadata = each.lstat()
+        except OSError:
+            return False
+        if not _owned_unwritable(metadata, owner, directory=True):
+            return False
+    return True
+
+
 def release_trusted(binary: Path, owner: int = 0) -> bool:
     """The binary's whole version directory, with no symlink anywhere: the ELF loads its modules from beside itself."""
     release = binary.parent
@@ -490,6 +509,9 @@ class LiveHost:
 
     def release_trusted(self, binary: Path) -> bool:
         return release_trusted(binary)
+
+    def containers_trusted(self, path: Path) -> bool:
+        return trusted_containers(path)
 
     def daemon_status(self) -> Mapping[str, Any]:
         completed = self._run([str(self._settings.happier_bin), "daemon", "status", "--json"])

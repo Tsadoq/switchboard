@@ -31,6 +31,7 @@ from agent_board.night.launch import (
     release_trusted,
     settings_from,
     tracked_sessions,
+    trusted_containers,
 )
 from agent_board.runner.happier import Happier, HappierError, Session
 
@@ -94,6 +95,9 @@ class FakeHost:
 
     def release_trusted(self, binary: Path) -> bool:
         return self.trusted_release
+
+    def containers_trusted(self, path: Path) -> bool:
+        return trusted_containers(path, owner=os.getuid(), top=self._account_home.parent)
 
     def daemon_status(self) -> Mapping[str, Any]:
         self.calls.append("status")
@@ -740,3 +744,28 @@ def test_the_happier_client_passes_the_plain_terminal_request(monkeypatch: pytes
 
     argv = seen[0]
     assert argv[argv.index("--terminal-json") + 1] == PLAIN_TERMINAL
+
+
+@pytest.mark.parametrize("root", ["happier_home", "workdir_root"])
+def test_a_symlinked_ancestor_cannot_redirect_the_private_roots_into_the_day_account(
+    rig: Rig, root: str
+) -> None:
+    night = getattr(rig.settings, root).parent
+    destination = rig.account / "aliased-night"
+    night.rename(destination)
+    night.symlink_to(destination, target_is_directory=True)
+
+    assert rig.run() == EXIT_PREFLIGHT
+    assert rig.host.calls == []
+
+
+def test_an_agent_writable_container_above_the_private_roots_is_refused(rig: Rig) -> None:
+    rig.settings.happier_home.parent.chmod(0o777)
+
+    assert rig.run() == EXIT_PREFLIGHT
+    assert rig.host.calls == []
+
+
+def test_the_real_root_managed_containers_are_trusted() -> None:
+    assert trusted_containers(Path("/opt/happier/0.2.17/happier"))
+    assert not trusted_containers(Path("/tmp/x/y")), "a world-writable /tmp is not a managed container"
