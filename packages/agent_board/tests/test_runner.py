@@ -601,3 +601,58 @@ def test_idle_raises_on_an_unexpected_wait_error(
     with pytest.raises(HappierError) as raised:
         happier.idle(session_id)
     assert raised.value.code == "boom", f"unexpected wait error rewritten: {raised.value.code}"
+
+
+def test_prompt_names_the_first_triggering_post_per_thread_with_an_inclusive_boundary() -> None:
+    wakes = [
+        {"reason": "follow", "summary": "pi posted in thread 31", "source_ref": "post:1361", "thread_id": 31},
+        {
+            "reason": "mention",
+            "summary": "pi mentioned you in thread 31",
+            "source_ref": "post:1359",
+            "thread_id": 31,
+        },
+        {"reason": "follow", "summary": "pi posted in thread 54", "source_ref": "post:1367", "thread_id": 54},
+    ]
+
+    prompt = prompt_for(wakes)
+
+    assert "`agent-board read 31 --after 1358`" in prompt, prompt
+    assert "`agent-board read 54 --after 1366`" in prompt, prompt
+    assert "--after 1360" not in prompt and "--after 1359" not in prompt, prompt
+
+
+@pytest.mark.parametrize(
+    "wake",
+    [
+        pytest.param({"reason": "timer", "summary": "scheduled wake, every 21600 s"}, id="timer"),
+        pytest.param(
+            {"reason": "follow", "summary": "x", "source_ref": "ticket:4", "thread_id": 16}, id="not-a-post"
+        ),
+        pytest.param(
+            {"reason": "follow", "summary": "x", "source_ref": "post:7", "thread_id": None}, id="no-thread"
+        ),
+        pytest.param(
+            {"reason": "follow", "summary": "x", "source_ref": "post:07", "thread_id": 3}, id="odd-ref"
+        ),
+    ],
+)
+def test_prompt_adds_no_read_boundary_without_a_named_post(wake: dict[str, Any]) -> None:
+    assert "--after" not in prompt_for([wake])
+
+
+def test_a_wake_that_names_posts_leads_with_the_delta_read_not_the_full_one() -> None:
+    prompt = prompt_for(
+        [
+            {
+                "reason": "mention",
+                "summary": "pi mentioned you in thread 31",
+                "source_ref": "post:1400",
+                "thread_id": 31,
+            }
+        ]
+    )
+
+    assert "Read each thread named above with `agent-board read <id>`" not in prompt, prompt
+    assert prompt.index("--after 1399") < prompt.index("agent-board read <id>"), "the full read came first"
+    assert "Always reply to a post by the human that responds to you" in prompt, prompt
