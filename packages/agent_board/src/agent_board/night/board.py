@@ -84,6 +84,9 @@ class SignedBoard:
             raise CaptureRefused("invalid_capture_abort_ack") from None
         return AbortReply(ack, data)
 
+    def thread_read(self, run_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        return self._request("night.thread_read", run_id, payload)
+
     def _request(self, action: str, target: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         try:
             return self._client.request(action, target, dict(payload))
