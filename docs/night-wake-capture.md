@@ -1,7 +1,7 @@
 # Fenced held-wake capture
 
 This is an incomplete source integration for ticket 11. The pilot stays disabled.
-It does not implement native assignment transport, execution acknowledgement,
+It does not implement execution acknowledgement, a native launch producer,
 repository selection, provider authentication, morning drain or activation.
 
 `night.capture` is available only through the dedicated signed verifier endpoint.
@@ -39,11 +39,15 @@ no timeout releases them. A finished run no longer excludes those still-unacknow
 rows from a later eligible capture, but this is not a claim that native delivery
 happened or that a new run can bypass budget, window or capacity checks.
 
-There is deliberately no SDK, controller producer or operator invocation recipe in
-this slice. The future verifier client must persist and serialize this mutation
-through its durable receipt/counter ledger. It must not make an out-of-band call
-that advances the server counter behind that ledger. Native transport must expose
-only assignment data, never the verifier key or run fence, and must prove the
-requesting process belongs to the exact bound execution before consuming wakes.
-A separate reviewed execution-acceptance acknowledgement and completion contract
-is still required. Do not enroll or enable the pilot on this partial integration.
+The verifier SDK persists the capture response and policy-derived assignment
+atomically through its durable receipt/counter ledger. Its sealed-memfd transport
+helper remains unhooked from launch. There is no controller producer or operator
+invocation recipe. Never make an out-of-band call that advances the server counter
+behind the ledger. Native transport must expose only assignment data, never the
+verifier key or run fence. A separate reviewed execution-acceptance acknowledgement
+and completion contract is still required before consuming wakes.
+
+[Capture recovery](night-capture-recovery.md) defines server-side atomic abort
+resolution for a pending capture racing stop or revocation. It is not permission
+to discard uncertain receipts or bypass physical stop proof. Do not enroll or
+enable the pilot on this partial integration.

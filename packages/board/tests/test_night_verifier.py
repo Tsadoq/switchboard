@@ -3,6 +3,7 @@ import hashlib
 import json
 import sqlite3
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
@@ -231,6 +232,186 @@ def test_bad_binding_never_starts_or_advances_counter(case: Case, change: dict[s
     run = case.run()
     assert case.send("night.binding", run.id, case.binding(run) | change).status_code == 409
     assert case.send("night.state", "self", {}).json()["counter"] == 0
+
+
+def _abort_for(payload: dict[str, Any]) -> dict[str, Any]:
+    return payload | {
+        "receipt_id": str(uuid4()),
+        "capture_receipt_id": payload["receipt_id"],
+        "capture_counter": payload["counter"],
+    }
+
+
+def test_abort_is_replayable_and_blocks_late_capture_without_settlement(case: Case) -> None:
+    run, capture = _capture_setup(case)
+    abort = _abort_for(capture)
+    first = case.send("night.capture_abort", run.id, abort)
+    assert first.status_code == 200, first.text
+    assert first.json() == {
+        "journal_id": case.journal,
+        "counter": 2,
+        "run_id": run.id,
+        "capture_id": capture["receipt_id"],
+        "capture_counter": 1,
+        "abort_id": abort["receipt_id"],
+        "outcome": "aborted",
+        "capture": None,
+    }
+    assert case.send("night.capture_abort", run.id, abort).json() == first.json()
+    late = case.send("night.capture", run.id, capture)
+    assert late.status_code == 409 and late.json()["reason"] == "capture_aborted"
+    changed = case.send("night.capture", run.id, capture | {"counter": 2})
+    assert changed.status_code == 409 and changed.json()["reason"] == "receipt_conflict"
+    state = case.send("night.state", "self", {}).json()
+    assert state["counter"] == 2 and state["active"][0]["state"] == "running"
+    with sqlite3.connect(case.path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM night_wake_captures").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM night_capture_aborts").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM wakes WHERE acked_at IS NOT NULL").fetchone()[0] == 0
+        assert (
+            conn.execute("SELECT deadline FROM night_runs WHERE id = ?", (run.id,)).fetchone()[0]
+            == run.deadline
+        )
+
+
+@pytest.mark.parametrize("state", ["running", "stopping", "quarantined", "finished"])
+def test_abort_remains_available_after_off_and_stopping_and_allows_evidence(case: Case, state: str) -> None:
+    run, capture = _capture_setup(case)
+    with sqlite3.connect(case.path) as conn:
+        conn.execute("UPDATE night_control SET enabled = 0")
+        conn.execute("UPDATE night_runs SET state = ? WHERE id = ?", (state, run.id))
+    abort = _abort_for(capture)
+    response = case.send("night.capture_abort", run.id, abort)
+    assert response.status_code == 200, response.text
+    if state != "finished":
+        evidence = capture | {
+            "receipt_id": str(uuid4()),
+            "counter": 2,
+            "outcome": "empty",
+            "runtime_seconds": None,
+            "reason": "off",
+        }
+        stopped = case.send("night.evidence", run.id, evidence)
+        assert stopped.status_code == 200, stopped.text
+        assert stopped.json()["state"] == "finished"
+    assert case.send("night.capture_abort", run.id, abort).json() == response.json()
+
+
+def test_abort_never_discards_applied_capture(case: Case) -> None:
+    run, capture = _capture_setup(case)
+    snapshot = case.send("night.capture", run.id, capture)
+    assert snapshot.status_code == 200
+    abort = _abort_for(capture)
+    resolved = case.send("night.capture_abort", run.id, abort)
+    assert resolved.status_code == 200, resolved.text
+    assert resolved.json()["outcome"] == "applied"
+    assert resolved.json()["counter"] == 2
+    assert resolved.json()["capture"] == snapshot.json()
+    assert resolved.json()["abort_id"] == abort["receipt_id"]
+    assert case.send("night.capture_abort", run.id, abort).json() == resolved.json()
+    assert case.send("night.capture", run.id, capture).json() == snapshot.json()
+    assert case.send("night.state", "self", {}).json()["counter"] == 2
+    with sqlite3.connect(case.path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM night_capture_aborts").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"capture_counter": True},
+        {"capture_counter": -1},
+        {"capture_counter": 2},
+        {"capture_receipt_id": "bad"},
+        {"journal_id": str(uuid4())},
+        {"invocation_id": "b" * 32},
+        {"counter": 999},
+        {"unknown": True},
+    ],
+)
+def test_invalid_abort_never_mutates_state(case: Case, change: dict[str, Any]) -> None:
+    run, capture = _capture_setup(case)
+    denied = case.send("night.capture_abort", run.id, _abort_for(capture) | change)
+    assert denied.status_code == 409, denied.text
+    assert case.send("night.state", "self", {}).json()["counter"] == 1
+    assert case.send("night.capture", run.id, capture).status_code == 200
+
+
+def test_abort_is_verifier_only(case: Case) -> None:
+    run, capture = _capture_setup(case)
+    response = case.send("night.capture_abort", run.id, _abort_for(capture), actor=case.agent)
+    assert response.status_code == 401
+    assert case.send("night.capture", run.id, capture).status_code == 200
+
+
+def test_abort_and_capture_race_has_only_one_winner(case: Case) -> None:
+    run, capture = _capture_setup(case)
+    abort = _abort_for(capture)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        capture_future = pool.submit(case.send, "night.capture", run.id, capture)
+        abort_future = pool.submit(case.send, "night.capture_abort", run.id, abort)
+        responses = [capture_future.result(), abort_future.result()]
+    assert responses[1].status_code == 200, responses[1].text
+    if responses[0].status_code == 200:
+        assert responses[1].json()["outcome"] == "applied"
+        assert responses[1].json()["capture"] == responses[0].json()
+    else:
+        assert responses[0].status_code == 409
+        assert responses[1].json()["outcome"] == "aborted"
+    with sqlite3.connect(case.path) as conn:
+        captures = conn.execute("SELECT COUNT(*) FROM night_wake_captures").fetchone()[0]
+        aborts = conn.execute("SELECT COUNT(*) FROM night_capture_aborts").fetchone()[0]
+    assert captures + aborts == 1
+    assert case.send("night.state", "self", {}).json()["counter"] == 2
+
+
+def test_abort_cannot_reuse_a_parent_id_or_allow_its_reuse_as_evidence(case: Case) -> None:
+    run, capture = _capture_setup(case)
+    same = _abort_for(capture) | {"receipt_id": capture["receipt_id"]}
+    assert case.send("night.capture_abort", run.id, same).status_code == 409
+    abort = _abort_for(capture)
+    assert case.send("night.capture_abort", run.id, abort).status_code == 200
+    evidence = capture | {
+        "counter": 2,
+        "outcome": "empty",
+        "runtime_seconds": None,
+        "reason": "off",
+    }
+    denied = case.send("night.evidence", run.id, evidence)
+    assert denied.status_code == 409 and denied.json()["reason"] == "receipt_conflict"
+    assert case.send("night.state", "self", {}).json()["counter"] == 2
+
+
+def test_abort_write_failure_rolls_back_receipt_counter_and_tombstone(case: Case) -> None:
+    run, capture = _capture_setup(case)
+    abort = _abort_for(capture)
+    with sqlite3.connect(case.path) as conn:
+        conn.execute(
+            "CREATE TRIGGER fail_abort BEFORE INSERT ON night_capture_aborts "
+            "BEGIN SELECT RAISE(ABORT, 'injected failure'); END"
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="injected failure"):
+        case.send("night.capture_abort", run.id, abort)
+    with sqlite3.connect(case.path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM night_capture_aborts").fetchone()[0] == 0
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM night_verifier_receipts WHERE receipt_id = ?", (abort["receipt_id"],)
+            ).fetchone()[0]
+            == 0
+        )
+        conn.execute("DROP TRIGGER fail_abort")
+    assert case.send("night.state", "self", {}).json()["counter"] == 1
+    assert case.send("night.capture", run.id, capture).status_code == 200
+
+
+def test_applied_resolution_refuses_unrelated_high_watermark_divergence(case: Case) -> None:
+    run, capture = _capture_setup(case)
+    assert case.send("night.capture", run.id, capture).status_code == 200
+    with sqlite3.connect(case.path) as conn:
+        conn.execute("UPDATE night_verifier_state SET counter = counter + 1")
+    denied = case.send("night.capture_abort", run.id, _abort_for(capture))
+    assert denied.status_code == 409 and denied.json()["reason"] == "counter_mismatch"
+    assert case.send("night.state", "self", {}).json()["counter"] == 3
 
 
 def _capture_setup(case: Case, count: int = 3) -> tuple[Run, dict[str, Any]]:
