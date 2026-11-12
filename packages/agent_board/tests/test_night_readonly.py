@@ -252,6 +252,8 @@ def test_a_persisted_value_of_the_wrong_type_is_a_typed_refusal(state: State, st
         pytest.param({"boottime": 10**1000}, id="overflowing-clock"),
         pytest.param({"grace": "5"}, id="string-grace"),
         pytest.param({"grace": -1.0}, id="negative-grace"),
+        pytest.param({"boottime": -1.0}, id="negative-boottime"),
+        pytest.param({"utc": -1.0}, id="negative-utc"),
     ],
 )
 def test_a_malformed_clock_is_a_typed_refusal(state: State, changes: dict[str, Any]) -> None:

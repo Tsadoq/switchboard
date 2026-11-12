@@ -157,7 +157,7 @@ def bound_run(
     ):
         raise ReadOnlyError("run_not_running")
     clock = [_finite(value) for value in (boottime, utc, grace)]
-    if any(value is None for value in clock) or (clock[2] is not None and clock[2] < 0):
+    if any(value is None or value < 0 for value in clock):
         raise ReadOnlyError("invalid_clock")
     if boottime >= record.deadline_boottime - grace or utc >= record.deadline_utc - grace:
         raise ReadOnlyError("run_past_deadline")
