@@ -8,6 +8,14 @@ from dataclasses import dataclass
 from typing import NoReturn, Protocol
 
 from agent_board.night.config import VerifierConfig
+from agent_board.night.environment import (
+    DEADLINE_UTC_ENV,
+    HAPPIER_BIN_ENV,
+    HOME_DIR_ENV,
+    PRINCIPAL_ENV,
+    RUNTIME_DIR_NAME,
+    WORKDIR_ROOT_ENV,
+)
 from agent_board.night.gate import GuardState
 from agent_board.night.ledger import Ledger
 from agent_board.night_inspection import unit_cgroup
@@ -119,13 +127,18 @@ def exec_native(
     python = str(config.launcher_python)
     environment = {
         "HOME": str(agent.home),
-        "HAPPIER_HOME_DIR": str(agent.happier_home),
-        "XDG_RUNTIME_DIR": f"/run/user/{agent.uid}",
+        HOME_DIR_ENV: str(agent.happier_home),
+        "XDG_RUNTIME_DIR": str(agent.happier_home / RUNTIME_DIR_NAME),
         "USER": account.name,
         "LOGNAME": account.name,
         "PATH": "/usr/bin:/bin",
         "LANG": "C.UTF-8",
+        PRINCIPAL_ENV: record.principal,
+        WORKDIR_ROOT_ENV: str(agent.workdir_root),
+        DEADLINE_UTC_ENV: repr(record.deadline_utc - grace),
     }
+    if config.launcher_happier is not None:
+        environment[HAPPIER_BIN_ENV] = str(config.launcher_happier)
     system.execve(python, [python, "-I", "-m", config.launcher_module, run_id], environment)
 
 

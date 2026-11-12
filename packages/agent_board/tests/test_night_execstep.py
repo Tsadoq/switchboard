@@ -104,6 +104,7 @@ def _config() -> Any:
             "launcher": {
                 "python": "/opt/switchboard-night/releases/abc/bin/python",
                 "module": "agent_board.night.launch",
+                "happier": "/opt/happier/0.2.17/happier",
             },
             "agents": {
                 "pi@huginn": {
@@ -162,7 +163,13 @@ def test_a_bound_armed_live_run_drops_to_the_agent_then_execs_the_launcher(rig: 
     path, argv, environment = rig.system.executed
     assert path == "/opt/switchboard-night/releases/abc/bin/python"
     assert argv == [path, "-I", "-m", "agent_board.night.launch", rig.run_id]
-    assert environment["HOME"] == "/home/agent" and environment["XDG_RUNTIME_DIR"] == f"/run/user/{UID}"
+    assert environment["HOME"] == "/home/agent"
+    assert environment["XDG_RUNTIME_DIR"] == "/var/lib/switchboard-night/happier/pi/run"
+    assert environment["HAPPIER_HOME_DIR"] == "/var/lib/switchboard-night/happier/pi"
+    assert environment["SWITCHBOARD_NIGHT_PRINCIPAL"] == "pi@huginn"
+    assert environment["SWITCHBOARD_NIGHT_WORKDIR_ROOT"] == "/srv/night/pi"
+    assert environment["SWITCHBOARD_NIGHT_HAPPIER"] == "/opt/happier/0.2.17/happier"
+    assert float(environment["SWITCHBOARD_NIGHT_DEADLINE_UTC"]) == 1_600.0 - 5
     assert "SECRET" not in environment and "INVOCATION_ID" not in environment, "root environment leaked"
 
 
