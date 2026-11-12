@@ -105,6 +105,64 @@ def test_wakes_within_the_window_are_gathered_together(clock: FakeClock) -> None
     assert clock.elapsed == pytest.approx(4), f"window not honoured: {clock.elapsed}"
 
 
+class ArrivingClient:
+    """A board whose wakes become leasable at set times; a poll returns early when one is due."""
+
+    def __init__(self, clock: FakeClock, arrivals: list[tuple[float, Wake]], lease_seconds: float) -> None:
+        self._clock = clock
+        self._arrivals = sorted(arrivals, key=lambda arrival: arrival[0])
+        self._lease_seconds = lease_seconds
+        self.ack_posts: list[list[int]] = []
+
+    def get(self, path: str, *, wait: float, principal: str) -> list[Wake]:
+        if not self._due():
+            pending = [at for at, _ in self._arrivals]
+            wakes_at = min([*pending, self._clock.elapsed + wait])
+            self._clock.sleep(max(0.0, min(wakes_at, self._clock.elapsed + wait) - self._clock.elapsed))
+        leased_until = datetime.fromtimestamp(self._clock.time() + self._lease_seconds, UTC).isoformat()
+        due, self._arrivals = self._due(), [a for a in self._arrivals if a[0] > self._clock.elapsed]
+        return [{**wake, "leased_until": leased_until} for wake in due]
+
+    def post(self, path: str, payload: dict[str, Any]) -> None:
+        self.ack_posts.append(payload["ids"])
+
+    def _due(self) -> list[Wake]:
+        return [wake for at, wake in self._arrivals if at <= self._clock.elapsed]
+
+
+def test_ten_posts_in_sixty_seconds_are_delivered_as_one_prompt_and_acked_together(clock: FakeClock) -> None:
+    burst = [
+        (
+            6.0 * n,
+            {
+                "id": n + 1,
+                "reason": "follow",
+                "summary": 'pi@testbox posted in thread 9 "Backups"',
+                "thread_id": 9,
+                "source_ref": f"post:{100 + n}",
+            },
+        )
+        for n in range(10)
+    ]
+    client = ArrivingClient(clock, burst, lease_seconds=300)
+    prompts: list[str] = []
+
+    def deliver(wakes: list[Wake]) -> Iterator[list[int | None]]:
+        prompts.append(loop.prompt_for(wakes))
+        yield [wake["id"] for wake in wakes]
+
+    inbox = _Inbox("pi@testbox", client, "me", deliver, 120)  # type: ignore[arg-type]
+
+    wakes = inbox._gather(poll_wait=30)
+    inbox._deliver_then_ack(wakes, deadline=float("inf"))
+
+    assert len(prompts) == 1, f"a 60 s burst was split into {len(prompts)} prompts"
+    assert 'pi@testbox posted in thread 9 "Backups" (10 posts)' in prompts[0], prompts[0]
+    assert "`agent-board read 9 --after 99`" in prompts[0], prompts[0]
+    assert client.ack_posts == [list(range(1, 11))], f"burst not acked as one: {client.ack_posts}"
+    assert clock.elapsed == pytest.approx(120), f"window not honoured: {clock.elapsed}"
+
+
 def test_window_closes_before_a_short_lease_leaves_no_time_to_deliver(clock: FakeClock) -> None:
     lease_seconds = 30
     client = FakeClient(clock, [[_wake(1)]], lease_seconds=lease_seconds)

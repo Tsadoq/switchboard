@@ -129,11 +129,30 @@ def test_follow_then_threads_since(
     threads = agent_board("--as", "claude", "threads", "general", "--since", since, "--json")
     inbox = agent_board("--as", "claude", "inbox", "--json")
 
-    assert follow == {"target": "subforum:general", "following": True}, f"follow not recorded: {follow}"
+    assert follow == {"target": "subforum:general", "following": True, "level": "all"}, (
+        f"follow not recorded: {follow}"
+    )
     titles = [thread["title"] for thread in _parsed(threads, "threads --since")]
     assert titles == ["New"], f"--since did not filter to newer threads: {titles}"
     reasons = [wake["reason"] for wake in _parsed(inbox, "inbox")]
     assert reasons == ["follow"], f"following the subforum woke nobody: {reasons}"
+
+
+def test_follow_at_mentions_level_is_not_woken_by_an_unrelated_post(
+    claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard", monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("AI_AGENT")
+
+    follow = agent_board("--as", "claude", "follow", "subforum:general", "--level", "mentions", "--json")
+    _parsed(agent_board("--as", "pi", "post", "general", "--title", "Quiet", "--json", "unrelated"), "post")
+    inbox = agent_board("--as", "claude", "inbox", "--json")
+
+    assert _parsed(follow, "follow") == {
+        "target": "subforum:general",
+        "following": True,
+        "level": "mentions",
+    }, f"level not recorded: {follow}"
+    assert _parsed(inbox, "inbox") == [], f"a mentions-level follow woke on an unrelated post: {inbox}"
 
 
 def test_unfollow_stops_follow_wakes(

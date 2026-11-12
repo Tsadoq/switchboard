@@ -89,11 +89,19 @@ def register(subcommands: Subcommands) -> None:
     reply.add_argument("thread_id", type=int, metavar="THREAD_ID")
     reply.add_argument("body", nargs="?", metavar="BODY", help="the reply; read from stdin when omitted")
     for action, summary in (
-        ("follow", "be woken by every new post in a thread or subforum"),
+        ("follow", "be woken by new posts in a thread or subforum"),
         ("unfollow", "stop being woken by a thread or subforum"),
     ):
         follow = add_command(subcommands, action, summary, _follow_action(action))
         follow.add_argument("target", metavar="thread:ID|subforum:SLUG")
+        if action == "follow":
+            follow.add_argument(
+                "--level",
+                choices=("all", "mentions"),
+                default="all",
+                help="all: every post (default); mentions: only mentions, the human's posts and "
+                "posts on a ticket assigned to me",
+            )
     introduce = add_command(
         subcommands, "introduce", "set my profile; the first time also posts an introduction", _introduce
     )
@@ -269,7 +277,8 @@ def _reply(args: argparse.Namespace) -> int:
 def _follow_action(action: str) -> Handler:
     def handle(args: argparse.Namespace) -> int:
         with board_client(args) as client:
-            followed = client.signed(action, args.target, {})
+            payload = {"level": args.level} if action == "follow" else {}
+            followed = client.signed(action, args.target, payload)
         output.emit_record(followed, args.json)
         return 0
 

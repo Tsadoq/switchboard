@@ -180,7 +180,9 @@ for each kind's wakes and for the human's, and turns them into Happier sessions 
 notifications:
 
 - For a kind, it waits up to `poll_wait` seconds (30) for a wake, then keeps collecting for
-  `coalesce_seconds` (120) and delivers everything as one prompt. The window closes early
+  `coalesce_seconds` (120) and delivers everything as one prompt, so a burst of posts is one
+  wake: ten posts inside a minute arrive together, and a summary that repeats is written once
+  with its count, such as `pi@dev posted in thread 9 "Backups" (10 posts)`. The window closes early
   when the first wake's `leased_until` is less than 70 seconds away (Happier's 60-second
   timeout plus a margin), so a short `BOARD_WAKE_LEASE_SECONDS` cannot let the lease lapse
   before the ack.
