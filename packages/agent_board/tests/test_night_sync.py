@@ -1,7 +1,10 @@
+import base64
+import json
 import os
 import shutil
+import sqlite3
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -9,6 +12,7 @@ from uuid import uuid4
 import pytest
 from agent_board import night_state
 from agent_board.night.assignment import NightPolicy, decode
+from agent_board.night.context import ContextReader, ContextRefused, parse_page
 from agent_board.night.ledger import CaptureAborted, CapturedAssignment, Ledger, LedgerError, Pending
 from agent_board.night.sync import (
     AbortReply,
@@ -979,3 +983,274 @@ def test_no_abort_is_composed_for_an_unlatched_or_still_running_run(rig: Rig) ->
     captured = rig.ledger.captured(record.run_id)
     assert isinstance(captured, Pending) and captured.action == "capture"
     assert "capture_abort" not in rig.board.calls
+
+
+from board.night import Run
+from board.night_context import ContextDenied, read_context
+
+THREAD = 31
+
+
+class ServerBoard:
+    """The real server read_context over a minimal board database, with optional response tampering."""
+
+    def __init__(self, capture_response: Callable[[], Mapping[str, Any]]) -> None:
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        for statement in (
+            "CREATE TABLE night_wake_captures (receipt_id TEXT PRIMARY KEY, run_id TEXT)",
+            "CREATE TABLE night_verifier_receipts (receipt_id TEXT PRIMARY KEY, response TEXT)",
+            "CREATE TABLE threads (id INTEGER PRIMARY KEY, title TEXT NOT NULL)",
+            (
+                "CREATE TABLE posts (id INTEGER PRIMARY KEY, thread_id INTEGER NOT NULL, author TEXT NOT NULL, "
+                "author_kind TEXT NOT NULL, body TEXT NOT NULL, created_at REAL NOT NULL)"
+            ),
+            (
+                "CREATE TABLE night_context_reads (run_id TEXT PRIMARY KEY, reads INTEGER NOT NULL DEFAULT 0, "
+                "bytes INTEGER NOT NULL DEFAULT 0)"
+            ),
+        ):
+            self.conn.execute(statement)
+        self.conn.execute(
+            "INSERT INTO threads (id, title) VALUES (?, ?)", (THREAD, "Bounded opt-in nightly pilot")
+        )
+        self._capture_response = capture_response
+        self.calls = 0
+        self.tamper: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+
+    def post(self, body: str, post_id: int | None = None) -> int:
+        cursor = self.conn.execute(
+            "INSERT INTO posts (id, thread_id, author, author_kind, body, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (post_id, THREAD, "pi@dev", "agent", body, 1_000.0),
+        )
+        assert cursor.lastrowid is not None
+        return cursor.lastrowid
+
+    def thread_read(self, run_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        self.calls += 1
+        response = self._capture_response()
+        self.conn.execute(
+            "INSERT OR IGNORE INTO night_wake_captures (receipt_id, run_id) VALUES (?, ?)",
+            (payload["capture_id"], run_id),
+        )
+        self.conn.execute(
+            "INSERT OR IGNORE INTO night_verifier_receipts (receipt_id, response) VALUES (?, ?)",
+            (payload["capture_id"], json.dumps(response)),
+        )
+        run = Run(
+            run_id, "pi@dev", "dev", "2026-11-12", payload["fence"], 0.0, 0.0, 9e9, 0.0, None, "running"
+        )
+        try:
+            data = read_context(
+                self.conn,
+                run,
+                payload["capture_id"],
+                payload["thread_id"],
+                payload["post_id"],
+                payload["body_offset"],
+            )
+        except ContextDenied as denied:
+            raise BoardRefused(str(denied)) from None
+        return self.tamper(dict(data)) if self.tamper is not None else data
+
+
+class Context:
+    def __init__(self, tmp_path: Path) -> None:
+        self.rig = Rig(tmp_path)
+        self.record = _bound(self.rig)
+        self.rig.board.held_wakes = [{**WAKE, "thread_id": THREAD, "topic_id": THREAD}]
+        self.rig.sync.capture(self.record, POLICY, cutoff_utc=1_850.0)
+        receipt = next(iter(self.rig.board.captures))
+        self.server = ServerBoard(lambda: self.rig.board.captures[receipt])
+        self.reader = ContextReader(self.server, self.rig.ledger)
+
+
+@pytest.fixture
+def context(tmp_path: Path) -> Context:
+    return Context(tmp_path)
+
+
+def test_a_short_post_is_read_whole_in_one_call(context: Context) -> None:
+    post_id = context.server.post("please review PR 39")
+
+    post = context.reader.post(context.record, THREAD, None)
+
+    assert post is not None and post.post_id == post_id
+    assert post.complete and post.text == "please review PR 39"
+    assert context.server.calls == 1
+
+
+def test_a_long_post_is_reassembled_contiguously_across_split_utf8_before_decoding(context: Context) -> None:
+    body = "é" * 1535 + "x" + "日本語" * 2000
+    assert len(body.encode()) > 3 * 3072
+    context.server.post(body)
+
+    post = context.reader.post(context.record, THREAD, None)
+
+    assert post is not None and post.complete and post.text == body
+    assert context.server.calls == -(-len(body.encode()) // 3072)
+
+
+def test_a_body_over_the_read_ceiling_stays_explicitly_incomplete(context: Context) -> None:
+    context.server.post("a" * 300_000)
+
+    post = context.reader.post(context.record, THREAD, None)
+
+    assert post is not None
+    assert not post.complete and post.text is None
+    assert len(post.body) == 262_144 and post.body_total_bytes == 300_000
+
+
+def test_older_posts_are_reached_only_through_previous_post_id(context: Context) -> None:
+    older = context.server.post("first")
+    newer = context.server.post("second")
+
+    newest = context.reader.post(context.record, THREAD, None)
+    assert newest is not None and newest.post_id == newer and newest.previous_post_id == older
+
+    previous = context.reader.post(context.record, THREAD, newest.previous_post_id)
+    assert previous is not None and previous.text == "first" and previous.previous_post_id is None
+
+
+def test_an_empty_thread_reads_as_no_post(context: Context) -> None:
+    assert context.reader.post(context.record, THREAD, None) is None
+
+
+@pytest.mark.parametrize(
+    ("thread_id", "post_id", "offset", "reason"),
+    [
+        pytest.param(54, None, 0, "thread_not_captured", id="thread-outside-the-capture"),
+        pytest.param(True, None, 0, "thread_not_captured", id="boolean-thread"),
+        pytest.param(THREAD, None, 5, "missing_post_cursor", id="offset-without-post"),
+        pytest.param(THREAD, 1, -1, "invalid_body_offset", id="negative-offset"),
+        pytest.param(THREAD, 1, 262_144, "invalid_body_offset", id="offset-at-the-ceiling"),
+        pytest.param(THREAD, 0, 0, "invalid_post", id="zero-post"),
+        pytest.param(THREAD, 2**63, 0, "invalid_post", id="post-past-signed-64"),
+    ],
+)
+def test_a_request_outside_the_contract_never_reaches_the_board(
+    context: Context, thread_id: Any, post_id: Any, offset: Any, reason: str
+) -> None:
+    with pytest.raises(ContextRefused, match=reason):
+        context.reader.page(context.record, thread_id, post_id, offset)
+
+    assert context.server.calls == 0
+
+
+def test_a_stopping_run_reads_nothing(context: Context) -> None:
+    stopping = _stopping(context.rig, context.record)
+
+    with pytest.raises(ContextRefused, match="run_not_running"):
+        context.reader.page(stopping, THREAD, None, 0)
+
+    assert context.server.calls == 0
+
+
+def test_a_server_refusal_such_as_an_exhausted_quota_stays_an_error(context: Context) -> None:
+    context.server.post("x")
+    context.server.conn.execute(
+        "INSERT INTO night_context_reads (run_id, reads, bytes) VALUES (?, 128, 0)", (context.record.run_id,)
+    )
+
+    with pytest.raises(BoardRefused, match="context_read_limit"):
+        context.reader.post(context.record, THREAD, None)
+
+
+def _set_post(**changes: Any) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    def tamper(data: dict[str, Any]) -> dict[str, Any]:
+        return {**data, "post": {**data["post"], **changes}}
+
+    return tamper
+
+
+def _set(**changes: Any) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    def tamper(data: dict[str, Any]) -> dict[str, Any]:
+        return {**data, **changes}
+
+    return tamper
+
+
+def _short_chunk(data: dict[str, Any]) -> dict[str, Any]:
+    body = base64.b64decode(data["post"]["body_base64"])[:-1]
+    end = data["post"]["body_offset"] + len(body)
+    return {
+        **data,
+        "post": {**data["post"], "body_base64": base64.b64encode(body).decode(), "next_body_offset": end},
+    }
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        pytest.param(_set(extra=1), id="extra-field"),
+        pytest.param(_set(run_id="00000000-0000-4000-8000-000000000000"), id="other-run"),
+        pytest.param(_set(thread_id=float(THREAD)), id="float-thread"),
+        pytest.param(_set(title="t" * 129), id="title-over-bound"),
+        pytest.param(_set(title_truncated=1), id="truncation-not-boolean"),
+        pytest.param(_set(previous_post_id=10**9), id="previous-not-older"),
+        pytest.param(_set_post(body_offset=1.0), id="float-offset"),
+        pytest.param(_set_post(body_base64="AA AA"), id="base64-with-space"),
+        pytest.param(_set_post(body_base64="AAA"), id="base64-unpadded"),
+        pytest.param(_set_post(next_body_offset=9000), id="cursor-skips-bytes"),
+        pytest.param(_set_post(body_end_reached=False), id="end-flag-lies"),
+        pytest.param(_set_post(body_limit_reached=True), id="limit-flag-lies"),
+        pytest.param(_set_post(body_total_bytes=-1), id="negative-total"),
+        pytest.param(_set_post(created_at=True), id="boolean-time"),
+        pytest.param(_set_post(author="a" * 129), id="author-over-bound"),
+        pytest.param(_short_chunk, id="short-chunk"),
+    ],
+)
+def test_a_response_outside_the_contract_is_refused(
+    context: Context, tamper: Callable[[dict[str, Any]], dict[str, Any]]
+) -> None:
+    context.server.post("é" * 5000)
+    context.server.tamper = tamper
+
+    with pytest.raises(ContextRefused):
+        context.reader.post(context.record, THREAD, None)
+
+
+def test_a_chunk_for_another_post_or_offset_breaks_the_read(
+    context: Context, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = context.server.post("a" * 5000)
+    context.server.post("b" * 10)
+    real = context.server.thread_read
+    calls = {"n": 0}
+
+    def wrong_offset(run_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            return real(run_id, {**payload, "body_offset": 0})
+        return real(run_id, payload)
+
+    monkeypatch.setattr(context.server, "thread_read", wrong_offset)
+
+    with pytest.raises(ContextRefused):
+        context.reader.post(context.record, THREAD, first)
+
+
+def test_an_empty_thread_response_cannot_name_a_previous_post() -> None:
+    data = {
+        "run_id": "r",
+        "capture_id": "c",
+        "thread_id": THREAD,
+        "title": "t",
+        "title_truncated": False,
+        "post": None,
+        "previous_post_id": 5,
+    }
+
+    with pytest.raises(ContextRefused):
+        parse_page(data, run_id="r", capture_id="c", thread_id=THREAD, post_id=None, body_offset=0)
+
+
+def test_no_read_touches_the_ledger_counter_or_wakes(context: Context) -> None:
+    context.server.post("x")
+    before = context.rig.ledger.identity()
+
+    context.reader.post(context.record, THREAD, None)
+
+    assert context.rig.ledger.identity() == before
+    assert context.rig.ledger.unacknowledged() == ()
+    assert FENCE == context.record.fence
