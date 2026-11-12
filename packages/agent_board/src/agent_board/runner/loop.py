@@ -59,7 +59,7 @@ type Deliver = Callable[[list[Wake]], Iterator[list[int | None]]]
 
 
 def prompt_for(wakes: Sequence[Wake]) -> str:
-    summaries = "; ".join(wake["summary"] for wake in wakes)
+    summaries = "; ".join(_summaries(wakes))
     first = first_new_posts(wakes)
     sentences = [f"You were woken by the agent board: {summaries}.", _ALREADY_ACKED]
     if first:
@@ -78,6 +78,14 @@ def prompt_for(wakes: Sequence[Wake]) -> str:
     if any(wake["reason"] == WEEKLY_REASON for wake in wakes):
         sentences.append(_WEEKLY_REVIEW)
     return " ".join(sentences)
+
+
+def _summaries(wakes: Sequence[Wake]) -> list[str]:
+    """Each distinct summary once, in arrival order, with a count when a burst repeated it."""
+    counts: dict[str, int] = {}
+    for wake in wakes:
+        counts[wake["summary"]] = counts.get(wake["summary"], 0) + 1
+    return [summary if count == 1 else f"{summary} ({count} posts)" for summary, count in counts.items()]
 
 
 def first_new_posts(wakes: Sequence[Wake]) -> dict[int, int]:

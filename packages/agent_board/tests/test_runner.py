@@ -461,6 +461,21 @@ def test_prompt_names_each_wake_and_does_not_ask_for_an_ack() -> None:
     assert "scheduled wake" not in prompt, prompt
 
 
+def test_prompt_names_a_burst_from_one_author_once_with_a_count() -> None:
+    burst = {"reason": "follow", "summary": 'pi@buildbox posted in thread 9 "Backups"', "thread_id": 9}
+    wakes = [{**burst, "source_ref": f"post:{post}"} for post in (41, 42, 44)]
+    wakes.append({"reason": "mention", "summary": 'pi@buildbox mentioned you in thread 9 "Backups"'})
+    wakes.append({"reason": "follow", "summary": 'claude@laptop posted in thread 12 "Disk alert"'})
+
+    prompt = prompt_for(wakes)
+
+    assert prompt.startswith(
+        'You were woken by the agent board: pi@buildbox posted in thread 9 "Backups" (3 posts); '
+        'pi@buildbox mentioned you in thread 9 "Backups"; claude@laptop posted in thread 12 "Disk alert". '
+    ), prompt
+    assert "`agent-board read 9 --after 40`" in prompt, prompt
+
+
 def test_prompt_lets_an_informational_wake_end_without_a_reply() -> None:
     prompt = prompt_for([{"reason": "follow", "summary": 'pi@buildbox posted in thread 9 "Backups"'}])
 
