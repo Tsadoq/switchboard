@@ -18,6 +18,7 @@ from board.identity.roles import VerifierRoles
 from board.identity.routes import SignedRequest, _verify
 from board.identity.verifier import Verified
 from board.night import AdmissionDenied, Run, _find, settle_in_transaction, start_in_transaction, window_for
+from board.night_context import ContextDenied, read_context
 from board.night_delivery import CaptureDenied, capture_candidates, persist_capture
 
 
@@ -46,6 +47,7 @@ class NightVerifier:
             "night.evidence": self._evidence,
             "night.capture": self._capture,
             "night.capture_abort": self._capture_abort,
+            "night.thread_read": self._thread_read,
         }
         handler = handlers.get(envelope.action)
         if handler is None:
@@ -227,6 +229,39 @@ class NightVerifier:
         )
         persist_capture(conn, payload["receipt_id"], run.id, now, batch)
         return response
+
+    def _thread_read(
+        self, conn: sqlite3.Connection, box: str, target: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        _fields(
+            payload,
+            {
+                "fence",
+                "journal_id",
+                "boot_id",
+                "invocation_id",
+                "cgroup",
+                "capture_id",
+                "thread_id",
+                "post_id",
+                "body_offset",
+            },
+        )
+        run = self._run(conn, box, target, payload["fence"])
+        self._roles.require_agent(run.principal)
+        _binding_fields(target, payload)
+        _uuid(payload["capture_id"])
+        self._journal(conn, box, payload["journal_id"])
+        binding = conn.execute("SELECT * FROM night_verifier_bindings WHERE run_id = ?", (target,)).fetchone()
+        if binding is None or any(
+            binding[key] != payload[key] for key in ("journal_id", "boot_id", "invocation_id", "cgroup")
+        ):
+            raise Denied("missing_or_conflicting_binding")
+        if self._grant(conn, box, target, {"fence": payload["fence"]})["state"] != "running":
+            raise Denied("context_not_eligible")
+        return read_context(
+            conn, run, payload["capture_id"], payload["thread_id"], payload["post_id"], payload["body_offset"]
+        )
 
     def _capture_abort(
         self, conn: sqlite3.Connection, box: str, target: str, payload: dict[str, Any]
@@ -499,7 +534,7 @@ def install(app: FastAPI, authority: NightVerifier) -> None:
         verified = await _verify(request, body)
         try:
             response = await authority.dispatch(verified)
-        except (Denied, AdmissionDenied, CaptureDenied) as error:
+        except (Denied, AdmissionDenied, CaptureDenied, ContextDenied) as error:
             return JSONResponse({"reason": str(error)}, status_code=409)
         return JSONResponse(response)
 

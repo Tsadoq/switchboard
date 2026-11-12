@@ -45,7 +45,9 @@ helper remains unhooked from launch. There is no controller producer or operator
 invocation recipe. Never make an out-of-band call that advances the server counter
 behind the ledger. Native transport must expose only assignment data, never the
 verifier key or run fence. A separate reviewed execution-acceptance acknowledgement
-and completion contract is still required before consuming wakes.
+and completion contract is still required before consuming wakes. The server-only
+[bounded context reader](night-context-read.md) defines capture-scoped pagination
+for a future credential-free native broker; it is not wired to the unit.
 
 [Capture recovery](night-capture-recovery.md) defines server-side atomic abort
 resolution for a pending capture racing stop or revocation. It is not permission

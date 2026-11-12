@@ -14,6 +14,7 @@ import pytest
 from agent_board.night.board import SignedBoard
 from agent_board.night_authority import AuthorityHTTP, NightAuthorityClient
 from agent_board.night_inspection import unit_cgroup
+from board import night_context
 from board.app import create_app
 from board.night import NightAdmission, Run, window_on
 from board.settings import Settings
@@ -412,6 +413,190 @@ def test_applied_resolution_refuses_unrelated_high_watermark_divergence(case: Ca
     denied = case.send("night.capture_abort", run.id, _abort_for(capture))
     assert denied.status_code == 409 and denied.json()["reason"] == "counter_mismatch"
     assert case.send("night.state", "self", {}).json()["counter"] == 3
+
+
+def _context_setup(
+    case: Case, bodies: tuple[str, ...] = ("older", "newer")
+) -> tuple[Run, dict[str, Any], list[int]]:
+    run, capture = _capture_setup(case)
+    with sqlite3.connect(case.path) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO subforums (slug, title, description) VALUES ('context', 'Context', '')"
+        )
+        thread = conn.execute(
+            "INSERT INTO threads (subforum, title, kind, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("context", "Context title", "topic", "pi@dev", case.now),
+        ).lastrowid
+        assert thread is not None
+        posts = []
+        for body in bodies:
+            post = conn.execute(
+                "INSERT INTO posts (thread_id, author, author_kind, body, created_at) VALUES (?, ?, ?, ?, ?)",
+                (thread, "pi@dev", "agent", body, case.now),
+            ).lastrowid
+            assert post is not None
+            posts.append(post)
+        conn.execute("UPDATE wakes SET thread_id = ?", (thread,))
+    response = case.send("night.capture", run.id, capture)
+    assert response.status_code == 200, response.text
+    payload = {key: value for key, value in capture.items() if key not in ("receipt_id", "counter")}
+    return (
+        run,
+        payload
+        | {
+            "capture_id": capture["receipt_id"],
+            "thread_id": thread,
+            "post_id": None,
+            "body_offset": 0,
+        },
+        posts,
+    )
+
+
+def test_context_read_is_chunked_paginated_and_not_a_counter_or_wake_ack(case: Case) -> None:
+    body = "x" + "🙂" * 1024
+    run, payload, posts = _context_setup(case, ("older", body))
+    first = case.send("night.thread_read", run.id, payload)
+    assert first.status_code == 200, first.text
+    data = first.json()
+    assert data["post"]["id"] == posts[-1]
+    assert data["previous_post_id"] == posts[0]
+    assert not data["post"]["body_end_reached"]
+    offset = data["post"]["next_body_offset"]
+    second = case.send("night.thread_read", run.id, payload | {"post_id": posts[-1], "body_offset": offset})
+    assert second.status_code == 200, second.text
+    encoded = data["post"]["body_base64"], second.json()["post"]["body_base64"]
+    assert b"".join(base64.b64decode(chunk) for chunk in encoded).decode() == body
+    assert second.json()["post"]["body_end_reached"]
+    older = case.send("night.thread_read", run.id, payload | {"post_id": posts[0]}).json()
+    assert base64.b64decode(older["post"]["body_base64"]) == b"older"
+    assert older["previous_post_id"] is None
+    assert case.send("night.state", "self", {}).json()["counter"] == 2
+    with sqlite3.connect(case.path) as conn:
+        assert conn.execute("SELECT reads FROM night_context_reads").fetchone()[0] == 3
+        assert conn.execute("SELECT COUNT(*) FROM wakes WHERE acked_at IS NOT NULL").fetchone()[0] == 0
+    assert len(first.content) <= night_context.MAX_RESPONSE_BYTES
+
+
+def test_context_authorization_uses_immutable_capture_not_mutable_wake(case: Case) -> None:
+    run, payload, _ = _context_setup(case)
+    with sqlite3.connect(case.path) as conn:
+        foreign = conn.execute(
+            "INSERT INTO threads (subforum, title, kind, created_by, created_at) "
+            "VALUES ('context', 'Foreign', 'topic', 'pi@dev', ?)",
+            (case.now,),
+        ).lastrowid
+        assert foreign is not None
+        conn.execute("UPDATE wakes SET thread_id = ?", (foreign,))
+    denied = case.send("night.thread_read", run.id, payload | {"thread_id": foreign})
+    assert denied.status_code == 409 and denied.json()["reason"] == "thread_not_captured"
+    assert case.send("night.thread_read", run.id, payload).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"thread_id": True},
+        {"thread_id": 2**64},
+        {"post_id": True},
+        {"post_id": 2**64},
+        {"post_id": -1},
+        {"body_offset": True},
+        {"body_offset": -1},
+        {"body_offset": night_context.MAX_BODY_BYTES},
+        {"body_offset": 1},
+        {"capture_id": str(uuid4())},
+        {"journal_id": str(uuid4())},
+        {"invocation_id": "b" * 32},
+        {"counter": 2},
+    ],
+)
+def test_context_invalid_reads_do_not_debit_or_mutate_counter(case: Case, change: dict[str, Any]) -> None:
+    run, payload, _ = _context_setup(case)
+    denied = case.send("night.thread_read", run.id, payload | change)
+    assert denied.status_code == 409, denied.text
+    assert case.send("night.state", "self", {}).json()["counter"] == 2
+    with sqlite3.connect(case.path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM night_context_reads").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("state", ["stopping", "quarantined", "finished"])
+def test_context_refuses_nonrunning_runs(case: Case, state: str) -> None:
+    run, payload, _ = _context_setup(case)
+    with sqlite3.connect(case.path) as conn:
+        conn.execute("UPDATE night_runs SET state = ? WHERE id = ?", (state, run.id))
+    assert case.send("night.thread_read", run.id, payload).status_code == 409
+
+
+def test_context_refuses_off_expiry_unenrollment_and_agent_credentials(case: Case) -> None:
+    run, payload, _ = _context_setup(case)
+    assert case.send("night.thread_read", run.id, payload, actor=case.agent).status_code == 401
+    with sqlite3.connect(case.path) as conn:
+        conn.execute("UPDATE night_control SET enabled = 0")
+    assert case.send("night.thread_read", run.id, payload).status_code == 409
+    with sqlite3.connect(case.path) as conn:
+        conn.execute("UPDATE night_control SET enabled = 1")
+        conn.execute("UPDATE night_enrollment SET enabled = 0")
+    assert case.send("night.thread_read", run.id, payload).status_code == 409
+    with sqlite3.connect(case.path) as conn:
+        conn.execute("UPDATE night_enrollment SET enabled = 1")
+    case.app.state.night_verifier._clock = lambda: run.deadline + 1
+    assert case.send("night.thread_read", run.id, payload).status_code == 409
+
+
+def test_context_limits_are_explicit_and_never_mark_a_capped_body_complete(case: Case) -> None:
+    run, payload, posts = _context_setup(case, ("x" * (night_context.MAX_BODY_BYTES + 10),))
+    response = case.send(
+        "night.thread_read",
+        run.id,
+        payload
+        | {
+            "post_id": posts[0],
+            "body_offset": night_context.MAX_BODY_BYTES - 100,
+        },
+    )
+    assert response.status_code == 200, response.text
+    post = response.json()["post"]
+    assert post["body_limit_reached"] and not post["body_end_reached"]
+    assert post["next_body_offset"] is None
+    assert len(base64.b64decode(post["body_base64"])) == 100
+
+
+@pytest.mark.parametrize("limit", ["MAX_READS", "MAX_TOTAL_BYTES"])
+def test_context_read_and_byte_quotas_do_not_advance_verifier_counter(
+    case: Case, monkeypatch: pytest.MonkeyPatch, limit: str
+) -> None:
+    run, payload, _ = _context_setup(case)
+    monkeypatch.setattr(night_context, limit, 0)
+    denied = case.send("night.thread_read", run.id, payload)
+    assert denied.status_code == 409, denied.text
+    assert case.send("night.state", "self", {}).json()["counter"] == 2
+
+
+def test_context_quota_is_atomic_under_concurrent_reads(case: Case, monkeypatch: pytest.MonkeyPatch) -> None:
+    run, payload, _ = _context_setup(case)
+    monkeypatch.setattr(night_context, "MAX_READS", 1)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(case.send, "night.thread_read", run.id, payload) for _ in range(2)]
+        responses = [future.result() for future in futures]
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    with sqlite3.connect(case.path) as conn:
+        assert conn.execute("SELECT reads FROM night_context_reads").fetchone()[0] == 1
+
+
+def test_context_large_metadata_is_explicitly_truncated_within_response_bound(case: Case) -> None:
+    run, payload, posts = _context_setup(case, ("z" * night_context.BODY_CHUNK_BYTES,))
+    with sqlite3.connect(case.path) as conn:
+        conn.execute("UPDATE threads SET title = ? WHERE id = ?", ("🙂" * 150, payload["thread_id"]))
+        conn.execute(
+            "UPDATE posts SET author = ?, author_kind = ? WHERE id = ?", ("🙂" * 150, "🙂" * 40, posts[0])
+        )
+    response = case.send("night.thread_read", run.id, payload)
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["title_truncated"] and data["post"]["author_truncated"]
+    assert data["post"]["author_kind_truncated"]
+    assert len(response.content) <= night_context.MAX_RESPONSE_BYTES
 
 
 def _capture_setup(case: Case, count: int = 3) -> tuple[Run, dict[str, Any]]:
