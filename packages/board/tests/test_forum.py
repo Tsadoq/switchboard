@@ -9,6 +9,7 @@ import httpx2
 import pytest
 from board.app import create_app, main
 from board.constants import HUMAN
+from board.db import SCHEMA_DIR, connect, migrate
 from board.forum import mentions
 from board.forum.actions import Forum
 from board.forum.entities import AuthorKind, ThreadTarget
@@ -326,15 +327,14 @@ def test_participants_automatically_follow_without_self_wakes_or_duplicates(
 
     response = _send(client, alice, "post", target, {"body": "an unmentioned reply"})
     assert response.status_code == 201
-    assert [(wake.principal, wake.reason) for wake in wakes] == [(bob.principal, "follow")]
-    wakes.clear()
+    assert wakes == [], f"a reply-joined follower was woken by an unrelated post: {wakes}"
 
     response = _send(client, alice, "post", target, {"body": "hello @pi@testbox"})
     assert response.status_code == 201
     assert [(wake.principal, wake.reason) for wake in wakes] == [(bob.principal, "mention")]
     assert _portal(client).call(_forum(client).followers_of, thread_id, "general") == {
-        alice.principal,
-        bob.principal,
+        alice.principal: "all",
+        bob.principal: "mentions",
     }
 
 
@@ -357,7 +357,9 @@ def test_unfollow_sticks_across_comments_until_explicit_follow(
     assert [(wake.principal, wake.reason) for wake in wakes] == [(alice.principal, "follow")]
     assert _send(client, alice, "unfollow", target, {}).status_code == 200
     assert _send(client, alice, "post", target, {"body": "opted out again"}).status_code == 201
-    assert _portal(client).call(_forum(client).followers_of, thread_id, "general") == {bob.principal}
+    assert _portal(client).call(_forum(client).followers_of, thread_id, "general") == {
+        bob.principal: "mentions"
+    }
 
 
 def test_only_agent_posts_automatically_follow(client: TestClient, signer: "SignerFactory") -> None:
@@ -369,7 +371,7 @@ def test_only_agent_posts_automatically_follow(client: TestClient, signer: "Sign
         _portal(client).call(
             _forum(client).post, author, kind, ThreadTarget(thread_id), {"body": "not an agent"}
         )
-    assert _portal(client).call(_forum(client).followers_of, thread_id, "general") == {alice.principal}
+    assert _portal(client).call(_forum(client).followers_of, thread_id, "general") == {alice.principal: "all"}
 
 
 def test_follow_and_unfollow_round_trip(client: TestClient, signer: "SignerFactory") -> None:
@@ -385,8 +387,140 @@ def test_follow_and_unfollow_round_trip(client: TestClient, signer: "SignerFacto
 
     assert followed.status_code == 200, f"follow refused: {followed.status_code} {followed.text}"
     assert unfollowed.status_code == 200, f"unfollow refused: {unfollowed.status_code} {unfollowed.text}"
-    assert while_following == {"claude@testbox"}, f"follow not recorded: {while_following}"
-    assert after_unfollow == set(), f"unfollow left followers behind: {after_unfollow}"
+    assert followed.json() == {"target": f"thread:{thread_id}", "following": True, "level": "all"}
+    assert while_following == {"claude@testbox": "all"}, f"follow not recorded: {while_following}"
+    assert after_unfollow == {}, f"unfollow left followers behind: {after_unfollow}"
+
+
+def _joined_by_reply(client: TestClient, opener: "Signer", joiner: "Signer") -> int:
+    thread_id = _open_thread(client, opener)
+    r = _send(client, joiner, "post", f"thread:{thread_id}", {"body": "joining by replying"})
+    assert r.status_code == 201, f"reply rejected: {r.status_code} {r.text}"
+    return thread_id
+
+
+def _woken(wakes: list[WakeRequest]) -> list[tuple[str, str]]:
+    return sorted((wake.principal, wake.reason) for wake in wakes)
+
+
+def test_reply_joined_follower_is_woken_by_a_mention_and_by_the_human_only(
+    client: TestClient, signer: "SignerFactory"
+) -> None:
+    alice, bob, carol = signer("claude@testbox"), signer("pi@testbox"), signer("pi@otherbox")
+    _register(client, alice, bob, carol)
+    thread_id = _joined_by_reply(client, alice, bob)
+    target = f"thread:{thread_id}"
+    wakes = _collect_wakes(client)
+
+    assert _send(client, carol, "post", target, {"body": "unrelated chatter"}).status_code == 201
+    assert _woken(wakes) == [(alice.principal, "follow")], f"only the opener follows at 'all': {wakes}"
+    wakes.clear()
+
+    assert _send(client, carol, "post", target, {"body": "@pi@testbox your turn"}).status_code == 201
+    assert _woken(wakes) == [(alice.principal, "follow"), (bob.principal, "mention")], f"{wakes}"
+    wakes.clear()
+
+    _portal(client).call(_forum(client).post, HUMAN, "human", ThreadTarget(thread_id), {"body": "a decision"})
+    assert _woken(wakes) == sorted((each.principal, "follow") for each in (alice, bob, carol)), (
+        f"a human post must wake every follower at either level: {wakes}"
+    )
+
+
+def test_explicit_follow_raises_a_reply_joined_follow_to_all_and_a_reply_keeps_it(
+    client: TestClient, signer: "SignerFactory"
+) -> None:
+    alice, bob, carol = signer("claude@testbox"), signer("pi@testbox"), signer("pi@otherbox")
+    _register(client, alice, bob, carol)
+    thread_id = _joined_by_reply(client, alice, bob)
+    target = f"thread:{thread_id}"
+
+    assert _send(client, bob, "follow", target, {}).status_code == 200
+    assert _send(client, bob, "post", target, {"body": "replying again"}).status_code == 201
+    wakes = _collect_wakes(client)
+    assert _send(client, carol, "post", target, {"body": "unrelated chatter"}).status_code == 201
+
+    assert _woken(wakes) == [(alice.principal, "follow"), (bob.principal, "follow")], f"{wakes}"
+
+
+def test_follow_accepts_a_level_and_lists_it(client: TestClient, signer: "SignerFactory") -> None:
+    alice, bob = signer("claude@testbox"), signer("pi@testbox")
+    _register(client, alice, bob)
+    thread_id = _open_thread(client, alice)
+    target = f"thread:{thread_id}"
+
+    lowered = _send(client, alice, "follow", target, {"level": "mentions"})
+    refused = _send(client, alice, "follow", target, {"level": "everything"})
+    wakes = _collect_wakes(client)
+    assert _send(client, bob, "post", target, {"body": "unrelated chatter"}).status_code == 201
+
+    assert lowered.json() == {"target": target, "following": True, "level": "mentions"}, lowered.text
+    assert (refused.status_code, refused.json()["reason"]) == (400, "bad_payload"), refused.text
+    assert wakes == [], f"a mentions-level follower was woken by an unrelated post: {wakes}"
+    follows = _read(client, "/api/me/follows", _bearer(client, alice))
+    assert [(f["target"], f["level"]) for f in follows] == [(target, "mentions")], f"{follows}"
+
+
+def test_subforum_follow_at_all_outranks_a_reply_joined_thread_follow(
+    client: TestClient, signer: "SignerFactory"
+) -> None:
+    alice, bob, carol = signer("claude@testbox"), signer("pi@testbox"), signer("pi@otherbox")
+    _register(client, alice, bob, carol)
+    thread_id = _joined_by_reply(client, alice, bob)
+    assert _send(client, bob, "follow", "subforum:general", {}).status_code == 200
+    wakes = _collect_wakes(client)
+
+    assert _send(client, carol, "post", f"thread:{thread_id}", {"body": "chatter"}).status_code == 201
+
+    assert _woken(wakes) == [(alice.principal, "follow"), (bob.principal, "follow")], f"{wakes}"
+
+
+def test_migration_lowers_reply_joined_follows_and_keeps_the_rest(tmp_path: Path) -> None:
+    old_schema = tmp_path / "schema"
+    old_schema.mkdir()
+    for script in sorted(SCHEMA_DIR.glob("[0-9][0-9][0-9][0-9]_*.sql")):
+        if script.name < "0022":
+            (old_schema / script.name).write_text(script.read_text())
+    with closing(connect(tmp_path / "board.sqlite3")) as conn:
+        migrate(conn, old_schema)
+        conn.execute("INSERT INTO subforums (slug, title, description) VALUES ('rooms', 'Rooms', '')")
+        conn.executemany(
+            "INSERT INTO threads (id, subforum, title, kind, created_by, created_at) VALUES (?, 'rooms', 'T', ?, 'opener', 1)",
+            [(7, "discussion"), (8, "ticket")],
+        )
+        conn.execute(
+            'INSERT INTO tickets (id, title, "column", assignee, thread_id, created_by, created_at, updated_at) '
+            "VALUES (1, 'T', 'doing', 'owner', 8, 'opener', 1, 1)"
+        )
+        conn.executemany(
+            "INSERT INTO posts (thread_id, author, author_kind, body, created_at) VALUES (?, ?, 'agent', '', 1)",
+            [(7, "opener"), (7, "replier"), (8, "opener"), (8, "owner"), (8, "replier")],
+        )
+        conn.executemany(
+            "INSERT INTO follows (target, principal, created_at) VALUES (?, ?, 1)",
+            [
+                ("thread:7", "opener"),
+                ("thread:7", "replier"),
+                ("thread:7", "lurker"),
+                ("thread:8", "owner"),
+                ("thread:8", "replier"),
+                ("subforum:rooms", "replier"),
+            ],
+        )
+
+        migrate(conn)
+
+        levels = {
+            (row["target"], row["principal"]): row["level"]
+            for row in conn.execute("SELECT target, principal, level FROM follows")
+        }
+    assert levels == {
+        ("thread:7", "opener"): "all",
+        ("thread:7", "replier"): "mentions",
+        ("thread:7", "lurker"): "all",
+        ("thread:8", "owner"): "all",
+        ("thread:8", "replier"): "mentions",
+        ("subforum:rooms", "replier"): "all",
+    }, f"migration set the wrong levels: {levels}"
 
 
 def test_me_follows_lists_my_follows(client: TestClient, signer: "SignerFactory") -> None:

@@ -81,8 +81,9 @@ def _signed_actions(forum: Forum) -> dict[str, SignedAction]:
         return JSONResponse(_post_result_json(result), status_code=201)
 
     async def follow(verified: Verified) -> Response:
-        target = await forum.follow(verified.envelope.principal, verified.envelope.target)
-        return JSONResponse({"target": target, "following": True})
+        envelope = verified.envelope
+        target, level = await forum.follow(envelope.principal, envelope.target, envelope.payload.get("level"))
+        return JSONResponse({"target": target, "following": True, "level": level})
 
     async def unfollow(verified: Verified) -> Response:
         target = await forum.unfollow(verified.envelope.principal, verified.envelope.target)
@@ -182,4 +183,4 @@ def _profile_json(profile: Profile) -> dict[str, Any]:
 
 
 def _follow_json(follow: Follow) -> dict[str, Any]:
-    return {"target": follow.target, "created_at": rfc3339(follow.created_at)}
+    return {"target": follow.target, "created_at": rfc3339(follow.created_at), "level": follow.level}
