@@ -127,6 +127,9 @@ def test_board_adapter_distinguishes_authority_refusal_from_outage(
         {"counter": -1},
         {"journal_id": "bad"},
         {"active": [{"id": "bad"}]},
+        {"active": [{"id": "00000000-0000-4000-8000-000000000001"}]},
+        {"active": [{"id": "00000000-0000-4000-8000-000000000001", "state": ""}]},
+        {"active": [{"id": "00000000-0000-4000-8000-000000000001", "state": 1}]},
     ],
 )
 def test_board_adapter_rejects_malformed_state(change: dict[str, Any]) -> None:
@@ -159,3 +162,25 @@ def test_unprivileged_default_signer_never_creates_a_key_or_sends(
         with pytest.raises(GrantUnavailable, match="root_signer_required"):
             client.fetch_grant("run", "fence")
     assert not key.exists()
+
+
+def test_board_adapter_reports_only_server_stopping_rows_as_stop_requests() -> None:
+    running, stopping = "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"
+    state = {
+        "box": "dev",
+        "journal_id": None,
+        "counter": 0,
+        "active": [{"id": running, "state": "running"}, {"id": stopping, "state": "stopping"}],
+    }
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=state)
+
+    with httpx.Client(base_url=Config().board_url, transport=httpx.MockTransport(handle)) as http:
+        board = SignedBoard(
+            "dev", NightAuthorityClient(Config(), http=http, signer=lambda _: "test-signature")
+        )
+        fresh = board.state()
+
+    assert fresh.active_run_ids == {running, stopping}
+    assert fresh.stop_requested == {stopping}

@@ -122,6 +122,10 @@ class Binder:
         self.settles: list[tuple[str, str]] = []
         self.settle_result = True
         self.reconciles = 0
+        self.requested: frozenset[str] = frozenset()
+
+    def requested_stops(self) -> frozenset[str]:
+        return self.requested
 
     def settle(self, record: Any, reason: str) -> bool:
         self.settles.append((record.run_id, reason))
@@ -144,6 +148,8 @@ class Runs:
         self.stopped: list[str] = []
         self.observation = Observation(unit_active=False, cgroup_populated=False)
         self.launch_failure: Exception | None = None
+        self.stop_failure: Exception | None = None
+        self.on_stop: Any = None
 
     def launch(self, spec: RunSpec) -> None:
         if self.launch_failure is not None:
@@ -151,6 +157,10 @@ class Runs:
         self.launched.append(spec)
 
     def stop(self, unit: str) -> None:
+        if self.on_stop is not None:
+            self.on_stop(unit)
+        if self.stop_failure is not None:
+            raise self.stop_failure
         self.stopped.append(unit)
 
     def inspect(self, unit: str) -> Observation:
@@ -526,3 +536,95 @@ def test_the_sweep_leaves_a_healthy_running_run_alone(rig: Rig) -> None:
 
     assert rig.binder.settles == [] and rig.runs.stopped == []
     assert rig.journal.active()[0].state == "starting"
+
+
+def test_a_board_stop_request_latches_the_journal_before_the_kill_then_settles_as_preempted(rig: Rig) -> None:
+    run_id = str(uuid4())
+    rig.ask("start", run_id)
+    rig.runs.observation = Observation(unit_active=True, cgroup_populated=True)
+    latched_at_kill: list[bool] = []
+    rig.runs.on_stop = lambda unit: latched_at_kill.append(rig.journal.active()[0].stop_requested)
+    rig.binder.requested = frozenset({run_id})
+
+    rig.controller.sweep()
+
+    assert rig.runs.stopped == [unit_name(run_id)]
+    assert latched_at_kill == [True], "the kill came before the durable stop latch"
+    assert rig.binder.settles == [(run_id, "preempted")], rig.binder.settles
+
+
+def test_a_board_stop_whose_kill_fails_quarantines_and_never_releases_on_the_request(rig: Rig) -> None:
+    run_id = str(uuid4())
+    rig.ask("start", run_id)
+    rig.runs.stop_failure = subprocess.SubprocessError("systemctl hung")
+    rig.binder.settle_result = False
+    rig.binder.requested = frozenset({run_id})
+
+    rig.controller.sweep()
+
+    record = rig.journal.active()[0]
+    assert record.state == "quarantined" and record.reason == "proof_incomplete", record
+    assert rig.binder.settles == [(run_id, "preempted")]
+
+
+def test_a_board_stop_for_a_run_this_box_does_not_hold_touches_nothing(rig: Rig) -> None:
+    run_id = str(uuid4())
+    rig.ask("start", run_id)
+    rig.runs.observation = Observation(unit_active=True, cgroup_populated=None)
+    rig.binder.requested = frozenset({str(uuid4())})
+
+    rig.controller.sweep()
+
+    assert rig.runs.stopped == [] and rig.binder.settles == []
+    assert rig.journal.active()[0].state == "starting"
+
+
+def test_a_board_stop_retries_the_kill_after_a_transient_failure_without_releasing(rig: Rig) -> None:
+    run_id = str(uuid4())
+    rig.ask("start", run_id)
+    rig.runs.observation = Observation(unit_active=True, cgroup_populated=True)
+    rig.runs.stop_failure = subprocess.SubprocessError("transient manager failure")
+    rig.binder.settle_result = False
+    rig.binder.requested = frozenset({run_id})
+    rig.controller.sweep()
+    assert rig.journal.active()[0].state == "quarantined"
+
+    rig.runs.stop_failure = None
+    rig.controller.sweep()
+
+    assert rig.runs.stopped == [unit_name(run_id)]
+    assert rig.journal.active()[0].state == "quarantined", "a retried stop changed the uncertainty"
+
+
+def test_a_board_stop_is_not_repeated_once_the_run_is_proven_empty(rig: Rig) -> None:
+    run_id = str(uuid4())
+    rig.ask("start", run_id)
+    rig.binder.settle_result = False
+    rig.binder.requested = frozenset({run_id})
+    rig.controller.sweep()
+    rig.runs.observation = Observation(unit_active=False, cgroup_populated=False)
+
+    rig.controller.sweep()
+
+    assert rig.runs.stopped == [unit_name(run_id)], rig.runs.stopped
+
+
+def test_an_unreadable_inspection_is_no_reason_to_skip_a_requested_stop(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = str(uuid4())
+    rig.ask("start", run_id)
+    rig.runs.stop_failure = subprocess.SubprocessError("transient manager failure")
+    rig.binder.settle_result = False
+    rig.binder.requested = frozenset({run_id})
+    rig.controller.sweep()
+    rig.runs.stop_failure = None
+
+    def unreadable(unit: str) -> Observation:
+        raise OSError("inspection unavailable")
+
+    monkeypatch.setattr(rig.runs, "inspect", unreadable)
+    rig.controller.sweep()
+
+    assert rig.runs.stopped == [unit_name(run_id)]
+    assert rig.journal.active()[0].state == "quarantined"
