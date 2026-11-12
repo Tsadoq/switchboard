@@ -8,11 +8,22 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from agent_board.night.assignment import AssignmentError, NightPolicy, build_assignment, encode, parse_wakes
-from agent_board.night.ledger import CaptureContext, CapturedAssignment, Ledger, LedgerError, Pending
+from agent_board.night.ledger import (
+    CaptureAborted,
+    CaptureContext,
+    CapturedAssignment,
+    Ledger,
+    LedgerError,
+    Pending,
+)
 from agent_board.night_inspection import ROOT_EXEC, Binding, EmptyObservation, Execution, InspectionError
 from agent_board.night_state import LocalJournal, Record, StateError
 
 logger = logging.getLogger(__name__)
+CAPTURE_DENIED = "capture_denied:"
+ABORT_FIELDS = frozenset(
+    ("journal_id", "run_id", "abort_id", "capture_id", "capture_counter", "counter", "outcome", "capture")
+)
 
 
 class SyncError(RuntimeError):
@@ -52,6 +63,12 @@ class CaptureReply:
     snapshot: Mapping[str, Any]
 
 
+@dataclass(frozen=True)
+class AbortReply:
+    ack: Ack
+    proof: Mapping[str, Any]
+
+
 class VerifierBoard(Protocol):
     """The verifier's signed /api/night/verifier actions; each raises BoardRefused or BoardUnavailable."""
 
@@ -64,6 +81,8 @@ class VerifierBoard(Protocol):
     def evidence(self, run_id: str, payload: Mapping[str, Any]) -> Ack: ...
 
     def capture(self, run_id: str, payload: Mapping[str, Any]) -> CaptureReply: ...
+
+    def capture_abort(self, run_id: str, payload: Mapping[str, Any]) -> AbortReply: ...
 
 
 class BindingInspector(Protocol):
@@ -146,6 +165,7 @@ class BoardSync:
     def _bind_locked(self, *, run_id: str, fence: str, uid: int, boot_id: str) -> None:
         if self.frozen is not None:
             raise SyncError(f"frozen:{self.frozen}")
+        self._flush()
         try:
             binding = self._inspector.capture(run_id=run_id, uid=uid, boot_id=boot_id, execution=ROOT_EXEC)
             self._ledger.record_binding(
@@ -186,8 +206,15 @@ class BoardSync:
                 raise SyncError(f"frozen:{self.frozen}")
             existing = self._ledger.captured(record.run_id)
             if isinstance(existing, CapturedAssignment):
+                if existing.aborted_after_apply:
+                    raise SyncError("capture_aborted")
                 return existing
+            if isinstance(existing, CaptureAborted) or (
+                isinstance(existing, Pending) and existing.action == "capture_abort"
+            ):
+                raise SyncError("capture_aborted")
             if existing is None:
+                self._flush()
                 recorded = self._ledger.binding(record.run_id)
                 identity = self._ledger.identity()
                 if recorded is None or not recorded.server_acked or identity.journal_id is None:
@@ -208,14 +235,7 @@ class BoardSync:
                     },
                 )
                 self._ledger.persist_capture(existing, CaptureContext(record.principal, cutoff_utc, policy))
-            try:
-                self._send_and_acknowledge(existing)
-            except CaptureRefused as error:
-                self.frozen = f"capture_refused:{error}"
-                raise
-            except BoardRefused as error:
-                self.frozen = f"capture_denied:{error}"
-                raise
+            self._flush()
             stored = self._ledger.captured(record.run_id)
             if not isinstance(stored, CapturedAssignment):
                 raise SyncError("capture_not_stored")
@@ -231,13 +251,18 @@ class BoardSync:
         Runtime is always reported unknown (a full charge): the unit's monotonic timestamps exclude suspend,
         which the budget counts. Any doubt, at any step, keeps the slot.
         """
-        if self.frozen is not None or not record.launch_claimed:
+        if not record.launch_claimed:
+            return False
+        if self.frozen is not None and not self.frozen.startswith(CAPTURE_DENIED):
             return False
         recorded = self._ledger.binding(record.run_id)
         if recorded is None or not recorded.server_acked:
             return False
         binding = Binding(record.run_id, recorded.uid, recorded.boot_id, recorded.invocation_id, ROOT_EXEC)
         try:
+            self._resolve_pending_capture(record)
+            if self.frozen is not None:
+                return False
             self._inspector.stopped(binding)
             self._report(record, binding, recorded.cgroup, reason)
             if not self._board_released(record.run_id):
@@ -250,7 +275,37 @@ class BoardSync:
             return False
         return True
 
+    def _resolve_pending_capture(self, record: Record) -> None:
+        """A stopping run's unresolved capture is fenced by an abort before any evidence for that run.
+
+        The abort and its link to the parent are durable before it is sent, and from then on only the abort
+        is ever sent. A denial freeze is lifted only by a clean reconcile after the pair resolves.
+        """
+        pending = self._ledger.captured(record.run_id)
+        if not isinstance(pending, Pending):
+            return
+        if pending.action == "capture":
+            receipt_id = str(uuid4())
+            self._ledger.persist_abort(
+                pending.receipt_id,
+                Pending(
+                    receipt_id,
+                    "capture_abort",
+                    record.run_id,
+                    {
+                        **pending.payload,
+                        "receipt_id": receipt_id,
+                        "capture_receipt_id": pending.receipt_id,
+                        "capture_counter": pending.payload["counter"],
+                    },
+                ),
+            )
+        self._flush()
+        if self.frozen is not None:
+            self._reconcile_locked()
+
     def _report(self, record: Record, binding: Binding, cgroup: str, reason: str) -> None:
+        self._flush()
         existing = self._ledger.evidence(record.run_id)
         if existing is not None:
             pending, acked = existing
@@ -326,16 +381,41 @@ class BoardSync:
         return None
 
     def _deliver(self, pending: Pending) -> None:
+        """Callers flush before composing, so a new receipt carries the board's current counter; one composed
+        while an earlier receipt is unacknowledged is refused rather than sent stale."""
+        if self._ledger.unacknowledged():
+            raise SyncError("unacknowledged_receipts")
         self._ledger.persist(pending)
         self._send_and_acknowledge(pending)
 
+    def _flush(self) -> None:
+        for pending in self._ledger.unacknowledged():
+            self._send_and_acknowledge(pending)
+
     def _send_and_acknowledge(self, pending: Pending) -> None:
+        if pending.action not in ("capture", "capture_abort"):
+            self._send_mutation(pending)
+            return
+        try:
+            self._send_mutation(pending)
+        except CaptureRefused as error:
+            self.frozen = f"capture_refused:{error}"
+            raise
+        except BoardRefused as error:
+            self.frozen = f"{CAPTURE_DENIED}{error}"
+            raise
+
+    def _send_mutation(self, pending: Pending) -> None:
         if pending.action == "bootstrap":
             ack = self._board.bootstrap(pending.payload)
         elif pending.action == "binding" and pending.run_id is not None:
             ack = self._board.binding(pending.run_id, pending.payload)
         elif pending.action == "evidence" and pending.run_id is not None:
             ack = self._board.evidence(pending.run_id, pending.payload)
+        elif pending.action == "capture_abort" and pending.run_id is not None:
+            abort_reply = self._board.capture_abort(pending.run_id, pending.payload)
+            self._resolve_abort(pending, abort_reply)
+            return
         elif pending.action == "capture" and pending.run_id is not None:
             reply = self._board.capture(pending.run_id, pending.payload)
             derived = _derive(pending, reply, self._ledger.capture_context(pending.receipt_id))
@@ -349,6 +429,45 @@ class BoardSync:
         else:
             raise SyncError("malformed_pending_receipt")
         self._ledger.acknowledge(pending.receipt_id, journal_id=ack.journal_id, counter=ack.counter)
+
+    def _resolve_abort(self, pending: Pending, reply: AbortReply) -> None:
+        payload, proof = pending.payload, reply.proof
+        capture_counter = payload.get("capture_counter")
+        journal_id = payload.get("journal_id")
+        if (
+            type(capture_counter) is not int
+            or not isinstance(journal_id, str)
+            or frozenset(proof) != ABORT_FIELDS
+            or proof["journal_id"] != journal_id
+            or proof["run_id"] != pending.run_id
+            or proof["abort_id"] != pending.receipt_id
+            or proof["capture_id"] != payload.get("capture_receipt_id")
+            or proof["capture_counter"] != capture_counter
+            or proof["counter"] != capture_counter + 1
+            or reply.ack != Ack(journal_id, capture_counter + 1)
+        ):
+            raise CaptureRefused("abort_proof_mismatch")
+        applied = None
+        if proof["outcome"] == "applied" and isinstance(proof["capture"], Mapping):
+            parent = self._ledger.abort_parent(pending.receipt_id)
+            applied = _derive(
+                parent,
+                CaptureReply(reply.ack, proof["capture"]),
+                self._ledger.capture_context(parent.receipt_id),
+            )
+        elif proof["outcome"] != "aborted" or proof["capture"] is not None:
+            raise CaptureRefused("abort_proof_mismatch")
+        try:
+            stored_proof = json.dumps(dict(proof), sort_keys=True, ensure_ascii=True, allow_nan=False)
+        except (ValueError, TypeError, RecursionError):
+            raise CaptureRefused("abort_proof_unusable") from None
+        self._ledger.resolve_abort(
+            pending.receipt_id,
+            journal_id=reply.ack.journal_id,
+            counter=reply.ack.counter,
+            proof=stored_proof,
+            applied=applied,
+        )
 
 
 def _pending_bootstrap(pending: Sequence[Pending]) -> Pending | None:

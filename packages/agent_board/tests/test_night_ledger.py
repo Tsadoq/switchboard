@@ -6,7 +6,16 @@ from uuid import uuid4
 import pytest
 from agent_board import night_state
 from agent_board.night.assignment import NightPolicy
-from agent_board.night.ledger import Arm, CaptureContext, CapturedAssignment, Ledger, LedgerError, Pending
+from agent_board.night.ledger import (
+    LEDGER_VERSION,
+    Arm,
+    CaptureAborted,
+    CaptureContext,
+    CapturedAssignment,
+    Ledger,
+    LedgerError,
+    Pending,
+)
 
 BOOT = str(uuid4())
 JOURNAL = str(uuid4())
@@ -201,7 +210,99 @@ def test_a_version_1_ledger_is_migrated_with_every_receipt_kept(tmp_path: Path) 
     run_id = str(uuid4())
     migrated.persist_capture(_capture_receipt(run_id), CaptureContext("pi@dev", 1_850.0, POLICY))
     with sqlite3.connect(path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == LEDGER_VERSION
         assert conn.execute(
             "SELECT seq FROM receipts WHERE receipt_id = ?", (receipt.receipt_id,)
         ).fetchone() == (7,)
+
+
+def _abort_for(parent: Pending) -> Pending:
+    abort_id = str(uuid4())
+    return Pending(
+        abort_id,
+        "capture_abort",
+        parent.run_id,
+        {
+            **parent.payload,
+            "receipt_id": abort_id,
+            "capture_receipt_id": parent.receipt_id,
+            "capture_counter": 1,
+        },
+    )
+
+
+def test_an_abort_replaces_its_parent_among_the_receipts_to_send(ledger: Ledger) -> None:
+    run_id = str(uuid4())
+    parent = _capture_receipt(run_id)
+    ledger.persist_capture(parent, CaptureContext("pi@dev", 1_850.0, POLICY))
+    abort = _abort_for(parent)
+
+    ledger.persist_abort(parent.receipt_id, abort)
+
+    assert ledger.unacknowledged() == (abort,)
+    assert ledger.captured(run_id) == abort
+    assert ledger.abort_parent(abort.receipt_id) == parent
+    with pytest.raises(LedgerError, match="abort_exists"):
+        ledger.persist_abort(parent.receipt_id, _abort_for(parent))
+
+
+def test_an_abort_needs_an_unacknowledged_capture_of_the_same_run(ledger: Ledger) -> None:
+    run_id = str(uuid4())
+    parent = _capture_receipt(run_id)
+    ledger.persist_capture(parent, CaptureContext("pi@dev", 1_850.0, POLICY))
+    foreign = _abort_for(parent)
+
+    with pytest.raises(LedgerError, match="abort_parent_not_pending"):
+        ledger.persist_abort(
+            parent.receipt_id, Pending(foreign.receipt_id, "capture_abort", str(uuid4()), foreign.payload)
+        )
+    ledger.acknowledge(parent.receipt_id, journal_id=JOURNAL, counter=2, capture=("{}", None))
+    with pytest.raises(LedgerError, match="abort_parent_not_pending"):
+        ledger.persist_abort(parent.receipt_id, _abort_for(parent))
+
+
+def test_an_aborted_resolution_never_acknowledges_the_parent(ledger: Ledger) -> None:
+    run_id = str(uuid4())
+    parent = _capture_receipt(run_id)
+    ledger.persist_capture(parent, CaptureContext("pi@dev", 1_850.0, POLICY))
+    first = _binding_receipt(str(uuid4()))
+    ledger.persist(first)
+    ledger.acknowledge(first.receipt_id, journal_id=JOURNAL, counter=1)
+    abort = _abort_for(parent)
+    ledger.persist_abort(parent.receipt_id, abort)
+
+    ledger.resolve_abort(
+        abort.receipt_id, journal_id=JOURNAL, counter=2, proof='{"outcome": "aborted"}', applied=None
+    )
+
+    assert ledger.captured(run_id) == CaptureAborted(run_id, parent.receipt_id, '{"outcome": "aborted"}')
+    assert ledger.unacknowledged() == ()
+    assert ledger.identity().acked_counter == 2
+    with pytest.raises(LedgerError, match="unknown_abort"):
+        ledger.resolve_abort(abort.receipt_id, journal_id=JOURNAL, counter=3, proof="{}", applied=None)
+
+
+def test_a_version_2_ledger_gains_capture_aborts_with_its_receipts_kept(tmp_path: Path) -> None:
+    path = tmp_path / "state" / "ledger.sqlite3"
+    Ledger(path)
+    receipt = _binding_receipt(str(uuid4()))
+    Ledger(path).persist(receipt)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE capture_aborts")
+        conn.execute("ALTER TABLE receipts RENAME TO receipts_v3")
+        conn.execute(
+            "CREATE TABLE receipts (seq INTEGER PRIMARY KEY AUTOINCREMENT, receipt_id TEXT NOT NULL UNIQUE, "
+            "action TEXT NOT NULL CHECK(action IN ('bootstrap', 'binding', 'evidence', 'capture')), run_id TEXT, "
+            "payload TEXT NOT NULL, acked INTEGER NOT NULL DEFAULT 0 CHECK(acked IN (0, 1)))"
+        )
+        conn.execute("INSERT INTO receipts SELECT * FROM receipts_v3")
+        conn.execute("DROP TABLE receipts_v3")
+        conn.execute("PRAGMA user_version = 2")
+
+    migrated = Ledger(path)
+
+    assert migrated.unacknowledged() == (receipt,)
+    run_id = str(uuid4())
+    parent = _capture_receipt(run_id)
+    migrated.persist_capture(parent, CaptureContext("pi@dev", 1_850.0, POLICY))
+    migrated.persist_abort(parent.receipt_id, _abort_for(parent))
