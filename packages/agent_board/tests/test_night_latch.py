@@ -38,6 +38,8 @@ def _table(**changes: Any) -> dict[str, Any]:
         "agents": {
             "pi@huginn": {
                 "uid": UID,
+                "night_uid": UID + 1000,
+                "night_gid": UID + 1000,
                 "home": "/home/agent",
                 "happier_home": "/srv/h",
                 "workdir_root": "/srv/w",

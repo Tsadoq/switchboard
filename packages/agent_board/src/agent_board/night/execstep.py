@@ -9,10 +9,12 @@ from typing import NoReturn, Protocol
 
 from agent_board.night.config import VerifierConfig
 from agent_board.night.environment import (
+    DAY_UID_ENV,
     DEADLINE_UTC_ENV,
     HAPPIER_BIN_ENV,
     HOME_DIR_ENV,
     HOME_NAME,
+    NIGHT_UID_ENV,
     PRINCIPAL_ENV,
     RUNTIME_DIR_NAME,
     WORKDIR_ROOT_ENV,
@@ -51,6 +53,10 @@ class System(Protocol):
     def utc(self) -> float: ...
 
     def account(self, uid: int) -> Account: ...
+
+    def supplementary_groups(self, account: Account) -> list[int]:
+        """The account's groups besides its primary one, as the group database lists them."""
+        ...
 
     def drop_to(self, account: Account) -> None:
         """Clears supplementary groups and sets real, effective and saved gid then uid."""
@@ -113,12 +119,19 @@ def exec_native(
     agent = config.agents.get(record.principal)
     if agent is None or agent.uid != record.uid:
         raise ExecRefused("principal_mismatch")
-    account = system.account(agent.uid)
-    if account.uid != agent.uid or account.uid <= 0 or account.gid <= 0:
+    exec_uid = agent.exec_uid
+    account = system.account(exec_uid)
+    if account.uid != exec_uid or account.uid <= 0 or account.gid <= 0:
         raise ExecRefused("account_mismatch")
-    system.drop_to(Account(account.name, agent.uid, account.gid))
+    if agent.night_gid is not None and (
+        account.gid != agent.night_gid
+        or system.supplementary_groups(account) != []
+        or agent.night_gid in _requesting_groups(config, system)
+    ):
+        raise ExecRefused("night_account_not_dedicated")
+    system.drop_to(Account(account.name, exec_uid, account.gid))
     expected: tuple[tuple[int, int, int], tuple[int, int, int], list[int]] = (
-        (agent.uid, agent.uid, agent.uid),
+        (exec_uid, exec_uid, exec_uid),
         (account.gid, account.gid, account.gid),
         [],
     )
@@ -136,11 +149,26 @@ def exec_native(
         "LANG": "C.UTF-8",
         PRINCIPAL_ENV: record.principal,
         WORKDIR_ROOT_ENV: str(agent.workdir_root),
+        NIGHT_UID_ENV: str(exec_uid),
+        DAY_UID_ENV: str(record.uid),
         DEADLINE_UTC_ENV: repr(record.deadline_utc - grace),
     }
     if config.launcher_happier is not None:
         environment[HAPPIER_BIN_ENV] = str(config.launcher_happier)
     system.execve(python, [python, "-I", "-m", config.launcher_module, run_id], environment)
+
+
+def _requesting_groups(config: VerifierConfig, system: System) -> set[int]:
+    """Every primary and supplementary group of every configured requesting account."""
+    groups: set[int] = set()
+    for uid in {agent.uid for agent in config.agents.values()}:
+        try:
+            day = system.account(uid)
+        except KeyError:
+            raise ExecRefused("requesting_account_unknown") from None
+        groups.add(day.gid)
+        groups.update(system.supplementary_groups(day))
+    return groups
 
 
 class LiveSystem:
@@ -167,6 +195,9 @@ class LiveSystem:
     def account(self, uid: int) -> Account:
         entry = pwd.getpwuid(uid)
         return Account(entry.pw_name, entry.pw_uid, entry.pw_gid)
+
+    def supplementary_groups(self, account: Account) -> list[int]:
+        return sorted(set(os.getgrouplist(account.name, account.gid)) - {account.gid})
 
     def drop_to(self, account: Account) -> None:
         os.setgroups([])

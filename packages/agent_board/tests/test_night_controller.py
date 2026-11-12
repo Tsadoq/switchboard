@@ -35,12 +35,16 @@ def _config_table(**changes: Any) -> dict[str, Any]:
         "agents": {
             "pi@dev": {
                 "uid": PI_UID,
+                "night_uid": 3001,
+                "night_gid": 3001,
                 "home": "/home/pi",
                 "happier_home": "/var/lib/switchboard-night/happier/pi",
                 "workdir_root": "/srv/night/pi",
             },
             "claude@dev": {
                 "uid": CLAUDE_UID,
+                "night_uid": 3002,
+                "night_gid": 3002,
                 "home": "/home/claude",
                 "happier_home": "/var/lib/switchboard-night/happier/claude",
                 "workdir_root": "/srv/night/claude",
@@ -628,3 +632,60 @@ def test_an_unreadable_inspection_is_no_reason_to_skip_a_requested_stop(
 
     assert rig.runs.stopped == [unit_name(run_id)]
     assert rig.journal.active()[0].state == "quarantined"
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        pytest.param({"night_uid": 3001}, "night_uid and night_gid together", id="uid-without-gid"),
+        pytest.param(
+            {"night_uid": PI_UID, "night_gid": 3001}, "differ from the requesting uid", id="night-is-day"
+        ),
+        pytest.param(
+            {"night_uid": CLAUDE_UID, "night_gid": 3001},
+            "shared with another identity",
+            id="night-is-another-day-uid",
+        ),
+        pytest.param(
+            {"night_uid": 3002, "night_gid": 3002}, "shared with another identity", id="night-shared-by-two"
+        ),
+        pytest.param({"night_uid": 0, "night_gid": 3001}, "positive integer", id="root"),
+        pytest.param({"night_uid": True, "night_gid": 3001}, "positive integer", id="boolean"),
+    ],
+)
+def test_config_refuses_a_night_identity_that_is_not_dedicated(change: dict[str, Any], message: str) -> None:
+    agents = _config_table()["agents"]
+    pi = {key: value for key, value in agents["pi@dev"].items() if key not in ("night_uid", "night_gid")}
+
+    with pytest.raises(VerifierConfigError, match=message):
+        parse(_config_table(agents={**agents, "pi@dev": {**pi, **change}}))
+
+
+def test_a_native_launcher_needs_a_night_identity_but_the_stub_does_not() -> None:
+    agents = _config_table()["agents"]
+    without = {
+        name: {key: value for key, value in agent.items() if key not in ("night_uid", "night_gid")}
+        for name, agent in agents.items()
+    }
+
+    with pytest.raises(VerifierConfigError, match="needs a night_uid"):
+        parse(_config_table(agents=without))
+    stub = parse(
+        _config_table(
+            agents=without,
+            launcher={
+                "python": "/opt/switchboard-night/bin/python",
+                "module": "agent_board.night.acceptance_stub",
+            },
+        )
+    )
+    assert stub.agents["pi@dev"].exec_uid == PI_UID
+    assert parse(_config_table()).agents["pi@dev"].exec_uid == 3001
+
+
+def test_two_principals_cannot_share_a_night_primary_group() -> None:
+    table = _config_table()
+    table["agents"]["claude@dev"]["night_gid"] = table["agents"]["pi@dev"]["night_gid"]
+
+    with pytest.raises(VerifierConfigError, match="night_gid is shared"):
+        parse(table)

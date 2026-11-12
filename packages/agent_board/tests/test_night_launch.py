@@ -1,3 +1,4 @@
+import errno
 import os
 import stat
 from collections.abc import Callable, Mapping
@@ -9,8 +10,10 @@ from uuid import uuid4
 import pytest
 from agent_board.night.assignment import Assignment
 from agent_board.night.environment import (
+    DAY_UID_ENV,
     DEADLINE_UTC_ENV,
     HAPPIER_BIN_ENV,
+    NIGHT_UID_ENV,
     PLAIN_TERMINAL,
     PRINCIPAL_ENV,
     WORKDIR_ROOT_ENV,
@@ -197,6 +200,7 @@ class Rig:
             run_id=run_id,
             principal=PRINCIPAL,
             uid=os.getuid(),
+            day_uid=os.getuid() + 1,
             happier_home=happier_home,
             home=happier_home / "home",
             runtime_dir=happier_home / "run",
@@ -627,6 +631,8 @@ def _environment(**overrides: str) -> dict[str, str]:
         WORKDIR_ROOT_ENV: "/srv/night/claude",
         HAPPIER_BIN_ENV: "/opt/happier/0.2.17/happier",
         DEADLINE_UTC_ENV: "1000000.5",
+        NIGHT_UID_ENV: "1001",
+        DAY_UID_ENV: "1000",
         **overrides,
     }
 
@@ -655,6 +661,19 @@ def _without(name: str) -> dict[str, str]:
             str(uuid4()), _environment(**{DEADLINE_UTC_ENV: "nan"}), EXIT_PREFLIGHT, id="nan-deadline"
         ),
         pytest.param(str(uuid4()), _environment(HOME="relative/home"), EXIT_PREFLIGHT, id="relative-home"),
+        pytest.param(str(uuid4()), _without(NIGHT_UID_ENV), EXIT_PREFLIGHT, id="no-night-uid"),
+        pytest.param(
+            str(uuid4()), _environment(**{NIGHT_UID_ENV: "1002"}), EXIT_PREFLIGHT, id="running-as-another-uid"
+        ),
+        pytest.param(
+            str(uuid4()), _environment(**{DAY_UID_ENV: "1001"}), EXIT_PREFLIGHT, id="night-is-the-day-uid"
+        ),
+        pytest.param(
+            str(uuid4()), _environment(**{DAY_UID_ENV: "01000"}), EXIT_PREFLIGHT, id="non-canonical-day-uid"
+        ),
+        pytest.param(
+            str(uuid4()), _environment(**{DAY_UID_ENV: "\u00b2"}), EXIT_PREFLIGHT, id="unicode-digit"
+        ),
         pytest.param(
             str(uuid4()), _environment(**{WORKDIR_ROOT_ENV: "/srv/night/../x"}), EXIT_PREFLIGHT, id="dotdot"
         ),
@@ -788,8 +807,12 @@ def test_the_container_chain_is_checked_up_to_and_including_the_filesystem_root(
         seen.append(self)
         return world_writable if self == Path("/") and "/" in writable else managed
 
+    def no_acl(path: Any, name: str, *, follow_symlinks: bool = True) -> bytes:
+        raise OSError(errno.ENODATA, "no acl")
+
     writable: set[str] = set()
     monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(os, "getxattr", no_acl)
 
     assert trusted_containers(Path("/var/lib/switchboard-night/happier/claude"))
     assert seen == [
@@ -798,3 +821,47 @@ def test_the_container_chain_is_checked_up_to_and_including_the_filesystem_root(
     ]
     writable.add("/")
     assert not trusted_containers(Path("/var/lib/switchboard-night/happier/claude"))
+
+
+def _acl_on(target: Path) -> Callable[..., bytes]:
+    def getxattr(path: Any, name: str, *, follow_symlinks: bool = True) -> bytes:
+        if Path(path) == target and name == "system.posix_acl_access":
+            return b"\x02\x00\x00\x00"
+        raise OSError(errno.ENODATA, "no acl")
+
+    return getxattr
+
+
+@pytest.mark.parametrize("root", ["happier_home", "workdir_root", "container"])
+def test_an_acl_on_a_night_root_or_its_container_is_refused_before_any_command(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, root: str
+) -> None:
+    target = rig.settings.happier_home.parent if root == "container" else getattr(rig.settings, root)
+    monkeypatch.setattr(os, "getxattr", _acl_on(target))
+
+    assert rig.run() == EXIT_PREFLIGHT
+    assert rig.host.calls == []
+
+
+def test_the_day_overlap_check_uses_the_requesting_accounts_home(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    homes: list[int] = []
+    original = rig.host.account_home
+
+    def account_home(uid: int) -> Path:
+        homes.append(uid)
+        return original(uid)
+
+    monkeypatch.setattr(rig.host, "account_home", account_home)
+
+    rig.run()
+
+    assert homes == [rig.settings.day_uid]
+
+
+def test_running_as_the_requesting_uid_is_refused(rig: Rig) -> None:
+    rig.settings = replace(rig.settings, day_uid=rig.settings.uid)
+
+    assert rig.run() == EXIT_PREFLIGHT
+    assert rig.host.calls == []

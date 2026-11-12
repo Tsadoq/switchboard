@@ -1,3 +1,4 @@
+import errno
 import json
 import logging
 import math
@@ -15,10 +16,12 @@ from typing import Any, Protocol
 
 from agent_board.night.assignment import Assignment
 from agent_board.night.environment import (
+    DAY_UID_ENV,
     DEADLINE_UTC_ENV,
     HAPPIER_BIN_ENV,
     HOME_DIR_ENV,
     HOME_NAME,
+    NIGHT_UID_ENV,
     PLAIN_TERMINAL,
     PRINCIPAL_ENV,
     RUNTIME_DIR_NAME,
@@ -44,6 +47,7 @@ IDLE_PROBE_SECONDS = 30
 GIT = "/usr/bin/git"
 NO_SESSIONS = "This daemon has no tracked active sessions."
 SESSIONS_HEADER = "Active sessions:"
+_ID = re.compile(r"[1-9][0-9]{0,9}")
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 logger = logging.getLogger(__name__)
 
@@ -59,6 +63,7 @@ class Settings:
     run_id: str
     principal: str
     uid: int
+    day_uid: int
     happier_home: Path
     home: Path
     runtime_dir: Path
@@ -164,10 +169,18 @@ def settings_from(run_id: str, environ: Mapping[str, str], uid: int) -> Settings
         deadline_utc = math.nan
     if not math.isfinite(deadline_utc):
         raise LaunchRefused(EXIT_PREFLIGHT, "invalid_deadline")
+    night_uid, day_uid = (_positive_id(environ.get(name)) for name in (NIGHT_UID_ENV, DAY_UID_ENV))
+    if night_uid is None or day_uid is None:
+        raise LaunchRefused(EXIT_PREFLIGHT, "missing_identity")
+    if night_uid != uid:
+        raise LaunchRefused(EXIT_PREFLIGHT, "wrong_uid")
+    if day_uid == uid:
+        raise LaunchRefused(EXIT_PREFLIGHT, "night_uid_is_the_requesting_uid")
     return Settings(
         run_id=run_id,
         principal=environ[PRINCIPAL_ENV],
         uid=uid,
+        day_uid=day_uid,
         happier_home=Path(environ[HOME_DIR_ENV]),
         home=Path(environ["HOME"]),
         runtime_dir=Path(environ["XDG_RUNTIME_DIR"]),
@@ -180,7 +193,7 @@ def settings_from(run_id: str, environ: Mapping[str, str], uid: int) -> Settings
 def preflight(settings: Settings, host: Host) -> None:
     """Refuses, before any process starts or any file changes, unless the night home is private, separate
     from the account's day homes, authenticated by Happier's own status, and served by no other daemon."""
-    if host.uid() != settings.uid or settings.uid <= 0:
+    if host.uid() != settings.uid or settings.uid <= 0 or settings.uid == settings.day_uid:
         raise LaunchRefused(EXIT_PREFLIGHT, "wrong_uid")
     if not host.release_trusted(settings.happier_bin):
         raise LaunchRefused(EXIT_PREFLIGHT, "happier_release_not_root_owned")
@@ -193,7 +206,7 @@ def preflight(settings: Settings, host: Host) -> None:
             raise LaunchRefused(EXIT_PREFLIGHT, f"{inner} is not happier_home/{name}")
         if os.path.lexists(inner):
             _private_directory(inner, settings.uid, name)
-    account_home = host.account_home(settings.uid)
+    account_home = host.account_home(settings.day_uid)
     for day in (account_home / name for name in DAY_HOMES):
         if _overlaps(settings.happier_home, day):
             raise LaunchRefused(EXIT_PREFLIGHT, f"happier_home overlaps the day home {day}")
@@ -345,9 +358,22 @@ def trusted_containers(path: Path, owner: int = 0, top: Path = Path("/")) -> boo
             metadata = each.lstat()
         except OSError:
             return False
-        if not _owned_unwritable(metadata, owner, directory=True):
+        if not _owned_unwritable(metadata, owner, directory=True) or has_acl(each):
             return False
     return True
+
+
+def has_acl(path: Path) -> bool:
+    """True when the path carries any POSIX ACL entry, which can grant access its mode bits do not show."""
+    for name in ("system.posix_acl_access", "system.posix_acl_default"):
+        try:
+            os.getxattr(path, name, follow_symlinks=False)
+        except OSError as error:
+            if error.errno in (errno.ENODATA, errno.ENOTSUP, errno.EOPNOTSUPP):
+                continue
+            return True
+        return True
+    return False
 
 
 def release_trusted(binary: Path, owner: int = 0) -> bool:
@@ -359,9 +385,25 @@ def release_trusted(binary: Path, owner: int = 0) -> bool:
                 return False
         if not _owned_unwritable(binary.lstat(), owner, directory=False):
             return False
-        for root, directories, files in os.walk(release):
+    except OSError:
+        return False
+    return tree_trusted(release, owner)
+
+
+def tree_trusted(directory: Path, owner: int = 0) -> bool:
+    """Every entry below `directory` is a regular file or directory `owner` holds, nobody else can write, and
+    no ACL widens; a subtree that cannot be listed is not trusted, never skipped."""
+
+    def unreadable(error: OSError) -> None:
+        raise error
+
+    try:
+        if has_acl(directory):
+            return False
+        for root, directories, files in os.walk(directory, onerror=unreadable):
             for name in (*directories, *files):
-                if not _owned_unwritable(Path(root, name).lstat(), owner, directory=None):
+                path = Path(root, name)
+                if not _owned_unwritable(path.lstat(), owner, directory=None) or has_acl(path):
                     return False
     except OSError:
         return False
@@ -414,6 +456,14 @@ def _private_directory(path: Path, uid: int, name: str) -> None:
         raise LaunchRefused(EXIT_PREFLIGHT, f"{name}_missing") from None
     if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != uid or metadata.st_mode & 0o077:
         raise LaunchRefused(EXIT_PREFLIGHT, f"{name}_not_private")
+    if has_acl(path):
+        raise LaunchRefused(EXIT_PREFLIGHT, f"{name}_has_an_acl")
+
+
+def _positive_id(value: str | None) -> int | None:
+    if value is None or _ID.fullmatch(value) is None:
+        return None
+    return int(value)
 
 
 def _overlaps(left: Path, right: Path) -> bool:
@@ -565,18 +615,11 @@ class UnavailableAssignments:
         raise LaunchRefused(EXIT_ASSIGNMENT, "assignment_source_not_configured")
 
 
-class NoRepositories:
-    """Stands in until the reviewed repository policy exists, so no key resolves."""
-
-    def resolve(self, repository_key: str, principal: str) -> Path:
-        raise LaunchRefused(EXIT_ASSIGNMENT, "repository_policy_not_configured")
-
-
 def main(
     argv: Sequence[str],
     environ: Mapping[str, str] = os.environ,
     assignments: Callable[[Settings], AssignmentSource] = lambda settings: UnavailableAssignments(),
-    repositories: Callable[[Settings], RepositoryPolicy] = lambda settings: NoRepositories(),
+    repositories: Callable[[Settings], RepositoryPolicy] = lambda settings: _mirror_policy(),
 ) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     if len(argv) != 1:
@@ -593,6 +636,12 @@ def main(
     except LaunchRefused as refused:
         logger.error("night launch refused: %s", refused)
         return refused.exit_code
+
+
+def _mirror_policy() -> RepositoryPolicy:
+    from agent_board.night.repositories import MirrorPolicy
+
+    return MirrorPolicy()
 
 
 if __name__ == "__main__":
