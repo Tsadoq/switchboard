@@ -245,13 +245,17 @@ class Controller:
         return record
 
     def _retry_server_stop(self, record: Record) -> None:
-        """A latched run the board still wants stopped is stopped again while it is not proven empty; its
-        journal state, quarantine included, never changes here."""
+        """A latched run the board still wants stopped is stopped again unless it is positively proven empty;
+        an unreadable inspection is no proof. Its journal state, quarantine included, never changes here."""
         unit = unit_name(record.run_id)
         try:
             seen = self._runs.inspect(unit)
-            if seen.unit_active or seen.cgroup_populated is not False:
-                self._runs.stop(unit)
+            if not seen.unit_active and seen.cgroup_populated is False:
+                return
+        except _MANAGER_FAILURES as error:
+            logger.warning("inspecting night run %s before a retried stop failed: %s", record.run_id, error)
+        try:
+            self._runs.stop(unit)
         except _MANAGER_FAILURES as error:
             logger.error("retrying the stop of night run %s failed: %s", record.run_id, error)
 

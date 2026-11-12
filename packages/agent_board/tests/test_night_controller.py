@@ -607,3 +607,24 @@ def test_a_board_stop_is_not_repeated_once_the_run_is_proven_empty(rig: Rig) -> 
     rig.controller.sweep()
 
     assert rig.runs.stopped == [unit_name(run_id)], rig.runs.stopped
+
+
+def test_an_unreadable_inspection_is_no_reason_to_skip_a_requested_stop(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = str(uuid4())
+    rig.ask("start", run_id)
+    rig.runs.stop_failure = subprocess.SubprocessError("transient manager failure")
+    rig.binder.settle_result = False
+    rig.binder.requested = frozenset({run_id})
+    rig.controller.sweep()
+    rig.runs.stop_failure = None
+
+    def unreadable(unit: str) -> Observation:
+        raise OSError("inspection unavailable")
+
+    monkeypatch.setattr(rig.runs, "inspect", unreadable)
+    rig.controller.sweep()
+
+    assert rig.runs.stopped == [unit_name(run_id)]
+    assert rig.journal.active()[0].state == "quarantined"

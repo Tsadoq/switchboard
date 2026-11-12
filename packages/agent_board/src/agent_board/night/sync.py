@@ -106,7 +106,11 @@ class BoardSync:
             except SyncError as error:
                 logger.warning("night stop requests unreadable: %s", error)
                 return frozenset()
-            if fresh.box != self._box or fresh.journal_id != self._ledger.identity().journal_id:
+            if fresh.box != self._box:
+                self.frozen = "wrong_box"
+                return frozenset()
+            if fresh.journal_id != self._ledger.identity().journal_id:
+                self.frozen = "journal_identity_mismatch"
                 return frozenset()
             local_runs = {record.run_id for record in self._journal.active()}
             if (

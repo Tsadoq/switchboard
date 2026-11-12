@@ -377,9 +377,11 @@ def test_unreadable_or_foreign_board_state_requests_no_stop(rig: Rig) -> None:
 
     rig.board.unreadable = True
     assert rig.sync.requested_stops() == frozenset()
+    assert rig.sync.frozen is None, "an outage is not a mismatch"
     rig.board.unreadable = False
     rig.board.journal_id = str(uuid4())
     assert rig.sync.requested_stops() == frozenset()
+    assert rig.sync.frozen == "journal_identity_mismatch", "a foreign journal must freeze new starts"
 
 
 def test_a_stopping_run_the_journal_does_not_know_freezes_new_starts(rig: Rig) -> None:
