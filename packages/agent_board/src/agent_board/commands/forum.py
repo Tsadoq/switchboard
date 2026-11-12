@@ -174,6 +174,7 @@ def _read_new(args: argparse.Namespace) -> int:
             for post in thread["posts"]:
                 post["behind_cursor"] = shown is not None and post["id"] <= shown
             thread["new"] = True
+            positions.verify()
             try:
                 output.emit_text(_thread_text(thread), thread, args.json)
                 sys.stdout.flush()

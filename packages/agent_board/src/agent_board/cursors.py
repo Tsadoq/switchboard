@@ -5,7 +5,7 @@ import os
 import re
 import stat
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,15 +43,27 @@ class Cursors:
     A position means the posts up to it were written to stdout and flushed; not that anyone read or handled them.
     """
 
-    def __init__(self, directory: Path, consumer: str) -> None:
+    def __init__(self, directory: Path, consumer: str, still_held: Callable[[], None] = lambda: None) -> None:
         self._directory = directory / consumer
         self._consumer = consumer
+        self._still_held = still_held
+
+    def verify(self) -> None:
+        """Refuses if the lock this consumer holds is no longer the one at its path; called before output and commit.
+
+        This keeps cooperating readers serialized; it cannot stop another process of the same user that ignores it.
+        """
+        self._still_held()
 
     @property
     def retired(self) -> bool:
+        if not self._consumer_directory():
+            return False
         return _private_file(self._directory / RETIRED, missing_ok=True)
 
     def get(self, thread_id: int) -> int | None:
+        if not self._consumer_directory():
+            return None
         path = self._path(thread_id)
         if not _private_file(path, missing_ok=True):
             return None
@@ -71,6 +83,7 @@ class Cursors:
 
     def advance(self, thread_id: int, post: int) -> None:
         """Moves the position up to `post`; never down."""
+        self.verify()
         current = self.get(thread_id)
         if current is not None and post <= current:
             return
@@ -78,23 +91,33 @@ class Cursors:
 
     def set_aside(self, thread_id: int) -> Path:
         """Moves an unreadable cursor aside as evidence; refuses anything that is not a corrupt private file."""
+        self.verify()
         path = self._path(thread_id)
+        if not self._consumer_directory():
+            raise CursorError(f"no read cursor at {path.name}")
         _private_file(path, missing_ok=False)
         try:
             self.get(thread_id)
         except CursorCorrupt:
-            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-            aside = path.with_name(f"{path.name}.corrupt-{stamp}")
-            os.replace(path, aside)
-            _sync_directory(self._directory)
-            return aside
+            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+            for attempt in range(100):
+                aside = path.with_name(f"{path.name}.corrupt-{stamp}-{attempt}")
+                try:
+                    os.link(path, aside, follow_symlinks=False)
+                except FileExistsError:
+                    continue
+                os.unlink(path)
+                _sync_directory(self._directory)
+                return aside
+            raise CursorError("could not keep the unreadable cursor as evidence") from None
         raise CursorError(f"read cursor for thread {thread_id} is valid; nothing to recover")
 
     def retire(self) -> None:
+        self.verify()
         self._write(self._directory / RETIRED, self._consumer)
 
     def threads(self) -> dict[int, int]:
-        if not self._directory.exists():
+        if not self._consumer_directory():
             return {}
         positions: dict[int, int] = {}
         for path in self._directory.iterdir():
@@ -103,6 +126,16 @@ class Cursors:
                 if post is not None:
                     positions[int(path.stem)] = post
         return positions
+
+    def _consumer_directory(self) -> bool:
+        """Whether this consumer has state yet; existing state must be a private directory, never a link."""
+        try:
+            metadata = self._directory.lstat()
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
+            raise CursorUnsafe(f"{self._directory.name} is not a private directory")
+        return True
 
     def _path(self, thread_id: int) -> Path:
         if type(thread_id) is not int or thread_id <= 0:
@@ -146,7 +179,7 @@ def locked(directory: Path, consumer: str, timeout: float = LOCK_SECONDS) -> Ite
                     raise CursorError("read cursor is busy") from None
                 time.sleep(_LOCK_POLL_SECONDS)
         _check_lock(path, fd)
-        yield Cursors(directory, consumer)
+        yield Cursors(directory, consumer, lambda: _check_lock(path, fd))
     finally:
         os.close(fd)
 
@@ -197,7 +230,10 @@ def _private_file(path: Path, *, missing_ok: bool) -> bool:
 
 
 def _private_directory(directory: Path) -> None:
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        directory.mkdir(mode=0o700, parents=True)
+    except FileExistsError:
+        pass
     metadata = directory.lstat()
     if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
         raise CursorUnsafe(f"{directory} is not a private directory")

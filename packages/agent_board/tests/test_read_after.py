@@ -265,3 +265,15 @@ def test_without_a_session_id_new_refuses(session: Session, monkeypatch: pytest.
 )
 def test_cursor_options_are_refused_out_of_place(session: Session, arguments: list[str]) -> None:
     assert session.read(*arguments)[0] == 1
+
+
+def test_an_unsafe_consumer_directory_never_hides_posts(session: Session) -> None:
+    consumer = session.state / "cursors" / ("c" * 32)
+    consumer.mkdir(parents=True, mode=0o700)
+    consumer.chmod(0o755)
+    (consumer / "31.json").write_text('{"v": 1, "post": 1000}')
+    (consumer / "31.json").chmod(0o600)
+
+    code, text = session.read("--new", "--start-after", "0")
+
+    assert code == 1 and "not a private directory" in text, "an unsafe cursor silently printed nothing"

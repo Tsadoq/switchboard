@@ -174,3 +174,61 @@ def test_state_files_are_private(directory: Path) -> None:
         assert path.stat().st_mode & 0o777 == 0o600
     assert (directory / OLD).stat().st_mode & 0o777 == 0o700
     assert not any(name.endswith(".tmp") for name in os.listdir(directory / OLD))
+
+
+def _symlinked_consumer(directory: Path) -> None:
+    real = directory.parent / "elsewhere"
+    real.mkdir(mode=0o700)
+    (real / "31.json").write_text('{"v": 1, "post": 1000}')
+    (real / "31.json").chmod(0o600)
+    (directory / OLD).symlink_to(real, target_is_directory=True)
+
+
+def _shared_consumer(directory: Path) -> None:
+    (directory / OLD).mkdir(mode=0o755)
+    (directory / OLD).chmod(0o755)
+    (directory / OLD / "31.json").write_text('{"v": 1, "post": 1000}')
+    (directory / OLD / "31.json").chmod(0o600)
+
+
+@pytest.mark.parametrize("spoil", [_symlinked_consumer, _shared_consumer])
+def test_an_unsafe_consumer_directory_refuses_before_any_state_is_read(
+    directory: Path, spoil: Callable[[Path], None]
+) -> None:
+    spoil(directory)
+
+    with locked(directory, OLD) as positions:
+        for read in (lambda: positions.get(31), lambda: positions.retired, positions.threads):
+            with pytest.raises(CursorUnsafe):
+                read()
+    with pytest.raises(CursorUnsafe):
+        hand_off(directory, OLD, NEW)
+
+
+def test_a_lock_replaced_while_a_reader_holds_it_stops_the_commit(directory: Path) -> None:
+    with locked(directory, OLD) as positions:
+        positions.advance(31, 5)
+        lock = directory / f"{OLD}.lock"
+        lock.unlink()
+        lock.write_text("")
+        lock.chmod(0o600)
+        with pytest.raises(CursorUnsafe):
+            positions.verify()
+        with pytest.raises(CursorUnsafe):
+            positions.advance(31, 9)
+    with locked(directory, OLD) as positions:
+        assert positions.get(31) == 5
+
+
+def test_two_recoveries_in_the_same_second_keep_both_pieces_of_evidence(directory: Path) -> None:
+    with locked(directory, OLD) as positions:
+        positions.advance(31, 5)
+        path = directory / OLD / "31.json"
+        path.write_text("first garbage")
+        first = positions.set_aside(31)
+        positions.advance(31, 6)
+        path.write_text("second garbage")
+        second = positions.set_aside(31)
+
+    assert first != second
+    assert first.read_text() == "first garbage" and second.read_text() == "second garbage"
