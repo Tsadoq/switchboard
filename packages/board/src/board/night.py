@@ -3,6 +3,7 @@ import math
 import re
 import secrets
 import sqlite3
+import time as clock
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
@@ -67,15 +68,18 @@ class NightAdmission:
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    async def enroll(self, principal: str, enabled: bool) -> None:
+    async def enroll(self, principal: str, enabled: bool, *, now: float | None = None) -> None:
         _box(principal)
+        timestamp = clock.time() if now is None else now
 
         def write(conn: sqlite3.Connection) -> None:
+            hold_wakes_in_transaction(conn, timestamp, principal)
             conn.execute(
                 "INSERT INTO night_enrollment (principal, enabled) VALUES (?, ?) "
                 "ON CONFLICT(principal) DO UPDATE SET enabled = excluded.enabled",
                 (principal, enabled),
             )
+            hold_wakes_in_transaction(conn, timestamp, principal)
             if not enabled:
                 conn.execute(
                     "UPDATE night_runs SET state = 'stopping' WHERE principal = ? AND state IN ('admitted', 'running')",
@@ -84,8 +88,11 @@ class NightAdmission:
 
         await self._db.transact(write)
 
-    async def set_enabled(self, enabled: bool) -> None:
+    async def set_enabled(self, enabled: bool, *, now: float | None = None) -> None:
+        timestamp = clock.time() if now is None else now
+
         def write(conn: sqlite3.Connection) -> None:
+            hold_wakes_in_transaction(conn, timestamp)
             conn.execute("UPDATE night_control SET enabled = ? WHERE singleton = 1", (enabled,))
             if not enabled:
                 conn.execute(
@@ -102,6 +109,12 @@ class NightAdmission:
             night = window_for(now)
             if night is None:
                 raise AdmissionDenied("outside_window")
+            if conn.execute(
+                "SELECT 1 FROM wakes WHERE principal = ? AND acked_at IS NULL "
+                "AND origin_kind = 'human' LIMIT 1",
+                (principal,),
+            ).fetchone():
+                raise AdmissionDenied("human_priority")
             existing = conn.execute(
                 "SELECT * FROM night_runs WHERE principal = ? AND state != 'finished'", (principal,)
             ).fetchone()
@@ -187,6 +200,26 @@ class NightAdmission:
             return fired
 
         return await self._db.transact(write)
+
+
+def hold_wakes_in_transaction(conn: sqlite3.Connection, now: float, principal: str | None = None) -> None:
+    night = window_for(now)
+    if night is None:
+        return
+    conn.execute(
+        "INSERT INTO night_routing_days (principal, local_date, starts_at, ends_at) "
+        "SELECT principal, ?, ?, ? FROM night_enrollment "
+        "WHERE enabled = 1 AND (? IS NULL OR principal = ?) "
+        "ON CONFLICT (principal, local_date) DO NOTHING",
+        (night.local_date, night.start, night.end, principal, principal),
+    )
+    conn.execute(
+        "INSERT INTO night_held_wakes (wake_id, local_date, held_at) "
+        "SELECT w.id, ?, ? FROM wakes w JOIN night_routing_days d ON d.principal = w.principal "
+        "AND d.local_date = ? WHERE w.acked_at IS NULL AND w.origin_kind = 'budgeted' "
+        "AND (? IS NULL OR w.principal = ?) ON CONFLICT (wake_id) DO NOTHING",
+        (night.local_date, now, night.local_date, principal, principal),
+    )
 
 
 def start_in_transaction(
