@@ -142,7 +142,9 @@ def final_snapshot(
                 is not None
             ):
                 raise SnapshotRefused("capture_aborted")
-            _capture(record, captured, receipt, journal_id, identity["acked_counter"], binding)
+            _capture(
+                record, captured, receipt, journal_id, identity["acked_counter"], binding, now.utc, grace
+            )
             return LocalSnapshot(record, binding, journal_id, capture_id)
     except SnapshotRefused:
         raise
@@ -204,6 +206,8 @@ def _capture(
     journal_id: str,
     watermark: int,
     binding: RecordedBinding,
+    utc: float,
+    grace: float,
 ) -> None:
     if (
         captured["run_id"] != record.run_id
@@ -255,6 +259,8 @@ def _capture(
         or encode(assignment) != captured["assignment"]
     ):
         raise SnapshotRefused("assignment_mismatch")
+    if utc >= assignment.deadline_utc - grace:
+        raise SnapshotRefused("capture_expired")
 
 
 def _point(

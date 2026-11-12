@@ -9,7 +9,7 @@ from uuid import uuid4
 import pytest
 from agent_board import night_state
 from agent_board.night import final_snapshot as api
-from agent_board.night.assignment import NightPolicy, build_assignment, encode, parse_wakes
+from agent_board.night.assignment import NightPolicy, build_assignment, encode, parse_wakes, policy_from
 from agent_board.night.ledger import CaptureContext, Ledger, Pending
 from agent_board.night_inspection import unit_cgroup
 from agent_board.night_state import ClockReading, Grant, LocalJournal
@@ -266,3 +266,40 @@ def test_invalid_or_oversized_receipt_json_refuses(state: State, value: str) -> 
     state.change("UPDATE receipts SET payload=? WHERE action='capture'", (value,))
     with pytest.raises(api.SnapshotRefused):
         state.read()
+
+
+@pytest.mark.parametrize("field", ["snapshot", "cutoff"])
+@pytest.mark.parametrize("grace", [0.0, 5.0])
+@pytest.mark.parametrize("deadline", [900.0, 1000.0, 1004.0, 1005.0, 1006.0])
+def test_effective_capture_deadline_uses_the_same_grace(
+    state: State, field: str, grace: float, deadline: float
+) -> None:
+    cutoff = deadline if field == "cutoff" else 1850.0
+    snapshot_deadline = deadline if field == "snapshot" else 1900.0
+    state.snapshot["deadline"] = snapshot_deadline
+    with sqlite3.connect(state.ledger_path) as conn:
+        policy = policy_from(json.loads(conn.execute("SELECT policy FROM captures").fetchone()[0]))
+    assignment = build_assignment(
+        run_id=state.grant.run_id,
+        principal=state.grant.principal,
+        wakes=parse_wakes(state.snapshot["wakes"]),
+        policy=policy,
+        deadline_utc=min(snapshot_deadline, cutoff),
+    )
+    assert assignment is not None
+    state.change(
+        "UPDATE captures SET cutoff_utc=?, snapshot=?, assignment=?",
+        (cutoff, json.dumps(state.snapshot), encode(assignment)),
+    )
+    if state.now.utc >= deadline - grace:
+        with pytest.raises(api.SnapshotRefused, match="capture_expired"):
+            api.final_snapshot(
+                state.journal_path, state.ledger_path, expected=state.grant, now=state.now, grace=grace
+            )
+    else:
+        assert (
+            api.final_snapshot(
+                state.journal_path, state.ledger_path, expected=state.grant, now=state.now, grace=grace
+            ).capture_id
+            == state.receipt_id
+        )

@@ -1,6 +1,6 @@
 # Unhooked final local-state snapshot
 
-Status: unhooked source proposal with 40 new tests. Not connected to runtime callers. Not an emission or manager/kernel witness.
+Status: unhooked source proposal with 60 new tests. Not connected to runtime callers. Not an emission or manager/kernel witness.
 
 Base: `55fe4be8ace8f4462e14e55b37712947d7f2c6fa`. Owner: pi@dev, ticket11/thread31. Review constraints: thread31 post1489 and audit file2399ddc4-4904-4201-ad5c-41d7cc06bc52.
 
@@ -40,7 +40,7 @@ The query contract is a bounded-work proposal. SQLite schema loading, filesystem
 
 Require journal version2 and ledger version3 with the expected source schema and indexed keys. Reject a missing table, unexpected type/key layout, corrupt database or malformed selected row. This is not a whole-database integrity certification.
 
-The journal row must be a valid canonical run/fence/principal/UID/boot binding, have valid numeric deadlines and exact boolean/state representations, be claimed and starting, and have no stop or uncertainty. Current boot and both nonnegative clocks must satisfy the deadline/grace rule.
+The journal row must be a valid canonical run/fence/principal/UID/boot binding, have valid numeric deadlines and exact boolean/state representations, be claimed and starting, and have no stop or uncertainty. Current boot and both nonnegative clocks must satisfy the deadline/grace rule. After canonical assignment validation, apply the same supplied grace to its effective UTC deadline, which is min(snapshot deadline, capture cutoff). Refuse now.utc >= effective deadline - grace, including exact equality. A later run grant cannot extend that earlier deadline; grace0 still refuses at the effective deadline itself.
 
 Require an acknowledged execution binding with identical run, UID and boot, and valid canonical invocation/cgroup data. This checks a stored binding, not its present kernel truth.
 
@@ -56,6 +56,6 @@ Tests must cover WAL commits observed by a later call, DELETE-mode busy refusal 
 
 Existing callers stay unchanged. Writer integration separately requires startup/quiescence and mixed-version exclusion, a release-wide connection audit, bounded authority operations, error-refresh preservation, busy-BEGIN/commit/rollback/close tests and independent exact-head source review. Manager freshness and stop-failure policy remain unresolved. No listener, service, property, native execution, deployment or pilot activation is included.
 
-Validation so far:40 new targeted cases pass; the full isolated-HOME/short disk-basetemp suite passes1534 tests with five existing multithread-fork deprecation warnings. Ruff and mypy167 pass. Tests cover state/association/schema refusal, all abort-link outcomes, real WAL visibility, DELETE-mode exclusive-writer busy refusal, corrupt/oversized JSON, exact nonmutation and connection closure on both success and schema failure. These are delivered tests, not independent certification.
+Initial validation at e89c4b4 passed40 delivered targeted cases and1534 full tests, but independent review1527 found an earlier capture-deadline omission. The correction adds20 cases covering both snapshot and cutoff deadlines, grace0/5 and expired/exact/inside/just-outside boundaries. Updated exact-head validation is recorded in the review handoff rather than inferred from the initial run. Tests cover state/association/schema refusal, all abort-link outcomes, real WAL visibility, DELETE-mode exclusive-writer busy refusal, corrupt/oversized JSON, exact nonmutation and connection closure on both success and schema failure. These are delivered tests, not independent certification.
 
 Next owner/action: pi@dev requests a new exact-head review of this isolated API and its query assumptions, handles findings and reruns gates. Post1489 does not preapprove the source or reserve a future reviewer. Legacy transaction factories, runtime callers, startup/migration integration and all manager freshness/stop policy gates remain unchanged.
