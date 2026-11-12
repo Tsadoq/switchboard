@@ -131,6 +131,70 @@ def test_wildcard_mentions_expand_to_known_principals(body: str, expected: set[s
     assert resolved == expected, f"{body!r} resolved to {resolved}"
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("blocked handles: `@pi` and `@claude@testbox`", id="code-span"),
+        pytest.param("``@pi `tick` @all``", id="double-backtick-span"),
+        pytest.param("example:\n\n```\n@pi@testbox do it\n```\n", id="fenced-block"),
+        pytest.param("example:\n\n~~~text\n@all\n~~~\n", id="tilde-fence"),
+        pytest.param("example:\n\n    @pi indented\n", id="indented-block"),
+        pytest.param("- item\n\n  ```\n  @pi\n  ```\n", id="fence-in-list"),
+        pytest.param("```\n@pi in a fence the author never closed", id="unclosed-fence"),
+        pytest.param("see `@human`, `@all`, `@claude@testbox` and `@pi@testbox`", id="post-550-shape"),
+        pytest.param("ask `@claude@testbox\nand @pi@testbox` later", id="span-wraps-a-line"),
+        pytest.param("handles like @claude… and @pi… were blocked", id="ellipsis-elision"),
+        pytest.param("any @claude@* or @pi* handle", id="glob-pattern"),
+        pytest.param("@pi@testbox@elsewhere", id="third-at"),
+    ],
+)
+def test_mentions_inside_code_mention_nobody(body: str) -> None:
+    extracted = mentions.extract(body)
+
+    assert extracted == set(), f"{body!r} extracted as {extracted}"
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        pytest.param(
+            "`@pi` is blocked, @claude@testbox please check", {"claude@testbox"}, id="span-then-text"
+        ),
+        pytest.param("```\n@pi\n```\n\n@all see above", {"all"}, id="fence-then-text"),
+        pytest.param("a stray ` backtick, then @pi", {"pi"}, id="unpaired-backtick"),
+        pytest.param("**@pi** and _@human_", {"pi", "human"}, id="emphasis"),
+        pytest.param("> quoted @pi", {"pi"}, id="blockquote"),
+        pytest.param("- @pi\n- @human", {"pi", "human"}, id="list"),
+        pytest.param("line one\n@pi line two", {"pi"}, id="soft-break"),
+        pytest.param("| a |\n|---|\n| @pi |", {"pi"}, id="table"),
+        pytest.param("see [@pi](https://example.org)", {"pi"}, id="link-text"),
+        pytest.param("mail ops@example.org or ops\\_x@example.org", set(), id="address"),
+        pytest.param("`code`@pi", {"pi"}, id="after-span"),
+        pytest.param("ask @claude@testbox about `@pi`", {"claude@testbox"}, id="real-beside-quoted"),
+        pytest.param(
+            "ask `@claude@testbox\n\nand @pi@testbox` later",
+            {"claude@testbox", "pi@testbox"},
+            id="blank-line-ends-span",
+        ),
+        pytest.param("@pi... and @human.", {"pi", "human"}, id="trailing-full-stops"),
+        pytest.param("(@pi), @human's turn; @all!", {"pi", "human", "all"}, id="punctuation-after"),
+    ],
+)
+def test_mentions_outside_code_still_extract(body: str, expected: set[str]) -> None:
+    extracted = mentions.extract(body)
+
+    assert extracted == expected, f"{body!r} extracted as {extracted}"
+
+
+@pytest.mark.parametrize("body", ["@claude@testbox2 hi", "@claude@testbo hi", "@claud hi", "@testbox hi"])
+def test_near_miss_of_a_registered_principal_resolves_to_nobody(body: str) -> None:
+    known = {"claude@testbox", "pi@testbox"}
+
+    resolved = mentions.resolve(mentions.extract(body), known)
+
+    assert resolved == set(), f"{body!r} resolved to {resolved}"
+
+
 @pytest.mark.parametrize("principal", ["claude@testbox", "pi@build.example.lan", HUMAN])
 def test_mentions_format_round_trips_through_extract(principal: str) -> None:
     body = f"over to you, {mentions.format(principal)}."
@@ -163,6 +227,66 @@ def test_post_publishes_wake_requests_for_mentions_and_followers_not_author(
     assert woken == [("pi@otherbox", "follow"), ("pi@testbox", "mention")], f"wrong wakes: {wakes}"
     sources = {wake.source_ref for wake in wakes}
     assert sources == {f"post:{r.json()['post_id']}"}, f"wakes point at the wrong post: {sources}"
+
+
+def test_post_quoting_handles_in_code_wakes_only_the_real_mention(
+    client: TestClient, signer: "SignerFactory"
+) -> None:
+    alice, bob, carol = signer("claude@testbox"), signer("pi@testbox"), signer("pi@otherbox")
+    _register(client, alice, bob, carol)
+    wakes = _collect_wakes(client)
+
+    r = _send(
+        client,
+        alice,
+        "post",
+        "subforum:general",
+        {
+            "title": "Blocked handles",
+            "body": "Blocked: `@human`, `@all`, `@pi`, @pi….\n\n```\n@pi@otherbox\n```\n\n@pi@testbox FYI",
+        },
+    )
+
+    assert r.status_code == 201, f"post rejected: {r.status_code} {r.text}"
+    woken = [(wake.principal, wake.reason) for wake in wakes]
+    assert woken == [("pi@testbox", "mention")], f"quoted handles woke someone: {wakes}"
+
+
+def test_post_with_only_quoted_handles_wakes_nobody(client: TestClient, signer: "SignerFactory") -> None:
+    alice, bob = signer("claude@testbox"), signer("pi@testbox")
+    _register(client, alice, bob)
+    wakes = _collect_wakes(client)
+
+    r = _send(
+        client,
+        alice,
+        "post",
+        "subforum:general",
+        {"title": "Blocked handles", "body": "Blocked: `@human`, `@all`, `@claude` and `@pi`."},
+    )
+
+    assert r.status_code == 201, f"post rejected: {r.status_code} {r.text}"
+    assert wakes == [], f"a backticked handle woke someone: {wakes}"
+
+
+def test_human_post_mentioning_an_agent_beside_code_still_wakes_it(
+    client: TestClient, signer: "SignerFactory"
+) -> None:
+    alice, bob = signer("claude@testbox"), signer("pi@testbox")
+    _register(client, alice, bob)
+    thread_id = _open_thread(client, alice)
+    wakes = _collect_wakes(client)
+
+    _portal(client).call(
+        _forum(client).post,
+        HUMAN,
+        "human",
+        ThreadTarget(thread_id),
+        {"body": "@pi@testbox run `agent-board read 1`, not `@claude`'s way"},
+    )
+
+    woken = [(wake.principal, wake.reason) for wake in wakes if wake.reason == "mention"]
+    assert woken == [("pi@testbox", "mention")], f"human post woke the wrong principals: {wakes}"
 
 
 def test_human_post_publishes_wake_requests_like_agent_post(

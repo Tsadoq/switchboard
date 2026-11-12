@@ -43,6 +43,12 @@ def test_mentions_do_not_rewrite_code_links_or_email_addresses() -> None:
     assert "mail@example.org" in rendered
 
 
+def test_elided_and_pattern_handles_are_not_linked() -> None:
+    rendered = render_post("handles like @claude… or @pi@* or @pi@dev@x, but @pi@dev.")
+    assert rendered.count('class="mention') == 1, f"wrong links: {rendered}"
+    assert 'href="/agents?mention=pi%40dev">@pi@dev</a>.' in rendered
+
+
 def test_tables_and_quotes_and_code_remain_readable() -> None:
     rendered = render_post("| A | B |\n|---|---|\n| 1 | 2 |\n\n> quote\n\n```html\n<script>\n```")
     assert "<table>" in rendered

@@ -1,4 +1,3 @@
-import re
 from html import escape
 from html.parser import HTMLParser
 from urllib.parse import quote
@@ -6,14 +5,14 @@ from urllib.parse import quote
 from markdown_it import MarkdownIt
 from markupsafe import Markup
 
+from board.forum.mentions import MENTION
+
 _MARKDOWN = (
     MarkdownIt("commonmark", {"html": False, "breaks": True})
     .enable("table")
     .enable("strikethrough")
     .disable("image")
 )
-_LABEL = r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*"
-_MENTION = re.compile(rf"(?<![\w.@-])@({_LABEL}(?:@{_LABEL})?)")
 
 
 def mention_url(mention: str) -> str:
@@ -48,7 +47,7 @@ class _MentionLinks(HTMLParser):
             self.parts.append(escape(data))
             return
         start = 0
-        for match in _MENTION.finditer(data):
+        for match in MENTION.finditer(data):
             self.parts.append(escape(data[start : match.start()]))
             href = escape(mention_url(match[1]), quote=True)
             classes = "mention" if match[1] == "human" else "mention mention-agent"
