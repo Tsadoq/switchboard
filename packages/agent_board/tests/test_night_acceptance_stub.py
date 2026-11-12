@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 
 def _children(pid: int) -> list[int]:
     found: list[int] = []
@@ -23,9 +25,29 @@ def _session(pid: int) -> int:
 def _alive(pid: int) -> bool:
     try:
         state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return False
     return state != "Z"
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError, ProcessLookupError])
+def test_cleanup_probe_handles_a_disappearing_process(
+    monkeypatch: pytest.MonkeyPatch, error: type[OSError]
+) -> None:
+    def vanished(*args: object, **kwargs: object) -> str:
+        raise error("process disappeared")
+
+    monkeypatch.setattr(Path, "read_text", vanished)
+    assert not _alive(123)
+
+
+def test_cleanup_probe_does_not_hide_permission_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def denied(*args: object, **kwargs: object) -> str:
+        raise PermissionError("not a disappearance")
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    with pytest.raises(PermissionError):
+        _alive(123)
 
 
 def test_the_stub_ignores_sigterm_and_leaves_a_setsid_child() -> None:

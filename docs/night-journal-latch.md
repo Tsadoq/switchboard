@@ -49,7 +49,7 @@ Proposed explicit-statement ceilings remain13 normal,20 eligible domain-refusal 
 
 Saved representative traces measure12 statements for normal latch,17 for a later fresh expiry refusal,18 when both expiry passes attempt updates,12 for an ambiguous post-commit fault,19 for follow-up commit plus cleanup-rollback faults, and12 for committed-plus-uncertain-close. These observed branches are below the proposed ceilings, not a claim that every theoretical maximum is reachable.
 
-Full delivered suite:1675 passed with five existing multithread-fork deprecation warnings. The first full attempt had1674 passes and one existing stub-test /proc/stat ProcessLookupError race; no unrelated source was modified, and the complete rerun passed. Targeted121 passed, Ruff/format pass and mypy169 passes. These are owner-delivered results, not independent certification.
+Initial full delivered rerun passed1675 tests, but CI independently reproduced the earlier existing stub-test /proc/stat ProcessLookupError race. The added test-only cleanup repair treats ESRCH like ENOENT in that probe, with deterministic coverage for both and for PermissionError still propagating. It changes neither production acceptance_stub behavior nor the latch API, and provides no operational stop evidence. The full delivered suite after this repair passes1678 tests with five existing multithread-fork deprecation warnings. Targeted121 latch cases, Ruff/format and mypy169 pass. These are owner-delivered results, not independent certification.
 
 ## Remaining gates
 
