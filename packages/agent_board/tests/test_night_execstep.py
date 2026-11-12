@@ -163,7 +163,7 @@ def test_a_bound_armed_live_run_drops_to_the_agent_then_execs_the_launcher(rig: 
     path, argv, environment = rig.system.executed
     assert path == "/opt/switchboard-night/releases/abc/bin/python"
     assert argv == [path, "-I", "-m", "agent_board.night.launch", rig.run_id]
-    assert environment["HOME"] == "/home/agent"
+    assert environment["HOME"] == "/var/lib/switchboard-night/happier/pi/home"
     assert environment["XDG_RUNTIME_DIR"] == "/var/lib/switchboard-night/happier/pi/run"
     assert environment["HAPPIER_HOME_DIR"] == "/var/lib/switchboard-night/happier/pi"
     assert environment["SWITCHBOARD_NIGHT_PRINCIPAL"] == "pi@huginn"

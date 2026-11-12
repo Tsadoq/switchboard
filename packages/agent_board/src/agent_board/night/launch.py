@@ -17,7 +17,10 @@ from agent_board.night.environment import (
     DEADLINE_UTC_ENV,
     HAPPIER_BIN_ENV,
     HOME_DIR_ENV,
+    HOME_NAME,
+    PLAIN_TERMINAL,
     PRINCIPAL_ENV,
+    RUNTIME_DIR_NAME,
     WORKDIR_ROOT_ENV,
 )
 from agent_board.runner.happier import Happier, HappierError
@@ -141,6 +144,7 @@ class Sessions(Protocol):
         prompt: str,
         permission_mode: str,
         model: str | None = None,
+        terminal_json: str | None = None,
     ) -> Any: ...
 
     def idle(self, session_id: str, timeout: int = 3) -> bool: ...
@@ -217,9 +221,11 @@ def preflight(settings: Settings, host: Host) -> None:
         raise LaunchRefused(EXIT_PREFLIGHT, "happier_release_not_root_owned")
     _private_directory(settings.happier_home, settings.uid, "happier_home")
     _private_directory(settings.workdir_root, settings.uid, "workdir_root")
-    for inner in (settings.home, settings.runtime_dir):
-        if not inner.is_relative_to(settings.happier_home) or inner == settings.happier_home:
-            raise LaunchRefused(EXIT_PREFLIGHT, f"{inner} is not inside happier_home")
+    for inner, name in ((settings.home, HOME_NAME), (settings.runtime_dir, RUNTIME_DIR_NAME)):
+        if inner != settings.happier_home / name:
+            raise LaunchRefused(EXIT_PREFLIGHT, f"{inner} is not happier_home/{name}")
+        if os.path.lexists(inner):
+            _private_directory(inner, settings.uid, name)
     account_home = host.account_home(settings.uid)
     for day in (account_home / name for name in DAY_HOMES):
         if _overlaps(settings.happier_home, day):
@@ -259,7 +265,9 @@ def launch(
         raise LaunchRefused(EXIT_BUDGET, "run_deadline_passed")
     deadline = host.monotonic() + budget
     for directory in (settings.home, settings.runtime_dir):
-        directory.mkdir(mode=0o700, exist_ok=True)
+        if not os.path.lexists(directory):
+            directory.mkdir(mode=0o700)
+        _private_directory(directory, settings.uid, directory.name)
     host.clone(source, settings.workdir, assignment.base_commit)
     daemon = host.start_daemon()
     try:
@@ -308,6 +316,7 @@ def _run_session(
             prompt=assignment.prompt,
             permission_mode=assignment.permission_mode,
             model=assignment.model,
+            terminal_json=PLAIN_TERMINAL,
         )
     except HappierError as error:
         raise LaunchRefused(EXIT_SESSION, f"session_create_failed:{error.code}") from None
@@ -358,7 +367,7 @@ def _stop_daemon(host: Host, daemon: Daemon) -> None:
 
 
 def release_trusted(binary: Path, owner: int = 0) -> bool:
-    """The binary's whole version directory: Happier's ELF loads its bundled modules from beside itself."""
+    """The binary's whole version directory, with no symlink anywhere: the ELF loads its modules from beside itself."""
     release = binary.parent
     try:
         for each in (release, *release.parents):
@@ -379,10 +388,13 @@ def _owned_unwritable(metadata: os.stat_result, owner: int, directory: bool | No
     if metadata.st_uid != owner:
         return False
     if stat.S_ISLNK(metadata.st_mode):
-        return directory is None
-    if directory is True and not stat.S_ISDIR(metadata.st_mode):
         return False
-    if directory is False and not stat.S_ISREG(metadata.st_mode):
+    is_directory, is_file = stat.S_ISDIR(metadata.st_mode), stat.S_ISREG(metadata.st_mode)
+    if directory is True and not is_directory:
+        return False
+    if directory is False and not is_file:
+        return False
+    if not is_directory and not is_file:
         return False
     return not metadata.st_mode & 0o022
 

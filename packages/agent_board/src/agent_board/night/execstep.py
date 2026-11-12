@@ -12,6 +12,7 @@ from agent_board.night.environment import (
     DEADLINE_UTC_ENV,
     HAPPIER_BIN_ENV,
     HOME_DIR_ENV,
+    HOME_NAME,
     PRINCIPAL_ENV,
     RUNTIME_DIR_NAME,
     WORKDIR_ROOT_ENV,
@@ -126,7 +127,7 @@ def exec_native(
     system.close_inherited_descriptors()
     python = str(config.launcher_python)
     environment = {
-        "HOME": str(agent.home),
+        "HOME": str(agent.happier_home / HOME_NAME),
         HOME_DIR_ENV: str(agent.happier_home),
         "XDG_RUNTIME_DIR": str(agent.happier_home / RUNTIME_DIR_NAME),
         "USER": account.name,

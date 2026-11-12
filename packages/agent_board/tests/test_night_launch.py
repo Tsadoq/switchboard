@@ -7,7 +7,13 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-from agent_board.night.environment import DEADLINE_UTC_ENV, HAPPIER_BIN_ENV, PRINCIPAL_ENV, WORKDIR_ROOT_ENV
+from agent_board.night.environment import (
+    DEADLINE_UTC_ENV,
+    HAPPIER_BIN_ENV,
+    PLAIN_TERMINAL,
+    PRINCIPAL_ENV,
+    WORKDIR_ROOT_ENV,
+)
 from agent_board.night.launch import (
     EXIT_ASSIGNMENT,
     EXIT_BUDGET,
@@ -21,11 +27,12 @@ from agent_board.night.launch import (
     Settings,
     TrackedSession,
     launch,
+    preflight,
     release_trusted,
     settings_from,
     tracked_sessions,
 )
-from agent_board.runner.happier import HappierError, Session
+from agent_board.runner.happier import Happier, HappierError, Session
 
 PRINCIPAL = "claude@dev"
 COMMIT = "a" * 40
@@ -248,6 +255,9 @@ def test_an_authenticated_private_home_runs_one_contained_session_in_a_fresh_clo
     assert rig.sessions.created["path"] == rig.settings.workdir
     assert rig.sessions.created["tag"] == f"night:{rig.settings.run_id}"
     assert rig.sessions.created["backend"] == "claude"
+    assert rig.sessions.created["terminal_json"] == PLAIN_TERMINAL, (
+        "a session must not be handed to a terminal host"
+    )
     for directory in (rig.settings.home, rig.settings.runtime_dir):
         assert directory.stat().st_mode & 0o777 == 0o700
 
@@ -642,3 +652,91 @@ def test_settings_refuse_a_missing_or_unsafe_environment(
         settings_from(run_id, environment, 1001)
 
     assert refused.value.exit_code == code
+
+
+@pytest.mark.parametrize("name", ["home", "runtime_dir"])
+def test_a_night_subdirectory_that_aliases_the_day_account_is_refused_before_any_command(
+    rig: Rig, name: str
+) -> None:
+    getattr(rig.settings, name).symlink_to(rig.account, target_is_directory=True)
+
+    with pytest.raises(LaunchRefused) as refused:
+        preflight(rig.settings, rig.host)
+
+    assert refused.value.exit_code == EXIT_PREFLIGHT
+    assert rig.host.calls == []
+
+
+@pytest.mark.parametrize("name", ["home", "runtime_dir"])
+def test_an_existing_night_subdirectory_must_be_private(rig: Rig, name: str) -> None:
+    getattr(rig.settings, name).mkdir(mode=0o755)
+
+    assert rig.run() == EXIT_PREFLIGHT
+    assert rig.host.calls == []
+
+
+def test_night_subdirectories_must_be_the_fixed_names_inside_the_home(rig: Rig) -> None:
+    rig.settings = replace(rig.settings, home=rig.settings.happier_home / "elsewhere")
+
+    assert rig.run() == EXIT_PREFLIGHT
+
+
+def _internal_link(binary: Path) -> None:
+    module = binary.parent / "package-dist" / "index.mjs"
+    target = binary.parent / "package-dist" / "real.mjs"
+    module.rename(target)
+    module.symlink_to(target)
+
+
+@pytest.mark.usefixtures("bounded_parents")
+@pytest.mark.parametrize(
+    "external_mode",
+    [
+        pytest.param(0o666, id="to-a-writable-external-file"),
+        pytest.param(0o644, id="to-a-protected-external-file"),
+    ],
+)
+def test_any_symlink_inside_the_release_is_refused(tmp_path: Path, external_mode: int) -> None:
+    binary = _release(tmp_path)
+    external = tmp_path / "external.mjs"
+    external.write_text("")
+    external.chmod(external_mode)
+    module = binary.parent / "package-dist" / "index.mjs"
+    module.unlink()
+    module.symlink_to(external)
+
+    assert not release_trusted(binary, owner=os.getuid())
+
+
+@pytest.mark.usefixtures("bounded_parents")
+def test_even_an_internal_release_symlink_is_refused(tmp_path: Path) -> None:
+    binary = _release(tmp_path)
+    _internal_link(binary)
+
+    assert not release_trusted(binary, owner=os.getuid())
+
+
+def test_the_happier_client_passes_the_plain_terminal_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[str, ...]] = []
+
+    def run(self: Happier, *args: Any, env: Any = None) -> Any:
+        seen.append(tuple(getattr(arg, "text", arg) for arg in args))
+        return type(
+            "Completed",
+            (),
+            {"stdout": '{"ok": true, "data": {"session": {"id": "s"}, "created": true}}', "returncode": 0},
+        )()
+
+    monkeypatch.setattr(Happier, "_run", run)
+    Happier("happier").create(
+        backend="claude",
+        path=Path("/srv/night/x"),
+        tag="t",
+        title="t",
+        prompt="p",
+        permission_mode="default",
+        terminal_json=PLAIN_TERMINAL,
+    )
+
+    argv = seen[0]
+    assert argv[argv.index("--terminal-json") + 1] == PLAIN_TERMINAL
