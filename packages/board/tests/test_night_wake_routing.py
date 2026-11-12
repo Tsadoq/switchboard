@@ -1,4 +1,6 @@
 import asyncio
+import sqlite3
+from collections.abc import Iterator
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
@@ -6,15 +8,16 @@ from pathlib import Path
 import pytest
 from board.db import Database, connect, migrate
 from board.forum.fanout import WakeRequest
-from board.night import AdmissionDenied, NightAdmission
+from board.night import AdmissionDenied, NightAdmission, Run
 from board.wakes.bus import WakeBus
 
 pytestmark = pytest.mark.anyio
 NOW = datetime.fromisoformat("2026-11-12T01:00:00+00:00").timestamp()
+type Routing = tuple[sqlite3.Connection, WakeBus, NightAdmission]
 
 
 @pytest.fixture
-def routing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def routing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Routing]:
     path = tmp_path / "board.db"
     with closing(connect(path)) as conn:
         migrate(conn)
@@ -41,14 +44,16 @@ async def mixed(bus: WakeBus, principal: str = "pi@dev") -> None:
     await bus.emit(WakeRequest(principal, "timer", "profile:pi@dev", "scheduled wake"))
 
 
-async def test_default_unenrolled_delivery_is_unchanged(routing):
+async def test_default_unenrolled_delivery_is_unchanged(routing: Routing) -> None:
     conn, bus, _ = routing
     await mixed(bus)
     assert [wake.id for wake in await bus.lease("pi@dev")] == [1, 2, 3]
     assert conn.execute("SELECT COUNT(*) FROM night_held_wakes").fetchone()[0] == 0
 
 
-async def test_mixed_batch_holds_budgeted_rows_before_sql_lease_even_with_switch_off(routing):
+async def test_mixed_batch_holds_budgeted_rows_before_sql_lease_even_with_switch_off(
+    routing: Routing,
+) -> None:
     conn, bus, admission = routing
     await admission.enroll("pi@dev", True, now=NOW)
     await mixed(bus)
@@ -61,7 +66,9 @@ async def test_mixed_batch_holds_budgeted_rows_before_sql_lease_even_with_switch
 
 
 @pytest.mark.parametrize("operation", ["off", "unenroll"])
-async def test_control_change_never_flushes_held_or_future_night_wakes(routing, operation: str):
+async def test_control_change_never_flushes_held_or_future_night_wakes(
+    routing: Routing, operation: str
+) -> None:
     conn, bus, admission = routing
     await admission.enroll("pi@dev", True, now=NOW)
     await admission.set_enabled(True, now=NOW)
@@ -75,7 +82,7 @@ async def test_control_change_never_flushes_held_or_future_night_wakes(routing, 
     assert conn.execute("SELECT COUNT(*) FROM night_held_wakes").fetchone()[0] == 3
 
 
-async def test_queued_before_enrollment_is_held_atomically_on_enrollment(routing):
+async def test_queued_before_enrollment_is_held_atomically_on_enrollment(routing: Routing) -> None:
     _, bus, admission = routing
     await mixed(bus)
     await admission.enroll("pi@dev", True, now=NOW)
@@ -83,7 +90,7 @@ async def test_queued_before_enrollment_is_held_atomically_on_enrollment(routing
     assert [wake.id for wake in await bus.lease("pi@dev")] == [2]
 
 
-async def test_human_work_requests_stop_and_waits_for_trusted_settlement(routing):
+async def test_human_work_requests_stop_and_waits_for_trusted_settlement(routing: Routing) -> None:
     _, bus, admission = routing
     await admission.enroll("pi@dev", True, now=NOW)
     await admission.set_enabled(True, now=NOW)
@@ -98,8 +105,8 @@ async def test_human_work_requests_stop_and_waits_for_trusted_settlement(routing
 
 
 async def test_restart_window_expiry_and_lease_expiry_do_not_release_holds(
-    routing, monkeypatch: pytest.MonkeyPatch
-):
+    routing: Routing, monkeypatch: pytest.MonkeyPatch
+) -> None:
     conn, bus, admission = routing
     await admission.enroll("pi@dev", True, now=NOW)
     await mixed(bus)
@@ -112,7 +119,9 @@ async def test_restart_window_expiry_and_lease_expiry_do_not_release_holds(
     assert conn.execute("SELECT COUNT(*) FROM night_held_wakes").fetchone()[0] == 2
 
 
-async def test_daytime_enrollment_does_not_hold_unbudgeted_delivery(routing, monkeypatch: pytest.MonkeyPatch):
+async def test_daytime_enrollment_does_not_hold_unbudgeted_delivery(
+    routing: Routing, monkeypatch: pytest.MonkeyPatch
+) -> None:
     conn, bus, admission = routing
     daytime = datetime.fromisoformat("2026-11-12T12:00:00+00:00").timestamp()
     monkeypatch.setattr("board.wakes.bus.time.time", lambda: daytime)
@@ -122,7 +131,7 @@ async def test_daytime_enrollment_does_not_hold_unbudgeted_delivery(routing, mon
     assert conn.execute("SELECT COUNT(*) FROM night_held_wakes").fetchone()[0] == 0
 
 
-async def test_human_emission_and_admission_race_never_leaves_a_runnable_run(routing):
+async def test_human_emission_and_admission_race_never_leaves_a_runnable_run(routing: Routing) -> None:
     _, bus, admission = routing
     await admission.enroll("pi@dev", True, now=NOW)
     await admission.set_enabled(True, now=NOW)
@@ -135,10 +144,11 @@ async def test_human_emission_and_admission_race_never_leaves_a_runnable_run(rou
     if isinstance(run, AdmissionDenied):
         assert str(run) == "human_priority"
     else:
+        assert isinstance(run, Run)
         assert (await admission.run(run.id)).state == "stopping"
 
 
-async def test_hold_does_not_block_another_unenrolled_principal(routing):
+async def test_hold_does_not_block_another_unenrolled_principal(routing: Routing) -> None:
     _, bus, admission = routing
     await admission.enroll("pi@dev", True, now=NOW)
     await mixed(bus)
