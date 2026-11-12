@@ -577,3 +577,33 @@ def test_a_board_stop_for_a_run_this_box_does_not_hold_touches_nothing(rig: Rig)
 
     assert rig.runs.stopped == [] and rig.binder.settles == []
     assert rig.journal.active()[0].state == "starting"
+
+
+def test_a_board_stop_retries_the_kill_after_a_transient_failure_without_releasing(rig: Rig) -> None:
+    run_id = str(uuid4())
+    rig.ask("start", run_id)
+    rig.runs.observation = Observation(unit_active=True, cgroup_populated=True)
+    rig.runs.stop_failure = subprocess.SubprocessError("transient manager failure")
+    rig.binder.settle_result = False
+    rig.binder.requested = frozenset({run_id})
+    rig.controller.sweep()
+    assert rig.journal.active()[0].state == "quarantined"
+
+    rig.runs.stop_failure = None
+    rig.controller.sweep()
+
+    assert rig.runs.stopped == [unit_name(run_id)]
+    assert rig.journal.active()[0].state == "quarantined", "a retried stop changed the uncertainty"
+
+
+def test_a_board_stop_is_not_repeated_once_the_run_is_proven_empty(rig: Rig) -> None:
+    run_id = str(uuid4())
+    rig.ask("start", run_id)
+    rig.binder.settle_result = False
+    rig.binder.requested = frozenset({run_id})
+    rig.controller.sweep()
+    rig.runs.observation = Observation(unit_active=False, cgroup_populated=False)
+
+    rig.controller.sweep()
+
+    assert rig.runs.stopped == [unit_name(run_id)], rig.runs.stopped

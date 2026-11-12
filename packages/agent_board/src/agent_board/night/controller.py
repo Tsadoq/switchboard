@@ -223,6 +223,8 @@ class Controller:
         for record in self._journal.active():
             if record.run_id in requested and record.state in ("reserved", "starting"):
                 record = self._server_stop(record)
+            elif record.run_id in requested and record.launch_claimed:
+                self._retry_server_stop(record)
             if not record.launch_claimed:
                 continue
             if record.state == "starting":
@@ -241,6 +243,17 @@ class Controller:
             logger.error("stopping night run %s for the board failed: %s", record.run_id, error)
             return self._journal.quarantine(record.run_id, record.fence, "proof_incomplete")
         return record
+
+    def _retry_server_stop(self, record: Record) -> None:
+        """A latched run the board still wants stopped is stopped again while it is not proven empty; its
+        journal state, quarantine included, never changes here."""
+        unit = unit_name(record.run_id)
+        try:
+            seen = self._runs.inspect(unit)
+            if seen.unit_active or seen.cgroup_populated is not False:
+                self._runs.stop(unit)
+        except _MANAGER_FAILURES as error:
+            logger.error("retrying the stop of night run %s failed: %s", record.run_id, error)
 
     def _finished(self, record: Record) -> Record | None:
         """A running run whose unit already exited on its own; never stops healthy work."""

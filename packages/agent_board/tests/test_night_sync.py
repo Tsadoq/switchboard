@@ -380,3 +380,27 @@ def test_unreadable_or_foreign_board_state_requests_no_stop(rig: Rig) -> None:
     rig.board.unreadable = False
     rig.board.journal_id = str(uuid4())
     assert rig.sync.requested_stops() == frozenset()
+
+
+def test_a_stopping_run_the_journal_does_not_know_freezes_new_starts(rig: Rig) -> None:
+    assert rig.sync.reconcile() is None
+    known = rig.reserve()
+    rig.journal.claim_start(known, FENCE)
+    rig.bind(known)
+    unknown = str(uuid4())
+    rig.board.active.add(unknown)
+    rig.board.stopping = {known, unknown}
+
+    requested = rig.sync.requested_stops()
+
+    assert rig.sync.frozen == "missing_local_run"
+    assert requested == {known}, "a known run the board wants stopped must still be stopped while frozen"
+
+
+def test_a_counter_the_ledger_did_not_produce_freezes_new_starts(rig: Rig) -> None:
+    assert rig.sync.reconcile() is None
+    rig.board.counter += 1
+
+    rig.sync.requested_stops()
+
+    assert rig.sync.frozen == "counter_mismatch"
