@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from agent_board.night.assignment import Assignment
 from agent_board.night.environment import (
     DEADLINE_UTC_ENV,
     HAPPIER_BIN_ENV,
@@ -22,7 +23,6 @@ from agent_board.night.launch import (
     EXIT_PREFLIGHT,
     EXIT_SESSION,
     EXIT_USAGE,
-    Assignment,
     LaunchRefused,
     Settings,
     TrackedSession,
@@ -218,6 +218,7 @@ class Rig:
                 model=None,
                 permission_mode="default",
                 turn_seconds=600,
+                deadline_utc=NOW_UTC + 3600,
             )
         )
 
@@ -388,6 +389,7 @@ def test_an_assignment_for_another_run_principal_or_repository_is_refused(
         pytest.param({"turn_seconds": 0}, id="no-budget"),
         pytest.param({"turn_seconds": 7200}, id="over-budget"),
         pytest.param({"prompt": ""}, id="empty-prompt"),
+        pytest.param({"deadline_utc": float("inf")}, id="infinite-deadline"),
     ],
 )
 def test_an_assignment_outside_the_contract_cannot_be_constructed(rig: Rig, field: dict[str, Any]) -> None:
@@ -402,6 +404,15 @@ def test_the_turn_is_clamped_to_the_bound_run_deadline(rig: Rig) -> None:
 
     assert rig.run() == EXIT_BUDGET
     assert 90 <= rig.host.now < 600
+
+
+def test_the_turn_is_also_clamped_to_the_assignments_deadline(rig: Rig) -> None:
+    assert rig.assignments.assignment is not None
+    rig.assignments.assignment = replace(rig.assignments.assignment, deadline_utc=NOW_UTC + 60)
+    rig.sessions.idle_after = 10_000
+
+    assert rig.run() == EXIT_BUDGET
+    assert 60 <= rig.host.now < 600
 
 
 def test_a_run_whose_deadline_has_passed_starts_nothing(rig: Rig) -> None:

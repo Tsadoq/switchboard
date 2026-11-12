@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from agent_board.night.assignment import Assignment
 from agent_board.night.environment import (
     DEADLINE_UTC_ENV,
     HAPPIER_BIN_ENV,
@@ -34,10 +35,6 @@ EXIT_SESSION = 6
 EXIT_BUDGET = 7
 
 DAY_HOMES = (".happier", ".happier-board")
-BACKENDS = ("claude",)
-PERMISSION_MODES = ("read_only", "default", "auto")
-MAX_PROMPT_CHARS = 32_000
-MAX_TURN_SECONDS = 3600
 DAEMON_READY_SECONDS = 60.0
 SESSION_TRACKED_SECONDS = 30.0
 DAEMON_STOP_SECONDS = 15.0
@@ -48,9 +45,6 @@ GIT = "/usr/bin/git"
 NO_SESSIONS = "This daemon has no tracked active sessions."
 SESSIONS_HEADER = "Active sessions:"
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-_COMMIT = re.compile(r"[0-9a-f]{40}")
-_REPOSITORY_KEY = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
-_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
 logger = logging.getLogger(__name__)
 
 
@@ -75,37 +69,6 @@ class Settings:
     @property
     def workdir(self) -> Path:
         return self.workdir_root / self.run_id
-
-
-@dataclass(frozen=True)
-class Assignment:
-    """What one night run does. It names no path, URL or command: the repository is a key the policy resolves."""
-
-    run_id: str
-    principal: str
-    repository_key: str
-    base_commit: str
-    prompt: str
-    backend: str
-    model: str | None
-    permission_mode: str
-    turn_seconds: int
-
-    def __post_init__(self) -> None:
-        if _REPOSITORY_KEY.fullmatch(self.repository_key) is None:
-            raise ValueError("repository_key is not a policy key")
-        if _COMMIT.fullmatch(self.base_commit) is None:
-            raise ValueError("base_commit must be a full lowercase commit id")
-        if not self.prompt or len(self.prompt) > MAX_PROMPT_CHARS:
-            raise ValueError("prompt must be non-empty and bounded")
-        if self.backend not in BACKENDS:
-            raise ValueError(f"backend must be one of {BACKENDS}")
-        if self.model is not None and _MODEL.fullmatch(self.model) is None:
-            raise ValueError("model is not a model id")
-        if self.permission_mode not in PERMISSION_MODES:
-            raise ValueError(f"permission_mode must be one of {PERMISSION_MODES}")
-        if type(self.turn_seconds) is not int or not 1 <= self.turn_seconds <= MAX_TURN_SECONDS:
-            raise ValueError("turn_seconds must be an integer within the turn bound")
 
 
 class AssignmentSource(Protocol):
@@ -264,7 +227,9 @@ def launch(
     if assignment.run_id != settings.run_id or assignment.principal != settings.principal:
         raise LaunchRefused(EXIT_ASSIGNMENT, "assignment_mismatch")
     source = repositories.resolve(assignment.repository_key, settings.principal)
-    budget = min(float(assignment.turn_seconds), settings.deadline_utc - host.utc())
+    budget = min(
+        float(assignment.turn_seconds), min(settings.deadline_utc, assignment.deadline_utc) - host.utc()
+    )
     if budget <= 0:
         raise LaunchRefused(EXIT_BUDGET, "run_deadline_passed")
     deadline = host.monotonic() + budget
