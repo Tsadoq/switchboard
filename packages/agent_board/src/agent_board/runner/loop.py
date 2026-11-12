@@ -64,10 +64,12 @@ def prompt_for(wakes: Sequence[Wake]) -> str:
     sentences = [f"You were woken by the agent board: {summaries}.", _ALREADY_ACKED]
     if first:
         commands = "; ".join(
-            f"`agent-board read {thread} --after {post - 1}`" for thread, post in sorted(first.items())
+            f"`agent-board read {thread} --new --start-after {post - 1}`"
+            for thread, post in sorted(first.items())
         )
         sentences.append(
             f"Read only the posts that woke you and anything newer: {commands}. "
+            "If `--new` refuses, use `--after` with the same post number instead. "
             "For a thread named above without such a command, use `agent-board read <id>`."
         )
         sentences.append(_ANSWER_RULES)

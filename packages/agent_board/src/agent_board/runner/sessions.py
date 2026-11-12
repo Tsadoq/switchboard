@@ -9,7 +9,9 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+from agent_board.cursors import CONSUMER_ENV, CURSOR_DIR, CursorError, hand_off
 from agent_board.identity import Identity, ensure_state_dir
 from agent_board.runner import remote_control
 from agent_board.runner.config import REMOTE_CONTROL, KindConfig
@@ -19,6 +21,7 @@ NOTIFY_TITLE = "agent board"
 
 MAP_FILE = "runner-sessions.json"
 LOCK_FILE = "runner-sessions.lock"
+CONSUMERS_FILE = "runner-consumers.json"
 LEGACY_FILE = "runner-session.json"
 KIND_KEY = "kind"
 TOPIC_PREFIX = "topic:"
@@ -44,6 +47,7 @@ class _Entry:
     session_id: str
     last_delivery: float
     retire_when_idle: bool
+    consumer: str | None = None
 
 
 class SessionPool:
@@ -160,6 +164,8 @@ class SessionPool:
             return None
 
     def _open(self, entries: list[_Entry], key: str | None, prompt: str, model: str | None) -> Session:
+        consumer = uuid4().hex
+        self._inherit(key, consumer)
         session = self._happier.create(
             backend=self._settings.backend,
             path=self._settings.workdir,
@@ -168,10 +174,51 @@ class SessionPool:
             prompt=prompt,
             permission_mode=self._settings.permission_mode,
             model=model,
+            env={CONSUMER_ENV: consumer},
         )
-        entries.append(_Entry(key, session.id, self._clock(), retire_when_idle=key is None))
+        entries.append(
+            _Entry(key, session.id, self._clock(), retire_when_idle=key is None, consumer=consumer)
+        )
+        if key is not None:
+            self._remember(key, consumer)
         logger.info("%s: opened session %s for %s", self._me.principal, session.id, _label(key))
         return session
+
+    def _inherit(self, key: str | None, consumer: str) -> None:
+        """A new session for a key takes over its predecessor's read positions; the predecessor is retired first."""
+        previous = None if key is None else self._consumers().get(key)
+        if previous is None:
+            return
+        try:
+            copied = hand_off(ensure_state_dir(self._me.kind) / CURSOR_DIR, previous, consumer)
+        except CursorError as error:
+            logger.warning("%s: read cursors not handed over for %s: %s", self._me.principal, key, error)
+            return
+        logger.info(
+            "%s: handed read cursors of %s to %s for %s (%d threads)",
+            self._me.principal,
+            previous,
+            consumer,
+            key,
+            len(copied),
+        )
+
+    def _consumers(self) -> dict[str, str]:
+        try:
+            recorded = json.loads((ensure_state_dir(self._me.kind) / CONSUMERS_FILE).read_text())
+        except (FileNotFoundError, ValueError, UnicodeDecodeError):
+            return {}
+        if not isinstance(recorded, dict):
+            return {}
+        return {
+            key: value for key, value in recorded.items() if isinstance(key, str) and isinstance(value, str)
+        }
+
+    def _remember(self, key: str, consumer: str) -> None:
+        consumers = self._consumers() | {key: consumer}
+        _replace_atomically(
+            ensure_state_dir(self._me.kind) / CONSUMERS_FILE, json.dumps(consumers, sort_keys=True)
+        )
 
     def _evict_one(self, entries: list[_Entry]) -> bool:
         by_age = sorted(entries, key=lambda entry: entry.last_delivery)
@@ -329,7 +376,14 @@ def _entry(recorded: Any) -> _Entry | None:
             "last_delivery": int() | float() as last_delivery,
             "retire_when_idle": bool() as retire_when_idle,
         } if session_id and not isinstance(last_delivery, bool):
-            return _Entry(key, session_id, float(last_delivery), retire_when_idle)
+            consumer = recorded.get("consumer")
+            return _Entry(
+                key,
+                session_id,
+                float(last_delivery),
+                retire_when_idle,
+                consumer if isinstance(consumer, str) else None,
+            )
     return None
 
 

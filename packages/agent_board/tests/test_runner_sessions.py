@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from agent_board.cursors import CURSOR_DIR, locked
 from agent_board.identity import Identity, ensure_state_dir
 from agent_board.runner.config import KindConfig
 from agent_board.runner.happier import Happier
@@ -425,3 +426,60 @@ def test_a_delivery_left_leased_names_no_session(box: Fakes, clock: FakeClock) -
     delivered = sessions.deliver("topic:2", "wake two", None, float("inf"), on_sent=used.append)
 
     assert not delivered and used == [], f"a wake left leased was reported as sent: {used}"
+
+
+def _consumer(fakes: Fakes, session_id: str) -> str:
+    consumer = next(
+        entry["env"]["AGENT_BOARD_CONSUMER"]
+        for entry in _sessions(fakes)
+        if entry["session"]["id"] == session_id
+    )
+    assert isinstance(consumer, str)
+    return consumer
+
+
+def test_each_new_session_gets_its_own_reading_consumer(box: Fakes, clock: FakeClock) -> None:
+    sessions = pool(clock)
+
+    assert sessions.deliver("topic:1", "wake one", None, float("inf"))
+    assert sessions.deliver("topic:2", "wake two", None, float("inf"))
+
+    consumers = {_consumer(box, session_id) for session_id in _live(box)}
+    assert len(consumers) == 2 and all(len(consumer) == 32 for consumer in consumers)
+
+
+def test_a_replacement_session_for_a_thread_takes_over_its_read_cursors(box: Fakes, clock: FakeClock) -> None:
+    sessions = pool(clock)
+    assert sessions.deliver("topic:1", "first", None, float("inf"))
+    first = _map(box)["topic:1"]
+    old = _consumer(box, first)
+    directory = ensure_state_dir(_KIND) / CURSOR_DIR
+    with locked(directory, old) as positions:
+        positions.advance(1, 120)
+    _update_sessions(box, lambda entry: entry["session"].update(active=False))
+
+    assert sessions.deliver("topic:1", "second", None, float("inf"))
+
+    second = _map(box)["topic:1"]
+    new = _consumer(box, second)
+    assert second != first and new != old
+    with locked(directory, new) as positions:
+        assert positions.get(1) == 120
+    with locked(directory, old) as positions:
+        assert positions.retired, "the replaced session could still advance"
+
+
+def test_a_one_shot_session_inherits_no_cursor(box: Fakes, clock: FakeClock) -> None:
+    sessions = pool(clock)
+    assert sessions.deliver("topic:1", "first", None, float("inf"))
+    old = _consumer(box, _map(box)["topic:1"])
+    with locked(ensure_state_dir(_KIND) / CURSOR_DIR, old) as positions:
+        positions.advance(1, 5)
+
+    assert sessions.deliver(None, "one shot", None, float("inf"))
+
+    one_shot = next(session for session in _live(box) if session != _map(box)["topic:1"])
+    with locked(ensure_state_dir(_KIND) / CURSOR_DIR, _consumer(box, one_shot)) as positions:
+        assert positions.get(1) is None
+    with locked(ensure_state_dir(_KIND) / CURSOR_DIR, old) as positions:
+        assert not positions.retired
