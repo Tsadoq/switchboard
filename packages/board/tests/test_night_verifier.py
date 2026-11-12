@@ -231,3 +231,175 @@ def test_bad_binding_never_starts_or_advances_counter(case: Case, change: dict[s
     run = case.run()
     assert case.send("night.binding", run.id, case.binding(run) | change).status_code == 409
     assert case.send("night.state", "self", {}).json()["counter"] == 0
+
+
+def _capture_setup(case: Case, count: int = 3) -> tuple[Run, dict[str, Any]]:
+    run = case.run()
+    binding = case.binding(run)
+    assert case.send("night.binding", run.id, binding).status_code == 200
+    with sqlite3.connect(case.path) as conn:
+        conn.executemany(
+            "INSERT INTO wakes (principal, reason, source_ref, summary, created_at) "
+            "VALUES ('pi@dev', 'timer', 'profile:pi@dev', ?, ?)",
+            [(f"task {index}", case.now - 10) for index in range(count)],
+        )
+    return run, binding | {"counter": 1, "receipt_id": str(uuid4())}
+
+
+def test_capture_is_durable_idempotent_and_never_an_ack_or_runtime_extension(case: Case) -> None:
+    run, payload = _capture_setup(case)
+    first = case.send("night.capture", run.id, payload)
+    assert first.status_code == 200, first.text
+    data = first.json()
+    assert data["counter"] == 2 and data["deadline"] == run.deadline
+    assert [wake["summary"] for wake in data["wakes"]] == ["task 0", "task 1", "task 2"]
+    with sqlite3.connect(case.path) as conn:
+        conn.execute("UPDATE wakes SET summary = 'changed after snapshot'")
+    assert case.send("night.capture", run.id, payload).json() == data
+    assert case.send("night.state", "self", {}).json()["counter"] == 2
+    with sqlite3.connect(case.path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM night_captured_wakes").fetchone()[0] == 3
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM wakes WHERE acked_at IS NOT NULL OR leased_until IS NOT NULL"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute("SELECT deadline FROM night_runs WHERE id = ?", (run.id,)).fetchone()[0]
+            == run.deadline
+        )
+    assert case.client.portal is not None
+    assert case.client.portal.call(case.app.state.wakes.ack, "pi@dev", [w["id"] for w in data["wakes"]]) == 0
+
+
+def test_capture_batches_do_not_redeliver_current_run_wakes(case: Case) -> None:
+    run, payload = _capture_setup(case, 30)
+    first = case.send("night.capture", run.id, payload).json()
+    second = case.send("night.capture", run.id, payload | {"receipt_id": str(uuid4()), "counter": 2}).json()
+    assert len(first["wakes"]) == 20 and len(second["wakes"]) == 10
+    assert not {w["id"] for w in first["wakes"]} & {w["id"] for w in second["wakes"]}
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"counter": True},
+        {"counter": 0},
+        {"journal_id": str(uuid4())},
+        {"boot_id": str(uuid4())},
+        {"invocation_id": "b" * 32},
+        {"cgroup": "/user.slice/outside"},
+        {"fence": "b" * 43},
+        {"principal": "pi@vault"},
+        {"command": "ignored"},
+    ],
+)
+def test_capture_refuses_bad_authority_without_consuming_or_advancing(
+    case: Case, change: dict[str, Any]
+) -> None:
+    run, payload = _capture_setup(case)
+    assert case.send("night.capture", run.id, payload | change).status_code == 409
+    assert case.send("night.state", "self", {}).json()["counter"] == 1
+    with sqlite3.connect(case.path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM night_wake_captures").fetchone()[0] == 0
+
+
+def test_agent_signature_cannot_capture(case: Case) -> None:
+    run, payload = _capture_setup(case)
+    response = case.send("night.capture", run.id, payload, case.agent)
+    assert response.status_code == 401 and response.json()["reason"] == "forbidden_role"
+
+
+def test_capture_changed_receipt_is_rejected(case: Case) -> None:
+    run, payload = _capture_setup(case)
+    assert case.send("night.capture", run.id, payload).status_code == 200
+    response = case.send("night.capture", run.id, payload | {"counter": 2})
+    assert response.status_code == 409 and response.json()["reason"] == "receipt_conflict"
+
+
+@pytest.mark.parametrize("state", ["stopping", "quarantined", "finished"])
+def test_capture_refuses_nonrunning_run(case: Case, state: str) -> None:
+    run, payload = _capture_setup(case)
+    with sqlite3.connect(case.path) as conn:
+        conn.execute("UPDATE night_runs SET state = ? WHERE id = ?", (state, run.id))
+    assert case.send("night.capture", run.id, payload).status_code == 409
+    assert case.send("night.state", "self", {}).json()["counter"] == 1
+
+
+def test_capture_cannot_take_human_work_or_bypass_pending_human_priority(case: Case) -> None:
+    run, payload = _capture_setup(case)
+    with sqlite3.connect(case.path) as conn:
+        conn.execute("UPDATE wakes SET origin_kind = 'human' WHERE id = (SELECT MIN(id) FROM wakes)")
+    response = case.send("night.capture", run.id, payload)
+    assert response.status_code == 409 and response.json()["reason"] == "human_priority"
+    assert case.send("night.state", "self", {}).json()["counter"] == 1
+
+
+def test_capture_refuses_expired_run_and_preserves_counter(case: Case) -> None:
+    run, payload = _capture_setup(case)
+    case.app.state.night_verifier._clock = lambda: run.deadline
+    response = case.send("night.capture", run.id, payload)
+    assert response.status_code == 409 and response.json()["reason"] == "expired"
+    assert case.send("night.state", "self", {}).json()["counter"] == 1
+
+
+def test_capture_retry_after_off_is_only_a_snapshot_not_fresh_authority(case: Case) -> None:
+    run, payload = _capture_setup(case)
+    first = case.send("night.capture", run.id, payload).json()
+    assert case.client.portal is not None
+    case.client.portal.call(NightAdmission(case.app.state.db).set_enabled, False)
+    assert case.send("night.capture", run.id, payload).json() == first
+    assert case.send("night.grant", run.id, {"fence": run.fence}).json()["state"] == "disabled"
+    assert (
+        case.send("night.capture", run.id, payload | {"receipt_id": str(uuid4()), "counter": 2}).status_code
+        == 409
+    )
+
+
+def test_unacknowledged_capture_can_only_be_recaptured_after_finished_run(case: Case) -> None:
+    run, payload = _capture_setup(case, 1)
+    first = case.send("night.capture", run.id, payload).json()
+    empty = case.send("night.capture", run.id, payload | {"receipt_id": str(uuid4()), "counter": 2}).json()
+    assert empty["wakes"] == []
+    evidence = payload | {
+        "receipt_id": str(uuid4()),
+        "counter": 3,
+        "outcome": "empty",
+        "runtime_seconds": 0,
+        "reason": "completed",
+    }
+    assert case.send("night.evidence", run.id, evidence).json()["state"] == "finished"
+    replacement = case.run()
+    binding = case.binding(replacement, counter=4)
+    assert case.send("night.binding", replacement.id, binding).status_code == 200
+    next_payload = binding | {"receipt_id": str(uuid4()), "counter": 5}
+    recaptured = case.send("night.capture", replacement.id, next_payload).json()
+    assert recaptured["wakes"] == first["wakes"]
+    with sqlite3.connect(case.path) as conn:
+        assert conn.execute("SELECT acked_at FROM wakes").fetchone()[0] is None
+
+
+def test_capture_does_not_take_outstanding_ordinary_lease(case: Case) -> None:
+    run, payload = _capture_setup(case)
+    with sqlite3.connect(case.path) as conn:
+        conn.execute("UPDATE wakes SET leased_until = ?", (case.now + 300,))
+    assert case.send("night.capture", run.id, payload).json()["wakes"] == []
+
+
+def test_capture_truncation_is_explicit_and_oversized_metadata_rolls_back(case: Case) -> None:
+    run, payload = _capture_setup(case, 1)
+    with sqlite3.connect(case.path) as conn:
+        conn.execute("UPDATE wakes SET summary = ?", ("x" * 4000,))
+    data = case.send("night.capture", run.id, payload).json()
+    assert len(data["wakes"][0]["summary"]) == 1024
+    assert data["wakes"][0]["summary_truncated"] is True
+    with sqlite3.connect(case.path) as conn:
+        conn.execute(
+            "INSERT INTO wakes (principal, reason, source_ref, summary, created_at) "
+            "VALUES ('pi@dev', 'timer', ?, 'oversized', ?)",
+            ("x" * 40000, case.now),
+        )
+    response = case.send("night.capture", run.id, payload | {"receipt_id": str(uuid4()), "counter": 2})
+    assert response.status_code == 409 and response.json()["reason"] == "wake_metadata_too_large"
+    assert case.send("night.state", "self", {}).json()["counter"] == 2

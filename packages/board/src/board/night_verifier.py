@@ -18,6 +18,7 @@ from board.identity.roles import VerifierRoles
 from board.identity.routes import SignedRequest, _verify
 from board.identity.verifier import Verified
 from board.night import AdmissionDenied, Run, _find, settle_in_transaction, start_in_transaction, window_for
+from board.night_delivery import CaptureDenied, capture_candidates, persist_capture
 
 
 class Denied(ValueError):
@@ -43,6 +44,7 @@ class NightVerifier:
             "night.grant": self._grant,
             "night.binding": self._binding,
             "night.evidence": self._evidence,
+            "night.capture": self._capture,
         }
         handler = handlers.get(envelope.action)
         if handler is None:
@@ -178,6 +180,52 @@ class NightVerifier:
             "night.binding",
             {"journal_id": payload["journal_id"], "counter": counter, "state": "running"},
         )
+
+    def _capture(
+        self, conn: sqlite3.Connection, box: str, target: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        _fields(
+            payload, {"fence", "journal_id", "counter", "receipt_id", "boot_id", "invocation_id", "cgroup"}
+        )
+        run = self._run(conn, box, target, payload["fence"])
+        self._roles.require_agent(run.principal)
+        _binding_fields(target, payload)
+        cached = self._cached(conn, box, target, payload, "night.capture")
+        if cached is not None:
+            return cached
+        state = self._journal(conn, box, payload["journal_id"])
+        if type(payload["counter"]) is not int or payload["counter"] != state["counter"]:
+            raise Denied("counter_mismatch")
+        binding = conn.execute("SELECT * FROM night_verifier_bindings WHERE run_id = ?", (target,)).fetchone()
+        if binding is None or any(
+            binding[key] != payload[key] for key in ("journal_id", "boot_id", "invocation_id", "cgroup")
+        ):
+            raise Denied("missing_or_conflicting_binding")
+        if run.state != "running":
+            raise Denied("not_running")
+        now = self._clock()
+        start_in_transaction(conn, run.principal, run.id, run.fence, now)
+        batch = capture_candidates(conn, run, now)
+        counter = state["counter"] + 1
+        conn.execute("UPDATE night_verifier_state SET counter = ? WHERE box = ?", (counter, box))
+        response = self._save(
+            conn,
+            box,
+            target,
+            payload,
+            "night.capture",
+            {
+                "journal_id": payload["journal_id"],
+                "counter": counter,
+                "capture_id": payload["receipt_id"],
+                "run_id": run.id,
+                "principal": run.principal,
+                "deadline": run.deadline,
+                "wakes": batch,
+            },
+        )
+        persist_capture(conn, payload["receipt_id"], run.id, now, batch)
+        return response
 
     def _evidence(
         self, conn: sqlite3.Connection, box: str, target: str, payload: dict[str, Any]
@@ -351,7 +399,7 @@ def install(app: FastAPI, authority: NightVerifier) -> None:
         verified = await _verify(request, body)
         try:
             response = await authority.dispatch(verified)
-        except (Denied, AdmissionDenied) as error:
+        except (Denied, AdmissionDenied, CaptureDenied) as error:
             return JSONResponse({"reason": str(error)}, status_code=409)
         return JSONResponse(response)
 
