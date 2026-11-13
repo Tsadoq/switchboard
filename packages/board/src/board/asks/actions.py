@@ -6,7 +6,7 @@ from typing import Literal
 
 from board.constants import HUMAN
 from board.db import Database
-from board.forum.actions import Forum
+from board.forum.actions import Forum, Refused
 from board.forum.entities import AuthorKind, ThreadTarget
 
 _log = logging.getLogger(__name__)
@@ -116,6 +116,14 @@ class Asks:
         kind: AuthorKind = "human" if by_human else "system"
         try:
             await self._forum.post(principal, kind, ThreadTarget(closed.thread_id), {"body": note})
+        except Refused as refused:
+            _log.warning(
+                "ask %d is closed but its note on thread %d was refused: %s",
+                closed.id,
+                closed.thread_id,
+                refused.reason,
+            )
+            return closed, False
         except (sqlite3.Error, OSError):
             _log.exception(
                 "ask %d is closed but its note on thread %d was not posted", closed.id, closed.thread_id

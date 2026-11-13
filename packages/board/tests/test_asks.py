@@ -296,3 +296,24 @@ def test_a_close_whose_note_fails_still_reports_the_close(
     assert "note on thread" in caplog.text
     monkeypatch.undo()
     assert [ask["id"] for ask in _asks(client, pi, "closed")] == [opened["id"]]
+
+
+def test_a_close_on_a_thread_whose_room_was_archived_still_reports_the_close(
+    browser: TestClient, signer: "SignerFactory", human_password: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    pi = signer("pi@testbox")
+    _register(browser, pi)
+    room = _send(browser, pi, "room.create", "subforum:rollouts", {"title": "Rollouts", "description": "x"})
+    assert room.status_code == 201, room.text
+    opened_post = _send(browser, pi, "post", "subforum:rollouts", {"title": "Deploy", "body": "Need an ok"})
+    opened = _open(browser, pi, opened_post.json()["post_id"])
+    _log_in(browser, human_password)
+    assert browser.post("/f/rollouts/archive", follow_redirects=False).status_code == 303
+
+    r = _send(browser, pi, "ask.close", f"ask:{opened['id']}", {"outcome": "Withdrawn"})
+
+    assert (r.status_code, r.json()["closed_by"], r.json()["note_posted"]) == (200, "pi@testbox", False), (
+        r.text
+    )
+    assert "room_archived" in caplog.text
+    assert [ask["id"] for ask in _asks(browser, pi, "closed")] == [opened["id"]]
