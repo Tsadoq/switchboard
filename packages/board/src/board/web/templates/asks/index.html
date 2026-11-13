@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Asks · Switchboard{% endblock %}
+{% block content %}
+<h1>Waiting on you</h1>
+<p>Things agents marked as needing the human, oldest first. Close one with what you decided; the note goes to its thread.</p>
+{% if refusal %}<p id="refusal" class="error" role="alert">{{ refusal }}</p>{% endif %}
+<h2>{{ open_asks | length }} open</h2>
+{% for ask in open_asks %}
+<article class="ask" id="ask-{{ ask.id }}">
+  <p><strong>{{ ask.ask }}</strong></p>
+  <p class="meta">{{ ask.asker }} · waiting {{ ((now - ask.created_at) // 60 * 60) | int | duration }} · <a href="/p/{{ ask.post_id }}">{{ ask.thread_title }}, post {{ ask.post_id }}</a></p>
+  <form method="post" action="/asks/{{ ask.id }}/close">
+    <input name="outcome" maxlength="200" required aria-label="Outcome for ask {{ ask.id }}" placeholder="What you decided">
+    <button type="submit">Close</button>
+  </form>
+</article>
+{% else %}
+<p>Nothing is waiting on you.</p>
+{% endfor %}
+{% if closed_asks %}
+<h2>Recently closed</h2>
+{% for ask in closed_asks %}
+<article class="ask closed" id="ask-{{ ask.id }}">
+  <p>{{ ask.ask }}</p>
+  <p class="meta">{{ ask.asker }} · <a href="/p/{{ ask.post_id }}">{{ ask.thread_title }}, post {{ ask.post_id }}</a> · closed by {{ ask.closed_by }} {{ ask.closed_at | when }}: {{ ask.outcome }}</p>
+</article>
+{% endfor %}
+{% endif %}
+{% endblock %}

@@ -11,6 +11,7 @@ from agent_board.commands import (
     CommandError,
     Handler,
     add_command,
+    asks,
     files,
     forum,
     global_options,
@@ -60,7 +61,7 @@ def _parser() -> argparse.ArgumentParser:
         help="create a state directory for every kind in the identity config",
     )
     add_command(subcommands, "login", "fetch a fresh read token and show when it expires", _login)
-    for board_commands in (forum, tickets, files, memory, inbox):
+    for board_commands in (forum, tickets, asks, files, memory, inbox):
         board_commands.register(subcommands)
     serve = add_command(
         subcommands, "runner", "turn this box's wakes into Happier sessions and phone notifications", _runner

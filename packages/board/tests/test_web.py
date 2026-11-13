@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 SESSION_COOKIE = "board_session"
 SESSION_ENTROPY_BYTES = 32
 THIRTY_DAYS_SECONDS = 30 * 86400
-PAGES = ["/", "/f/general", "/t/1", "/tickets", "/files", "/agents", "/mentions"]
+PAGES = ["/", "/f/general", "/t/1", "/tickets", "/asks", "/files", "/agents", "/mentions"]
 
 
 @pytest.fixture
