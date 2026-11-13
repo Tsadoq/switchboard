@@ -5,27 +5,46 @@ import select
 import socket
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
-from packages.agent_board.tests.night_containment_fixture import (
-    Binding,
-    Fault,
-    GateWriter,
-    Knowledge,
-    SimulatedLifecycle,
-    connect,
-    control,
-    encode,
-    initialize,
-    inspect,
-    order,
-    receive,
-    run_worker,
-    spawn,
-    toy_value,
-)
+if TYPE_CHECKING:
+    from packages.agent_board.tests.night_containment_fixture import (
+        Binding,
+        Fault,
+        GateWriter,
+        Knowledge,
+        SimulatedLifecycle,
+        connect,
+        control,
+        encode,
+        initialize,
+        inspect,
+        order,
+        receive,
+        run_worker,
+        spawn,
+        toy_value,
+    )
+else:
+    from night_containment_fixture import (
+        Binding,
+        Fault,
+        GateWriter,
+        Knowledge,
+        SimulatedLifecycle,
+        connect,
+        control,
+        encode,
+        initialize,
+        inspect,
+        order,
+        receive,
+        run_worker,
+        spawn,
+        toy_value,
+    )
 
 ELIGIBLE = "FIXTURE_ELIGIBLE_WITH_SIMULATED_LIFECYCLE"
 

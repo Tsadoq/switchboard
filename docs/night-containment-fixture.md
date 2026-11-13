@@ -40,4 +40,6 @@ Fault injection is fixed test-only phase/side/crash configuration, not a product
 
 This tests process crashes and SQLite observations on test storage, not power-loss/fsync hardware behavior, hostile same-UID isolation, immutable root exec/configuration, complete installed/inherited/open/unlinked descriptor inventory, paired restore, all-writer cooperation, manager freshness, enqueue latency, provider completion or native cgroup settlement. There is no hard bound on uninterruptible process death. Test deadlines are orchestration limits; timeout is failure/uncertainty, not a closure witness.
 
+Both Python-module and console-entrypoint pytest runs pass80 focused cases and1766 full-suite cases, with five existing fork warnings in the full run; Ruff/format and mypy171 pass. The initial CI console entrypoint exposed a collection import failure masked by Python-module invocation. The test now uses a sibling import at runtime and the repository namespace only for static typing, without adding a production path or changing protocol code.
+
 A fresh exact-head source review is required for this fixture. Even fixture source approval would not authorize a worker/service install, production authority gate, API hookup, root smoke, operational rollout or pilot activation. Ticket11 remains owned and the pilot remains disabled.
