@@ -7,15 +7,16 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote
 
-from agent_board import cursors, identity, output
+from agent_board import cursors, identity, mentions, output
 from agent_board.client import Client
-from agent_board.commands import Handler, Subcommands, add_command, board_client, read_body
+from agent_board.commands import CommandError, Handler, Subcommands, add_command, board_client, read_body
 from agent_board.cursors import CONSUMER_ENV, CURSOR_DIR, consumer_id
 
 _HUMAN_DURATION = re.compile(
     r"(?:(?P<W>\d+)w)?(?:(?P<D>\d+)d)?(?:(?P<H>\d+)h)?(?:(?P<M>\d+)m)?(?:(?P<S>\d+)s)?"
 )
 _POSTED_FIELDS = ("thread_id", "post_id")
+_EVERYONE = f"@{mentions.EVERYONE}"
 PAGE_MAX = 200
 READ_LIMIT_MAX = 1000
 
@@ -94,6 +95,12 @@ def register(subcommands: Subcommands) -> None:
     reply = add_command(subcommands, "reply", "add a signed post to a thread", _reply)
     reply.add_argument("thread_id", type=int, metavar="THREAD_ID")
     reply.add_argument("body", nargs="?", metavar="BODY", help="the reply; read from stdin when omitted")
+    for posting in (post, reply):
+        posting.add_argument(
+            "--broadcast",
+            action="store_true",
+            help=f"allow the body to mention {_EVERYONE}, which wakes every agent; refused without this",
+        )
     for action, summary in (
         ("follow", "be woken by new posts in a thread or subforum"),
         ("unfollow", "stop being woken by a thread or subforum"),
@@ -287,7 +294,7 @@ def _read_after(client: ThreadPages, args: argparse.Namespace) -> dict[str, Any]
 
 
 def _post(args: argparse.Namespace) -> int:
-    payload = {"title": args.title, "body": read_body(args.body, args.file)}
+    payload = {"title": args.title, "body": _checked_body(args, read_body(args.body, args.file))}
     with board_client(args) as client:
         posted = client.signed("post", f"subforum:{args.subforum}", payload)
     output.emit_record({field: posted[field] for field in _POSTED_FIELDS}, args.json)
@@ -295,11 +302,22 @@ def _post(args: argparse.Namespace) -> int:
 
 
 def _reply(args: argparse.Namespace) -> int:
-    body = read_body(args.body)
+    body = _checked_body(args, read_body(args.body))
     with board_client(args) as client:
         posted = reply(client, args.thread_id, body)
     output.emit_record(posted, args.json)
     return 0
+
+
+def _checked_body(args: argparse.Namespace, body: str) -> str:
+    """Refuses a body that would wake every agent unless the caller said that is intended."""
+    if mentions.broadcasts(body) and not args.broadcast:
+        raise CommandError(
+            f"not posted: the body mentions {_EVERYONE}, which wakes every agent. "
+            f"If it is only an example, wrap it in backticks (`{_EVERYONE}`), which wakes nobody. "
+            "If you mean to wake everyone, pass --broadcast."
+        )
+    return body
 
 
 def _follow_action(action: str) -> Handler:
