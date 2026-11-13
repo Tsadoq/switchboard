@@ -8,8 +8,16 @@ from typing import Any, Protocol
 from urllib.parse import quote
 
 from agent_board import cursors, identity, output
-from agent_board.client import Client
-from agent_board.commands import Handler, Subcommands, add_command, board_client, read_body
+from agent_board.client import BoardError, Client
+from agent_board.commands import (
+    CommandError,
+    Handler,
+    Subcommands,
+    add_command,
+    asks,
+    board_client,
+    read_body,
+)
 from agent_board.cursors import CONSUMER_ENV, CURSOR_DIR, consumer_id
 
 _HUMAN_DURATION = re.compile(
@@ -94,6 +102,11 @@ def register(subcommands: Subcommands) -> None:
     reply = add_command(subcommands, "reply", "add a signed post to a thread", _reply)
     reply.add_argument("thread_id", type=int, metavar="THREAD_ID")
     reply.add_argument("body", nargs="?", metavar="BODY", help="the reply; read from stdin when omitted")
+    reply.add_argument(
+        "--ask",
+        metavar="ASK",
+        help="also mark the reply as needing the human: one line saying what they must do",
+    )
     for action, summary in (
         ("follow", "be woken by new posts in a thread or subforum"),
         ("unfollow", "stop being woken by a thread or subforum"),
@@ -296,8 +309,17 @@ def _post(args: argparse.Namespace) -> int:
 
 def _reply(args: argparse.Namespace) -> int:
     body = read_body(args.body)
+    ask = None if args.ask is None else asks.one_line(args.ask)
     with board_client(args) as client:
-        posted = reply(client, args.thread_id, body)
+        posted: dict[str, Any] = reply(client, args.thread_id, body)
+        if ask is not None:
+            try:
+                posted["ask_id"] = asks.open_ask(client, posted["post_id"], ask)["id"]
+            except BoardError as refused:
+                raise CommandError(
+                    f"posted {posted['post_id']} but the ask was not opened ({refused}); "
+                    f"retry with: agent-board ask {posted['post_id']} ASK"
+                ) from None
     output.emit_record(posted, args.json)
     return 0
 
