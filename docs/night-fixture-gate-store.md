@@ -14,9 +14,15 @@ The success table permits idempotent false/false changed flags. Domain refusal w
 
 No module is imported by a runtime supervisor, journal/ledger writer, service or production caller. This foundation performs no filesystem, SQLite, process or network operations.
 
+## Internal SQLite core
+
+`agent_board.night.fixture_gate_sql` defines the exact three-table schema, four-statement schema/header validation and four-query current bundle. Catalog enumeration stops at nine objects; control enumeration stops at two rows; identity/completion queries use fixed unique indexes and capped projections. Both current-operation and current-launch paths must agree. Snapshot checks reject autocommit use. Real SQLite tests cover the valid-index orphan regression, bootstrap/normal/fault history, malformed current rows, extra schema/control rows, coherent snapshots and fixed identity/completion SEARCH plans with10,10000 and100000 retained completion records. The schema-plus-bundle trace remains exactly eight statements across those histories. This is executable evidence for that internal subset, not for the still-unimplemented complete API budgets.
+
+These are PRIVATE connection-level helpers for the upcoming file API. Tests create their databases directly, not through a provisioning API. `_current` returns internal transaction-local data, not a completed public read result: it does not establish successful COMMIT, confirmed resource closure, private-file provenance or an externally usable observation. A real existing connection is not an authority or protected provisioning mechanism.
+
 ## Remaining before source-review request
 
-The database primitive is not implemented yet. Remaining work includes private-file validation, explicit fixture provisioning, coherent snapshots, the four-query current bundle (including completion by current launch), exact-owner transitions, immutable completion history/replay refusal, atomic reference/status publication, independent mutation/cleanup/directory-publication knowledge, fault/crash injection and real indexed-plan/SQL-budget evidence.
+The public file API and mutation operations are not implemented yet. Remaining work includes private-file validation, explicit fixture provisioning, fresh-connection/read-finalization discipline, exact-owner transitions, immutable completion history/replay refusal, atomic reference/status publication, independent mutation/cleanup/directory-publication knowledge, fault/crash injection and complete API SQL-budget/increasing-history evidence.
 
 Both operation and current-launch completion paths must be absent for PENDING/FAULTED or identify the same complete record for BOOTSTRAP/COMPLETED, including retained history in FAULT_LOCKED. Relevant orphan conflicts must refuse before DML. Unreachable unrelated history is not globally audited by bounded APIs.
 
