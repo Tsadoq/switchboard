@@ -184,6 +184,12 @@ def test_worker_faults_never_receive_normal_certificates(
         "duplicate",
         "late_duplicate",
         "rights",
+        "empty",
+        "empty_many",
+        "empty_rights",
+        "empty_late_invalid",
+        "empty_late_duplicate",
+        "empty_late_rights",
     ],
 )
 def test_invalid_or_duplicate_results_refuse_after_exit(state: tuple[Path, Binding], mode: str) -> None:
@@ -449,13 +455,14 @@ def test_parent_can_acquire_order_while_reported_worker_waits_for_ack(state: tup
     assert result["restart"] == ELIGIBLE and result["report"]["certificate"] is True
 
 
-def test_rejected_received_descriptor_is_actually_closed(state: tuple[Path, Binding]) -> None:
+@pytest.mark.parametrize("payload", [b"{}", b""])
+def test_rejected_received_descriptor_is_actually_closed(state: tuple[Path, Binding], payload: bytes) -> None:
     directory, binding = state
     marker = directory / "descriptor-marker"
     fd = os.open(marker, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     try:
-        child.sendmsg([b"{}"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [fd]))])
+        child.sendmsg([payload], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [fd]))])
         with pytest.raises(ValueError, match="ancillary"):
             receive(parent, binding)
         remaining = []
@@ -470,6 +477,56 @@ def test_rejected_received_descriptor_is_actually_closed(state: tuple[Path, Bind
         parent.close()
         child.close()
         os.close(fd)
+
+
+@pytest.mark.parametrize("close_sender", [False, True])
+def test_only_would_block_proves_the_guarded_exchange_is_drained(
+    state: tuple[Path, Binding], close_sender: bool
+) -> None:
+    directory, binding = state
+    assert GateWriter(directory).publish(binding).mutation == "COMMITTED"
+    certificate = run_worker(directory, binding, "success", Fault())
+    receiver, sender_guard = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    try:
+        sender_guard.send(encode(certificate["result"]))
+        if close_sender:
+            sender_guard.close()
+            with pytest.raises(ValueError, match="empty_record_or_closed_peer"):
+                receive(receiver, binding)
+        else:
+            assert receive(receiver, binding) == certificate["result"]
+    finally:
+        receiver.close()
+        sender_guard.close()
+
+
+def test_queued_descriptor_after_empty_record_is_released_on_exchange_close(
+    state: tuple[Path, Binding],
+) -> None:
+    directory, binding = state
+    assert GateWriter(directory).publish(binding).mutation == "COMMITTED"
+    certificate = run_worker(directory, binding, "success", Fault())
+    receiver, sender_guard = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    read_fd, write_fd = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+    try:
+        sender_guard.send(encode(certificate["result"]))
+        sender_guard.send(b"")
+        sender_guard.sendmsg([b"{}"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [write_fd]))])
+        os.close(write_fd)
+        write_fd = -1
+        with pytest.raises(ValueError, match="empty_record_or_closed_peer"):
+            receive(receiver, binding)
+        with pytest.raises(BlockingIOError):
+            os.read(read_fd, 1)
+        receiver.close()
+        sender_guard.close()
+        assert os.read(read_fd, 1) == b""
+    finally:
+        receiver.close()
+        sender_guard.close()
+        os.close(read_fd)
+        if write_fd >= 0:
+            os.close(write_fd)
 
 
 def test_stale_clear_rolls_back_its_inserted_completion(state: tuple[Path, Binding]) -> None:

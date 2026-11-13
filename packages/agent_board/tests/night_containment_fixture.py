@@ -492,10 +492,27 @@ def worker(directory: Path, binding: Binding, channel: socket.socket, mode: str,
         if mode == "rights":
             ancillary = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [channel.fileno()]))]
         channel.sendmsg([data], ancillary, socket.MSG_DONTWAIT)
-        if mode in {"late_duplicate", "paused_success"}:
+        if mode.startswith("empty"):
+            empty_ancillary = ancillary if mode == "empty_rights" else []
+            if mode == "empty_rights":
+                empty_ancillary = [
+                    (socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [channel.fileno()]))
+                ]
+            channel.sendmsg([b""], empty_ancillary, socket.MSG_DONTWAIT)
+            if mode == "empty_many":
+                channel.send(b"", socket.MSG_DONTWAIT)
+        if mode in {"late_duplicate", "paused_success"} or mode.startswith("empty_late"):
             channel.recv(1)
-        if mode in {"duplicate", "late_duplicate"}:
+        if mode in {"duplicate", "late_duplicate", "empty_late_duplicate"}:
             channel.send(data, socket.MSG_DONTWAIT)
+        if mode in {"empty_late_invalid", "empty_many"}:
+            channel.send(b"{}", socket.MSG_DONTWAIT)
+        if mode == "empty_late_rights":
+            channel.sendmsg(
+                [b"{}"],
+                [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [channel.fileno()]))],
+                socket.MSG_DONTWAIT,
+            )
     fault.hit("worker.report", "after")
     if mode == "eof_alive":
         channel.close()
@@ -522,7 +539,7 @@ def receive(channel: socket.socket, binding: Binding) -> dict[str, Any]:
         if unexpected or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC):
             raise ValueError("result_ancillary_or_truncation")
         if not data:
-            break
+            raise ValueError("empty_record_or_closed_peer")
         packets.append(data)
     if len(packets) != 1:
         raise ValueError("result_count")
@@ -548,31 +565,30 @@ def run_worker(
     directory: Path, binding: Binding, mode: str, fault: Fault, supervisor_fault: Fault | None = None
 ) -> dict[str, Any]:
     supervisor_fault = supervisor_fault or Fault()
-    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    receiver, sender_guard = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     try:
         with spawn(
             [
                 "worker",
                 str(directory),
                 json.dumps(asdict(binding)),
-                str(child.fileno()),
+                str(sender_guard.fileno()),
                 mode,
                 json.dumps(asdict(fault)),
             ],
-            pass_fds=(child.fileno(),),
+            pass_fds=(sender_guard.fileno(),),
         ) as owned:
-            child.close()
             supervisor_fault.hit("supervisor.launch", "after")
-            if mode in {"late_duplicate", "paused_success"}:
-                ready = select.select([parent], [], [], 10)[0]
+            if mode in {"late_duplicate", "paused_success"} or mode.startswith("empty_late"):
+                ready = select.select([receiver], [], [], 10)[0]
                 if not ready:
                     raise ValueError("missing_first_packet")
                 with order(directory):
                     pass
-                parent.send(b"a", socket.MSG_DONTWAIT)
+                receiver.send(b"a", socket.MSG_DONTWAIT)
             exited = owned.wait()
             supervisor_fault.hit("supervisor.exit", "after")
-            result = receive(parent, binding)
+            result = receive(receiver, binding)
             supervisor_fault.hit("supervisor.result", "after")
             certificate = {
                 "v": 1,
@@ -589,8 +605,8 @@ def run_worker(
             supervisor_fault.hit("supervisor.certificate", "before")
             return certificate
     finally:
-        parent.close()
-        child.close()
+        receiver.close()
+        sender_guard.close()
 
 
 def supervisor(directory: Path, binding: Binding, config: dict[str, Any]) -> None:

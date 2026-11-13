@@ -24,7 +24,11 @@ Use a private AF_UNIX SOCK_SEQPACKET socketpair, maximum 4096 payload bytes, cap
 
 The worker checks still-PENDING exact ownership under its flock before mutation. Its result send and any acknowledgement wait are after releasing that lock. Launch and wait are outside the lock. A paused-success test has the parent acquire and release the order while the worker is alive and waiting for its reporting acknowledgement. Late-duplicate exchange uses the same pause, but the extra packet invalidates the exchange.
 
-The supervisor waits for associated worker exit BEFORE consuming/fully validating the queued exchange, then checks for a second packet. Only complete validation and an observed successful exit can produce a normal certificate. It distinguishes SUCCESS from DOMAIN_REFUSED; UNKNOWN, cleanup faults, invalid/missing packets or unsuccessful exit cannot qualify.
+The supervisor retains its own sender endpoint (`sender_guard`) until exchange validation finishes. This is only a result-channel descriptor, not a database or lock handle. The supervisor does not send result records through that endpoint. After associated worker exit and the audited no-descendant/no-transfer preconditions, there is no remaining result writer. Keeping the endpoint open prevents EOF from masquerading as a zero-length queued record.
+
+The supervisor waits for associated worker exit BEFORE consuming/fully validating the queued exchange. It requires exactly one nonempty strict result followed by nonblocking EAGAIN. Every zero-length receive, whether an empty record or an unexpectedly closed peer, refuses. A second record of any length refuses, so the two-attempt cap cannot skip empty records and hide a later packet. Any unconsumed ancillary rights are released when the rejected exchange sockets close; delivered rights are explicitly closed. Tests observe both delivered-descriptor closure and queued pipe-writer release after an empty-record rejection.
+
+Only complete validation and an observed successful exit can produce a normal certificate. It distinguishes SUCCESS from DOMAIN_REFUSED; UNKNOWN, cleanup faults, invalid/missing packets or unsuccessful exit cannot qualify.
 
 ## Gate store and knowledge
 
@@ -40,6 +44,8 @@ Fault injection is fixed test-only phase/side/crash configuration, not a product
 
 This tests process crashes and SQLite observations on test storage, not power-loss/fsync hardware behavior, hostile same-UID isolation, immutable root exec/configuration, complete installed/inherited/open/unlinked descriptor inventory, paired restore, all-writer cooperation, manager freshness, enqueue latency, provider completion or native cgroup settlement. There is no hard bound on uninterruptible process death. Test deadlines are orchestration limits; timeout is failure/uncertainty, not a closure witness.
 
-Both Python-module and console-entrypoint pytest runs pass80 focused cases and1766 full-suite cases, with five existing fork warnings in the full run; Ruff/format and mypy171 pass. The initial CI console entrypoint exposed a collection import failure masked by Python-module invocation. The test now uses a sibling import at runtime and the repository namespace only for static typing, without adding a production path or changing protocol code.
+The current console-entrypoint serial targeted run passes100 cases (90 delivered plus10 independent review cases), and the full run passes1786 (1776 delivered plus10 independent), with five existing fork warnings; tracked Ruff/format and mypy171 pass. The independent artifact is untracked and excluded from tracked lint/type claims. Review1574's empty-record reproducer fails3 of10 cases before the fix and all10 pass afterward. Added end-to-end workers send empty records followed by late invalid, duplicate and ancillary-FD packets before actual exit; every such exchange refuses publication.
+
+The initial CI console entrypoint also exposed a collection import failure masked by Python-module invocation. The test uses a sibling import at runtime and the repository namespace only for static typing, without adding a production path.
 
 A fresh exact-head source review is required for this fixture. Even fixture source approval would not authorize a worker/service install, production authority gate, API hookup, root smoke, operational rollout or pilot activation. Ticket11 remains owned and the pilot remains disabled.
