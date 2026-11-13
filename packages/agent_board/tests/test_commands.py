@@ -499,3 +499,37 @@ def test_read_refuses_a_malformed_boundary(
     result = agent_board("read", "1", *arguments)
 
     assert result.returncode != 0, result.stdout
+
+
+def test_read_last_shows_only_the_newest_posts_and_says_older_ones_exist(
+    claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard"
+) -> None:
+    thread_id, ids = _thread_with_replies(agent_board, 4)
+
+    newest = _parsed(agent_board("read", str(thread_id), "--last", "2", "--json"), "read")
+    everything = _parsed(agent_board("read", str(thread_id), "--last", "10", "--json"), "read")
+
+    assert [post["id"] for post in newest["posts"]] == ids[-2:], "not the two newest, oldest first"
+    assert newest["older_before"] is not None
+    assert [post["id"] for post in everything["posts"]] == ids and everything["older_before"] is None
+    text = agent_board("read", str(thread_id), "--last", "2").stdout
+    assert "the newest 2 posts" in text and f"older posts exist: agent-board read {thread_id}" in text, text
+    assert f"--- post {ids[0]} " not in text, text
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param(["--last", "0"], id="zero"),
+        pytest.param(["--last", "201"], id="over-a-page"),
+        pytest.param(["--last", "5", "--after", "1"], id="with-after"),
+        pytest.param(["--last", "5", "--new"], id="with-new"),
+        pytest.param(["--last", "5", "--consumer", "c" * 32], id="with-consumer"),
+        pytest.param(["--last", "5", "--recover-after", "1"], id="with-recover-after"),
+        pytest.param(["--last", "5", "--start-after", "1"], id="with-start-after"),
+    ],
+)
+def test_read_last_refuses_bad_or_mixed_options(
+    claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard", arguments: list[str]
+) -> None:
+    assert agent_board("read", "1", *arguments).returncode != 0
