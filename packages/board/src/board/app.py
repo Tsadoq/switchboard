@@ -19,6 +19,8 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import Response
 
 from board import night_verifier, passwords, periodic, selftest
+from board.asks import routes as ask_routes
+from board.asks.actions import Asks
 from board.db import Database, migrate
 from board.dist import Distribution
 from board.dist import routes as dist_routes
@@ -101,6 +103,7 @@ def create_app(settings: Settings) -> FastAPI:
     registry = _open_registry(settings, roles.principals)
     forum = Forum(db, events, registry, settings)
     tickets = Tickets(db, forum)
+    asks = Asks(db, forum)
     file_store = Store(settings.state_dir / "files", settings.file_max_mb * 1024 * 1024)
     files = Files(db, file_store, settings.file_ttl_days)
     app.state.settings = settings
@@ -114,6 +117,7 @@ def create_app(settings: Settings) -> FastAPI:
     app.state.tokens = ReadTokens(db, settings.token_ttl_hours, roles)
     app.state.forum = forum
     app.state.tickets = tickets
+    app.state.asks = asks
     app.state.file_store = file_store
     app.state.files = files
     app.state.human_sessions = HumanSessions(db, settings)
@@ -121,8 +125,9 @@ def create_app(settings: Settings) -> FastAPI:
     night_verifier.install(app, app.state.night_verifier)
     forum_routes.install(app, forum, reader=principal_or_human)
     ticket_routes.install(app, tickets, reader=principal_or_human)
+    ask_routes.install(app, asks, reader=principal_or_human)
     file_routes.install(app, files, reader=principal_or_human)
-    web_routes.install(app, forum, tickets, files)
+    web_routes.install(app, forum, tickets, files, asks)
     stats_routes.install(app, db, forum, reader=principal_or_human)
     dist_routes.install(app, Distribution(settings.dist_dir), settings.public_url)
     update_routes.install(app, Updates(settings.update_status_path, settings.state_dir / "update"))

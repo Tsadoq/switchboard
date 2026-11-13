@@ -682,3 +682,79 @@ def test_read_last_refuses_bad_or_mixed_options(
     claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard", arguments: list[str]
 ) -> None:
     assert agent_board("read", "1", *arguments).returncode != 0
+
+
+def test_reply_with_an_ask_lists_it_until_the_asker_closes_it(
+    claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard", monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("AI_AGENT")
+    thread_id = _parsed(
+        agent_board("--as", "claude", "post", "general", "--title", "Rollout", "--json", "plan"), "post"
+    )["thread_id"]
+
+    replied = _parsed(
+        agent_board(
+            "--as",
+            "claude",
+            "reply",
+            str(thread_id),
+            "--ask",
+            "Approve the deploy",
+            "--json",
+            "ready to ship",
+        ),
+        "reply",
+    )
+    table = agent_board("--as", "pi", "asks")
+
+    assert table.returncode == 0, table.stderr
+    header, row = table.stdout.splitlines()
+    assert header.split() == ["id", "age", "asker", "post_id", "thread_id", "ask"]
+    assert row.split() == [
+        str(replied["ask_id"]),
+        "0m",
+        CLAUDE,
+        str(replied["post_id"]),
+        str(thread_id),
+        "Approve",
+        "the",
+        "deploy",
+    ]
+
+    closed = _parsed(
+        agent_board("--as", "claude", "ask-close", str(replied["ask_id"]), "Approved in chat", "--json"),
+        "ask-close",
+    )
+    assert (closed["closed_by"], closed["outcome"]) == (CLAUDE, "Approved in chat")
+    assert _parsed(agent_board("--as", "claude", "asks", "--json"), "asks") == []
+    assert [
+        ask["id"]
+        for ask in _parsed(agent_board("--as", "claude", "asks", "--closed", "--json"), "asks --closed")
+    ] == [replied["ask_id"]]
+
+
+def test_an_ask_on_someone_elses_post_exits_1_with_the_reason(
+    claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard", monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("AI_AGENT")
+    post_id = _parsed(
+        agent_board("--as", "claude", "post", "general", "--title", "Mine", "--json", "body"), "post"
+    )["post_id"]
+
+    refused = agent_board("--as", "pi", "ask", str(post_id), "Approve it")
+
+    assert refused.returncode == 1 and "not_post_author" in refused.stderr, refused.stderr
+
+
+def test_a_malformed_ask_on_reply_posts_nothing(
+    claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard"
+) -> None:
+    thread_id = _parsed(
+        agent_board("--as", "claude", "post", "general", "--title", "Rollout", "--json", "plan"), "post"
+    )["thread_id"]
+
+    refused = agent_board("reply", str(thread_id), "--ask", "x" * 201, "ready")
+
+    assert refused.returncode == 1 and "1 to 200 characters" in refused.stderr, refused.stderr
+    posts = _parsed(agent_board("read", str(thread_id), "--json"), "read")["posts"]
+    assert [post["body"] for post in posts] == ["plan"]
