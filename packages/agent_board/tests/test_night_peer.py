@@ -4,6 +4,7 @@ import socket
 import subprocess
 import sys
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from agent_board.night.peer import (
@@ -22,13 +23,6 @@ SEND_AND_WAIT = (
     "sys.stdin.read()\n"
 )
 SEND_AND_EXIT = "import socket, sys\nsocket.socket(fileno=int(sys.argv[1])).send(b'frame')\n"
-SEND_WITH_RIGHTS = (
-    "import array, os, socket, sys\n"
-    "s = socket.socket(fileno=int(sys.argv[1]))\n"
-    "r, w = os.pipe()\n"
-    "s.sendmsg([b'frame'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array('i', [r]).tobytes())])\n"
-    "sys.stdin.read()\n"
-)
 RECEIVE_TRANSFERRED_THEN_SEND = (
     "import array, socket, sys\n"
     "carrier = socket.socket(fileno=int(sys.argv[1]))\n"
@@ -149,19 +143,32 @@ def test_a_transferred_socket_authenticates_whoever_sends_on_it(
         _finish(outsider)
 
 
-def test_a_frame_carrying_descriptors_is_refused_and_they_are_closed(
-    pair: tuple[socket.socket, socket.socket],
-) -> None:
-    receiver, sender = pair
-    enable_peer_credentials(receiver)
-    process = _spawn(SEND_WITH_RIGHTS, sender.fileno())
-    before = _open_fds()
-    try:
-        with pytest.raises(PeerRefused, match="unexpected_ancillary_data"):
-            _receive(receiver)
-        assert _open_fds() == before, "a refused frame leaked a received descriptor"
-    finally:
-        _finish(process)
+def _refusal_probe(leak: str, close_unrelated: bool) -> subprocess.CompletedProcess[str]:
+    arguments = [
+        sys.executable,
+        "-I",
+        str(Path(__file__).with_name("night_peer_refusal_fixture.py")),
+        "--leak",
+        leak,
+    ]
+    if close_unrelated:
+        arguments.append("--close-unrelated")
+    return subprocess.run(arguments, capture_output=True, text=True, timeout=20, check=False)
+
+
+@pytest.mark.parametrize("close_unrelated", [False, True])
+def test_a_frame_carrying_descriptors_is_refused_and_they_are_closed(close_unrelated: bool) -> None:
+    result = _refusal_probe("none", close_unrelated)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"proof_ok removed={2 if close_unrelated else 0}" in result.stdout
+
+
+@pytest.mark.parametrize("close_unrelated", [False, True])
+@pytest.mark.parametrize("leak", ["rights", "pidfd"])
+def test_the_refusal_probe_detects_actual_received_descriptor_leaks(leak: str, close_unrelated: bool) -> None:
+    result = _refusal_probe(leak, close_unrelated)
+    expected = "received_rights_not_closed" if leak == "rights" else "received_descriptor_not_closed"
+    assert result.returncode != 0 and expected in result.stderr, result.stdout + result.stderr
 
 
 def test_an_oversized_frame_is_refused_as_truncated(pair: tuple[socket.socket, socket.socket]) -> None:
