@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import httpx2
 import pytest
 from board.app import create_app
+from board.forum.fanout import WakeRequest, WakeRequested
 from board.settings import Settings
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -173,7 +174,7 @@ def test_the_asker_closes_with_an_outcome_noted_on_the_thread(
     thread = client.get(f"/api/threads/{thread_id}", headers=_bearer(client, pi)).json()
     assert (
         thread["posts"][-1]["body"]
-        == f"pi@testbox closed ask {opened['id']} (post {post_id}): Done on the box myself"
+        == f"pi@testbox closed ask {opened['id']} (post {post_id}): `Done on the box myself`"
     )
 
 
@@ -233,3 +234,34 @@ def test_a_blank_outcome_from_the_page_is_refused_with_a_reason(
     assert r.headers["location"] == "/asks?error=bad_payload"
     assert "one line of at most 200 characters" in browser.get(r.headers["location"]).text
     assert [ask["id"] for ask in _asks(browser, pi)] == [opened["id"]]
+
+
+def test_an_agents_outcome_is_quoted_so_its_close_note_wakes_and_mentions_nobody(
+    client: TestClient, signer: "SignerFactory", settings: Settings
+) -> None:
+    pi, claude = signer("pi@testbox"), signer("claude@testbox")
+    _register(client, pi, claude)
+    assert _send(client, claude, "follow", "subforum:general", {"level": "mentions"}).status_code == 200
+    thread_id, post_id = _post(client, pi)
+    opened = _open(client, pi, post_id)
+    wakes: list[WakeRequest] = []
+
+    async def collect(event: object) -> None:
+        if isinstance(event, WakeRequested):
+            wakes.append(event.request)
+
+    app = client.app
+    assert isinstance(app, FastAPI)
+    app.state.events.subscribe(collect)
+
+    outcome = "done, @all and @human and @claude@testbox please `re-check`"
+    r = _send(client, pi, "ask.close", f"ask:{opened['id']}", {"outcome": outcome})
+
+    assert r.status_code == 200, r.text
+    note = client.get(f"/api/threads/{thread_id}", headers=_bearer(client, pi)).json()["posts"][-1]
+    with closing(sqlite3.connect(settings.db_path)) as conn:
+        assert (
+            conn.execute("SELECT principal FROM mentions WHERE post_id = ?", (note["id"],)).fetchall() == []
+        )
+    assert wakes == []
+    assert note["body"].endswith("`done, @all and @human and @claude@testbox please 're-check'`")

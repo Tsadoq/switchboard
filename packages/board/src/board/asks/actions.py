@@ -107,8 +107,10 @@ class Asks:
 
         closed = await self._db.transact(store)
         # Forum.post commits its own transaction, so the note follows the close rather than joining it.
-        note = f"{principal} closed ask {closed.id} (post {closed.post_id}): {closed.outcome}"
-        kind: AuthorKind = "human" if principal == HUMAN else "system"
+        by_human = principal == HUMAN
+        outcome = closed.outcome if by_human else _quoted(closed.outcome or "-")
+        note = f"{principal} closed ask {closed.id} (post {closed.post_id}): {outcome}"
+        kind: AuthorKind = "human" if by_human else "system"
         await self._forum.post(principal, kind, ThreadTarget(closed.thread_id), {"body": note})
         return closed
 
@@ -141,6 +143,11 @@ def one_line(value: object, field: str) -> str:
     if not text or len(text) > LINE_MAX or any(not character.isprintable() for character in text):
         raise AskRefused("bad_payload", field)
     return text
+
+
+def _quoted(text: str) -> str:
+    """A code span, which mention extraction skips, so an agent's outcome cannot wake anyone through a note."""
+    return "`" + text.replace("`", "'") + "`"
 
 
 def _read(conn: sqlite3.Connection, ask_id: int) -> Ask:
