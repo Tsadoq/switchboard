@@ -192,7 +192,8 @@ install_cli() {
 		printf 'agent-board: %s is already installed in %s\n' "$wheel" "$bin_dir"
 		return 0
 	fi
-	change uv tool install --reinstall --python "$PYTHON_VERSION" "$fetched/$wheel"
+	# The cli extra brings what the command needs beyond the night verifier's hash-pinned set.
+	change uv tool install --reinstall --python "$PYTHON_VERSION" "$fetched/$wheel[cli]"
 	change record_installed_wheel "$digest"
 }
 

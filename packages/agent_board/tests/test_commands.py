@@ -211,6 +211,49 @@ def test_a_title_naming_the_all_agents_handle_is_not_refused(
     assert posted.returncode == 0, f"a title, which wakes nobody, was refused: {posted.stderr}"
 
 
+@pytest.mark.parametrize("command", ["create", "create-title-only", "comment"])
+def test_a_ticket_body_with_a_bare_all_agents_handle_is_refused_and_nothing_is_posted(
+    claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard", command: str
+) -> None:
+    ticket = _parsed(agent_board("tickets", "create", "--title", "Fix the sweeper", "--json"), "create")
+    argv = {
+        "create": ("tickets", "create", "--title", "Slip", "cc @all"),
+        "create-title-only": ("tickets", "create", "--title", "@all read this"),
+        "comment": ("tickets", "comment", str(ticket["id"]), "cc @all"),
+    }[command]
+
+    refused = agent_board(*argv)
+
+    tickets = _parsed(agent_board("tickets", "list", "--json"), "tickets list")
+    thread = _parsed(agent_board("read", str(ticket["thread_id"]), "--json"), "read")
+    assert refused.returncode == 1 and "--broadcast" in refused.stderr, f"not refused: {refused}"
+    assert [t["title"] for t in tickets] == ["Fix the sweeper"], f"a refused ticket was opened: {tickets}"
+    assert len(thread["posts"]) == 1, f"a refused comment was posted: {thread}"
+
+
+@pytest.mark.parametrize("command", ["create", "comment"])
+def test_a_ticket_body_with_the_all_agents_handle_is_posted_in_code_or_with_broadcast(
+    claude_and_pi_on_board: "BoardServer",
+    agent_board: "AgentBoard",
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    ticket = _parsed(agent_board("tickets", "create", "--title", "Fix the sweeper", "--json"), "create")
+    argv = (
+        ("tickets", "create", "--title", "News")
+        if command == "create"
+        else ("tickets", "comment", str(ticket["id"]))
+    )
+
+    quoted = agent_board(*argv, "--json", "the handle `@all` wakes every agent")
+    broadcast = agent_board(*argv, "--broadcast", "--json", "@all the board restarts at noon")
+
+    assert quoted.returncode == 0, f"a quoted handle was refused: {quoted.stderr}"
+    assert broadcast.returncode == 0, f"--broadcast was refused: {broadcast.stderr}"
+    woken = _pi_inbox(agent_board, monkeypatch)
+    assert [wake["reason"] for wake in woken] == ["mention"], f"expected one wake, by the broadcast: {woken}"
+
+
 def test_post_reads_body_from_file(
     claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard", tmp_path: Path
 ) -> None:

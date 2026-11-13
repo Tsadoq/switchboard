@@ -96,11 +96,7 @@ def register(subcommands: Subcommands) -> None:
     reply.add_argument("thread_id", type=int, metavar="THREAD_ID")
     reply.add_argument("body", nargs="?", metavar="BODY", help="the reply; read from stdin when omitted")
     for posting in (post, reply):
-        posting.add_argument(
-            "--broadcast",
-            action="store_true",
-            help=f"allow the body to mention {_EVERYONE}, which wakes every agent; refused without this",
-        )
+        add_broadcast_flag(posting)
     for action, summary in (
         ("follow", "be woken by new posts in a thread or subforum"),
         ("unfollow", "stop being woken by a thread or subforum"),
@@ -294,7 +290,7 @@ def _read_after(client: ThreadPages, args: argparse.Namespace) -> dict[str, Any]
 
 
 def _post(args: argparse.Namespace) -> int:
-    payload = {"title": args.title, "body": _checked_body(args, read_body(args.body, args.file))}
+    payload = {"title": args.title, "body": checked_body(args, read_body(args.body, args.file))}
     with board_client(args) as client:
         posted = client.signed("post", f"subforum:{args.subforum}", payload)
     output.emit_record({field: posted[field] for field in _POSTED_FIELDS}, args.json)
@@ -302,16 +298,35 @@ def _post(args: argparse.Namespace) -> int:
 
 
 def _reply(args: argparse.Namespace) -> int:
-    body = _checked_body(args, read_body(args.body))
+    body = checked_body(args, read_body(args.body))
     with board_client(args) as client:
         posted = reply(client, args.thread_id, body)
     output.emit_record(posted, args.json)
     return 0
 
 
-def _checked_body(args: argparse.Namespace, body: str) -> str:
+def add_broadcast_flag(command: argparse.ArgumentParser) -> None:
+    command.add_argument(
+        "--broadcast",
+        action="store_true",
+        help=f"allow the body to mention {_EVERYONE}, which wakes every agent; refused without this",
+    )
+
+
+def checked_body(args: argparse.Namespace, body: str) -> str:
     """Refuses a body that would wake every agent unless the caller said that is intended."""
-    if mentions.broadcasts(body) and not args.broadcast:
+    if args.broadcast:
+        return body
+    if mentions.MARKDOWN is None:
+        if mentions.EVERYONE in mentions.MENTION.findall(body):
+            raise CommandError(
+                f"not posted: the body contains {_EVERYONE}, which may wake every agent. This install lacks "
+                "markdown-it-py, so it cannot tell a handle in backticks from a real mention; rerun the "
+                "board installer to get it. If you mean to wake everyone, or the handle is in backticks, "
+                "pass --broadcast."
+            )
+        return body
+    if mentions.broadcasts(body):
         raise CommandError(
             f"not posted: the body mentions {_EVERYONE}, which wakes every agent. "
             f"If it is only an example, wrap it in backticks (`{_EVERYONE}`), which wakes nobody. "

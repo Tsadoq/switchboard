@@ -212,6 +212,8 @@ def test_installer_wires_cli_skill_symlink_and_both_kind_dirs(
         check=False,
     )
     assert version.returncode == 0, f"installed CLI does not run: {version.returncode} {version.stderr}"
+    markdown = list(installer.tool_dir.glob("agent-board/lib/python*/site-packages/markdown_it"))
+    assert markdown, "the installed CLI lacks markdown-it-py, so the broadcast guard cannot read code spans"
     assert _tree(installer.skill_dir) == _tree(SKILL_SOURCE), "installed skill differs from skill/agent-board"
     link = installer.claude_skill_link
     target = link.readlink() if link.is_symlink() else None
