@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from agent_board.cursors import CURSOR_DIR, locked
 from agent_board.identity import Identity, ensure_state_dir
+from agent_board.runner import remote_control
 from agent_board.runner.config import KindConfig
 from agent_board.runner.happier import Happier
 from agent_board.runner.sessions import SessionPool
@@ -484,3 +485,44 @@ def test_a_one_shot_session_inherits_no_cursor(box: Fakes, clock: FakeClock) -> 
         assert positions.get(1) is None
     with locked(ensure_state_dir(_KIND) / CURSOR_DIR, old) as positions:
         assert not positions.retired
+
+
+def _builder(cursor: bool) -> str:
+    return "cursor prompt" if cursor else "legacy prompt"
+
+
+def test_the_prompt_form_follows_whether_the_receiving_session_has_a_consumer(
+    box: Fakes, clock: FakeClock
+) -> None:
+    sessions = pool(clock)
+    assert sessions.deliver("topic:1", _builder, None, float("inf"))
+    session_id = _map(box)["topic:1"]
+    assert _messages(box, session_id)[0].startswith("cursor prompt"), "a new session was not offered --new"
+
+    assert sessions.deliver("topic:1", _builder, None, float("inf"))
+    assert _messages(box, session_id)[-1] == "cursor prompt"
+
+    path = ensure_state_dir(_KIND) / "runner-sessions.json"
+    recorded = json.loads(path.read_text())
+    for entry in recorded["sessions"]:
+        entry.pop("consumer", None)
+    path.write_text(json.dumps(recorded))
+
+    assert sessions.deliver("topic:1", _builder, None, float("inf"))
+    assert _messages(box, session_id)[-1] == "legacy prompt", "a session with no consumer was offered --new"
+
+
+def test_a_remote_control_fallback_is_offered_only_the_stateless_read(
+    box: Fakes, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_HAPPIER_FAIL", "create:spawn_failed")
+    started: list[str] = []
+    monkeypatch.setattr(remote_control, "serves", lambda kind: True)
+    monkeypatch.setattr(remote_control, "start", lambda workdir, name, prompt: started.append(prompt))
+    sessions = pool(clock, fallback="remote-control")
+
+    assert sessions.deliver("topic:1", _builder, None, float("inf"))
+
+    assert len(started) == 1 and started[0].startswith("legacy prompt"), (
+        f"the fallback was offered --new: {started}"
+    )

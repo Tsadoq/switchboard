@@ -58,18 +58,23 @@ type InboxPrincipal = Literal["me", "human"]
 type Deliver = Callable[[list[Wake]], Iterator[list[int | None]]]
 
 
-def prompt_for(wakes: Sequence[Wake]) -> str:
+def prompt_for(wakes: Sequence[Wake], cursor: bool = True) -> str:
+    """The wake prompt; `cursor` says whether the receiving session has a read cursor of its own.
+
+    A session the runner opened before it gave sessions a consumer id cannot use `--new`, so it is offered
+    the stateless `--after` read instead of a command that would refuse on every wake.
+    """
     summaries = "; ".join(_summaries(wakes))
     first = first_new_posts(wakes)
     sentences = [f"You were woken by the agent board: {summaries}.", _ALREADY_ACKED]
     if first:
+        form = "--new --start-after" if cursor else "--after"
         commands = "; ".join(
-            f"`agent-board read {thread} --new --start-after {post - 1}`"
-            for thread, post in sorted(first.items())
+            f"`agent-board read {thread} {form} {post - 1}`" for thread, post in sorted(first.items())
         )
+        fallback = "If `--new` refuses, use `--after` with the same post number instead. " if cursor else ""
         sentences.append(
-            f"Read only the posts that woke you and anything newer: {commands}. "
-            "If `--new` refuses, use `--after` with the same post number instead. "
+            f"Read only the posts that woke you and anything newer: {commands}. {fallback}"
             "For a thread named above without such a command, use `agent-board read <id>`."
         )
         sentences.append(_ANSWER_RULES)
@@ -256,7 +261,7 @@ class _AgentWaker:
         try:
             delivered = self._sessions.deliver(
                 key,
-                prompt_for(group),
+                lambda cursor: prompt_for(group, cursor),
                 model_for(group, self._settings.models),
                 wall_clock_deadline,
                 on_sent=self._on_sent(group),

@@ -70,12 +70,15 @@ class SessionPool:
     def deliver(
         self,
         key: str | None,
-        prompt: str,
+        prompt: str | Callable[[bool], str],
         model: str | None,
         deadline: float,
         on_sent: Callable[[str], None] | None = None,
     ) -> bool:
         """Send `prompt` into the session for `key`, opening one if needed, and pass its id to `on_sent`.
+
+        A callable prompt is told whether the receiving session has a read cursor: an existing session only if the
+        runner recorded a consumer for it, a newly opened one always.
 
         False means the wakes should stay leased: the session is busy, the cap is reached with no idle
         session to evict, or evicting one ran past `deadline` (on the `clock` timebase).
@@ -92,7 +95,7 @@ class SessionPool:
                             current.session_id,
                         )
                         return False
-                    self._happier.send(current.session_id, prompt, model)
+                    self._happier.send(current.session_id, _text(prompt, current.consumer is not None), model)
                     current.last_delivery = self._clock()
                     if on_sent is not None:
                         on_sent(current.session_id)
@@ -115,7 +118,7 @@ class SessionPool:
                     return False
                 if self._clock() > deadline:
                     return False
-            opened = self._open_or_fall_back(entries, key, _with_rebuild_context(key, prompt), model)
+            opened = self._open_or_fall_back(entries, key, prompt, model)
             if opened is not None and on_sent is not None:
                 on_sent(opened.id)
             return True
@@ -149,10 +152,11 @@ class SessionPool:
             return self._open(entries, key, prompt, None)
 
     def _open_or_fall_back(
-        self, entries: list[_Entry], key: str | None, prompt: str, model: str | None
+        self, entries: list[_Entry], key: str | None, prompt: str | Callable[[bool], str], model: str | None
     ) -> Session | None:
+        """A new runner session gets a consumer, so it is offered --new; a Remote Control fallback has none."""
         try:
-            return self._open(entries, key, prompt, model)
+            return self._open(entries, key, _with_rebuild_context(key, _text(prompt, True)), model)
         except HappierError as error:
             fallback_allowed = model is None and self._settings.fallback == REMOTE_CONTROL
             if not fallback_allowed or not remote_control.serves(self._me.kind):
@@ -160,7 +164,11 @@ class SessionPool:
             logger.warning(
                 "%s: create failed (%s); falling back to remote control", self._me.principal, error
             )
-            remote_control.start(self._settings.workdir, f"board-{self._me.kind}", prompt)
+            remote_control.start(
+                self._settings.workdir,
+                f"board-{self._me.kind}",
+                _with_rebuild_context(key, _text(prompt, False)),
+            )
             return None
 
     def _open(self, entries: list[_Entry], key: str | None, prompt: str, model: str | None) -> Session:
@@ -314,6 +322,10 @@ class SessionPool:
             f"{self._me.principal}: the session map {path} was unreadable and was moved to {set_aside.name}; "
             "sessions it recorded are no longer tracked",
         )
+
+
+def _text(prompt: str | Callable[[bool], str], cursor: bool) -> str:
+    return prompt if isinstance(prompt, str) else prompt(cursor)
 
 
 def topic_key(topic: int | str) -> str:
