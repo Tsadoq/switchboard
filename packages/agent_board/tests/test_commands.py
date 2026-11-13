@@ -105,6 +105,155 @@ def test_reply_appends_to_thread(claude_and_pi_on_board: "BoardServer", agent_bo
     assert bodies == ["opening", "a reply from stdin\n"], f"reply not appended: {bodies}"
 
 
+def _pi_inbox(agent_board: "AgentBoard", monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    monkeypatch.delenv("AI_AGENT")
+    inbox: list[dict[str, Any]] = _parsed(agent_board("--as", "pi", "inbox", "--json"), "inbox")
+    return inbox
+
+
+@pytest.mark.parametrize("command", ["post", "reply"])
+def test_a_bare_all_agents_handle_is_refused_and_nothing_is_posted(
+    claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard", command: str
+) -> None:
+    opened = _parsed(agent_board("post", "general", "--title", "Plan", "--json", "opening"), "post")
+    body = 'the earlier post said "@all please read", which woke everyone'
+    argv = (
+        ("post", "general", "--title", "Slip") if command == "post" else ("reply", str(opened["thread_id"]))
+    )
+
+    refused = agent_board(*argv, body)
+
+    threads = _parsed(agent_board("threads", "general", "--json"), "threads")
+    thread = _parsed(agent_board("read", str(opened["thread_id"]), "--json"), "read")
+    assert refused.returncode == 1, f"a bare all-agents handle was not refused: {refused}"
+    assert refused.stdout == "", f"a refusal printed a result: {refused.stdout}"
+    assert [t["title"] for t in threads] == ["Plan"], f"a refused post opened a thread: {threads}"
+    assert [p["body"] for p in thread["posts"]] == ["opening"], f"a refused reply was posted: {thread}"
+
+
+def test_the_refusal_names_the_handle_and_both_ways_out(
+    claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard"
+) -> None:
+    refused = agent_board("post", "general", "--title", "Slip", "cc @all")
+
+    assert refused.stderr == (
+        "agent-board: not posted: the body mentions @all, which wakes every agent. "
+        "If it is only an example, wrap it in backticks (`@all`), which wakes nobody. "
+        "If you mean to wake everyone, pass --broadcast.\n"
+    ), f"unexpected refusal text: {refused.stderr!r}"
+
+
+@pytest.mark.parametrize("source", ["argument", "stdin", "file"])
+def test_the_all_agents_handle_is_refused_however_the_body_arrives(
+    claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard", tmp_path: Path, source: str
+) -> None:
+    draft = tmp_path / "draft.md"
+    draft.write_text("@all read this\n")
+    if source == "argument":
+        refused = agent_board("post", "general", "--title", "Slip", "@all read this")
+    elif source == "stdin":
+        refused = agent_board("post", "general", "--title", "Slip", "-", stdin="@all read this\n")
+    else:
+        refused = agent_board("post", "general", "--title", "Slip", "--file", str(draft))
+
+    assert refused.returncode == 1 and "--broadcast" in refused.stderr, (
+        f"not refused from {source}: {refused}"
+    )
+
+
+@pytest.mark.parametrize("command", ["post", "reply"])
+def test_the_all_agents_handle_inside_code_is_posted_without_the_flag(
+    claude_and_pi_on_board: "BoardServer",
+    agent_board: "AgentBoard",
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    opened = _parsed(agent_board("post", "general", "--title", "Plan", "--json", "opening"), "post")
+    body = "the handle `@all` wakes every agent:\n\n```\n@all please read\n```\n"
+    argv = (
+        ("post", "general", "--title", "Note") if command == "post" else ("reply", str(opened["thread_id"]))
+    )
+
+    posted = _parsed(agent_board(*argv, "--json", body), command)
+
+    thread = _parsed(agent_board("read", str(posted["thread_id"]), "--json"), "read")
+    assert thread["posts"][-1]["body"] == body, f"a quoted handle was not posted as written: {thread}"
+    assert _pi_inbox(agent_board, monkeypatch) == [], "a quoted handle woke another agent"
+
+
+@pytest.mark.parametrize("command", ["post", "reply"])
+def test_broadcast_posts_the_all_agents_handle(
+    claude_and_pi_on_board: "BoardServer",
+    agent_board: "AgentBoard",
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    opened = _parsed(agent_board("post", "general", "--title", "Plan", "--json", "opening"), "post")
+    argv = (
+        ("post", "general", "--title", "News") if command == "post" else ("reply", str(opened["thread_id"]))
+    )
+
+    posted = _parsed(agent_board(*argv, "--broadcast", "--json", "@all the board restarts at noon"), command)
+
+    thread = _parsed(agent_board("read", str(posted["thread_id"]), "--json"), "read")
+    assert thread["posts"][-1]["body"] == "@all the board restarts at noon", f"broadcast not posted: {thread}"
+    woken = _pi_inbox(agent_board, monkeypatch)
+    assert [wake["reason"] for wake in woken] == ["mention"], f"broadcast did not wake pi: {woken}"
+
+
+def test_a_title_naming_the_all_agents_handle_is_not_refused(
+    claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard"
+) -> None:
+    posted = agent_board(
+        "post", "general", "--title", "Stop @all slips", "--json", "the board reads only bodies"
+    )
+
+    assert posted.returncode == 0, f"a title, which wakes nobody, was refused: {posted.stderr}"
+
+
+@pytest.mark.parametrize("command", ["create", "create-title-only", "comment"])
+def test_a_ticket_body_with_a_bare_all_agents_handle_is_refused_and_nothing_is_posted(
+    claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard", command: str
+) -> None:
+    ticket = _parsed(agent_board("tickets", "create", "--title", "Fix the sweeper", "--json"), "create")
+    argv = {
+        "create": ("tickets", "create", "--title", "Slip", "cc @all"),
+        "create-title-only": ("tickets", "create", "--title", "@all read this"),
+        "comment": ("tickets", "comment", str(ticket["id"]), "cc @all"),
+    }[command]
+
+    refused = agent_board(*argv)
+
+    tickets = _parsed(agent_board("tickets", "list", "--json"), "tickets list")
+    thread = _parsed(agent_board("read", str(ticket["thread_id"]), "--json"), "read")
+    assert refused.returncode == 1 and "--broadcast" in refused.stderr, f"not refused: {refused}"
+    assert [t["title"] for t in tickets] == ["Fix the sweeper"], f"a refused ticket was opened: {tickets}"
+    assert len(thread["posts"]) == 1, f"a refused comment was posted: {thread}"
+
+
+@pytest.mark.parametrize("command", ["create", "comment"])
+def test_a_ticket_body_with_the_all_agents_handle_is_posted_in_code_or_with_broadcast(
+    claude_and_pi_on_board: "BoardServer",
+    agent_board: "AgentBoard",
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    ticket = _parsed(agent_board("tickets", "create", "--title", "Fix the sweeper", "--json"), "create")
+    argv = (
+        ("tickets", "create", "--title", "News")
+        if command == "create"
+        else ("tickets", "comment", str(ticket["id"]))
+    )
+
+    quoted = agent_board(*argv, "--json", "the handle `@all` wakes every agent")
+    broadcast = agent_board(*argv, "--broadcast", "--json", "@all the board restarts at noon")
+
+    assert quoted.returncode == 0, f"a quoted handle was refused: {quoted.stderr}"
+    assert broadcast.returncode == 0, f"--broadcast was refused: {broadcast.stderr}"
+    woken = _pi_inbox(agent_board, monkeypatch)
+    assert [wake["reason"] for wake in woken] == ["mention"], f"expected one wake, by the broadcast: {woken}"
+
+
 def test_post_reads_body_from_file(
     claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard", tmp_path: Path
 ) -> None:

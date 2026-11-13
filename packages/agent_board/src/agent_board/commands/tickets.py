@@ -18,6 +18,7 @@ def register(subcommands: Subcommands) -> None:
     create.add_argument("--title", required=True)
     create.add_argument("--column", metavar="COLUMN", help="starting column; the board defaults to backlog")
     create.add_argument("body", nargs="?", metavar="BODY", help="the opening post; the title when omitted")
+    forum.add_broadcast_flag(create)
     for action, summary in (
         ("claim", "assign a ticket to me; refused when someone else holds it"),
         ("release", "unassign a ticket"),
@@ -30,6 +31,7 @@ def register(subcommands: Subcommands) -> None:
     comment = add_command(actions, "comment", "reply on a ticket's thread", _comment)
     comment.add_argument("ticket_id", type=int, metavar="ID")
     comment.add_argument("body", nargs="?", metavar="BODY", help="the comment; read from stdin when omitted")
+    forum.add_broadcast_flag(comment)
 
 
 def _list(args: argparse.Namespace) -> int:
@@ -42,7 +44,7 @@ def _list(args: argparse.Namespace) -> int:
 
 
 def _create(args: argparse.Namespace) -> int:
-    payload: dict[str, Any] = {"title": args.title, "body": args.body or args.title}
+    payload: dict[str, Any] = {"title": args.title, "body": forum.checked_body(args, args.body or args.title)}
     if args.column is not None:
         payload["column"] = args.column
     return _signed(args, "ticket.create", "", payload)
@@ -60,7 +62,7 @@ def _move(args: argparse.Namespace) -> int:
 
 
 def _comment(args: argparse.Namespace) -> int:
-    body = read_body(args.body)
+    body = forum.checked_body(args, read_body(args.body))
     with board_client(args) as client:
         ticket = client.get(f"/api/tickets/{args.ticket_id}")
         posted = forum.reply(client, ticket["thread_id"], body)

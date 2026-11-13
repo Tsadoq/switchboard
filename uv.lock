@@ -22,11 +22,18 @@ dependencies = [
     { name = "rfc8785" },
 ]
 
+[package.optional-dependencies]
+cli = [
+    { name = "markdown-it-py" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.28.1,<0.29" },
+    { name = "markdown-it-py", marker = "extra == 'cli'", specifier = ">=4,<5" },
     { name = "rfc8785", specifier = ">=0.1.4,<0.2" },
 ]
+provides-extras = ["cli"]
 
 [[package]]
 name = "agent-board-workspace"

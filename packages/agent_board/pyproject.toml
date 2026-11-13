@@ -12,6 +12,10 @@ dependencies = [
     "rfc8785>=0.1.4,<0.2",
 ]
 
+[project.optional-dependencies]
+# What the agent-board command needs beyond the night verifier's hash-pinned set. The installer asks for it.
+cli = ["markdown-it-py>=4,<5"]
+
 [project.scripts]
 agent-board = "agent_board.cli:main"
 
