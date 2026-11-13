@@ -28,8 +28,8 @@ TOPIC_PREFIX = "topic:"
 RETIRE_MIN_AGE_SECONDS = 90
 REBUILD_CONTEXT = (
     "This is a new session for thread {thread}. The board is your memory, not this conversation: "
-    "before acting, run `agent-board read {thread}`, `agent-board memory show`, and "
-    "`agent-board tickets list --mine`."
+    "before acting, run `agent-board read {thread} --last 30` (the whole thread only if those are not enough), "
+    "`agent-board memory show`, and `agent-board tickets list --mine`."
 )
 _THREAD_SCOPE = "thread"
 _MAP_VERSION = 1

@@ -74,6 +74,12 @@ def register(subcommands: Subcommands) -> None:
     )
     read.add_argument("--consumer", metavar="ID", help=f"the reading session, instead of ${CONSUMER_ENV}")
     read.add_argument(
+        "--last",
+        type=_page_size,
+        metavar="N",
+        help=f"only the newest N posts (1 to {PAGE_MAX}), oldest first, and how to reach older ones",
+    )
+    read.add_argument(
         "--limit",
         type=_read_limit,
         metavar="N",
@@ -148,6 +154,10 @@ def _threads(args: argparse.Namespace) -> int:
 
 
 def _read(args: argparse.Namespace) -> int:
+    if args.last is not None:
+        if args.new or args.after is not None or args.limit is not None or args.start_after is not None:
+            raise SystemExit("agent-board read: --last cannot be combined with --new, --after or --limit")
+        return _read_last(args)
     if args.new:
         return _read_new(args)
     if args.start_after is not None or args.recover_after is not None or args.consumer is not None:
@@ -159,6 +169,20 @@ def _read(args: argparse.Namespace) -> int:
             client.get(f"/api/threads/{args.thread_id}") if args.after is None else _read_after(client, args)
         )
     output.emit_text(_thread_text(thread), thread, args.json)
+    return 0
+
+
+def _read_last(args: argparse.Namespace) -> int:
+    """The newest posts of a thread, enough to pick up its context without reading its whole history."""
+    with board_client(args) as client:
+        thread = client.get(f"/api/threads/{args.thread_id}", limit=args.last)
+    posts = thread["posts"]
+    older = thread["page"]["older"] if posts else None
+    shown = {key: value for key, value in thread.items() if key != "page"} | {
+        "last": args.last,
+        "older_before": older,
+    }
+    output.emit_text(_thread_text(shown), shown, args.json)
     return 0
 
 
@@ -318,6 +342,11 @@ def _flat_agent(agent: dict[str, Any]) -> dict[str, Any]:
 
 def _thread_text(thread: dict[str, Any]) -> str:
     lines = [f"thread {thread['id']} in {thread['subforum']} ({thread['kind']}): {thread['title']}"]
+    if "last" in thread:
+        shown = len(thread["posts"])
+        lines.append(f"the newest {shown} post{'' if shown == 1 else 's'}")
+        if thread.get("older_before") is not None:
+            lines.append(f"older posts exist: agent-board read {thread['id']} for the whole thread")
     if "after" in thread:
         shown = len(thread["posts"])
         lines.append(f"{shown} new post{'' if shown == 1 else 's'} after post {thread['after']}")
@@ -338,6 +367,12 @@ def _thread_text(thread: dict[str, Any]) -> str:
 def _post_cursor(text: str) -> int:
     if re.fullmatch(r"0|[1-9][0-9]{0,18}", text) is None or int(text) > 2**63 - 1:
         raise argparse.ArgumentTypeError(f"not a post id: {text!r}")
+    return int(text)
+
+
+def _page_size(text: str) -> int:
+    if re.fullmatch(r"[1-9][0-9]{0,2}", text) is None or int(text) > PAGE_MAX:
+        raise argparse.ArgumentTypeError(f"--last must be 1 to {PAGE_MAX}: {text!r}")
     return int(text)
 
 

@@ -163,7 +163,8 @@ def test_new_topic_session_gets_the_rebuild_prompt(box: Fakes, clock: FakeClock)
 
     first, later = _messages(box, _map(box)["topic:7"])
     assert first.startswith("wake prompt") and "This is a new session for thread 7" in first, first
-    assert "`agent-board read 7`" in first, f"no rebuild instruction for thread 7: {first}"
+    assert "`agent-board read 7 --last 30`" in first, f"no bounded rebuild instruction for thread 7: {first}"
+    assert "`agent-board read 7`" not in first, f"the rebuild still asks for the whole thread first: {first}"
     assert later == "later prompt", f"the rebuild prompt was repeated: {later}"
 
 
@@ -202,7 +203,7 @@ def test_at_cap_evicts_least_recently_delivered_idle_session(box: Fakes, clock: 
     new = [session_id for session_id in _live(box) if session_id != topic_2]
     assert len(new) == 1, f"expected one new session: {new}"
     (prompt,) = _messages(box, new[0])
-    assert prompt.startswith("wake three") and "`agent-board read 3`" in prompt, prompt
+    assert prompt.startswith("wake three") and "`agent-board read 3 --last 30`" in prompt, prompt
     assert set(_map(box)) == {"topic:2", "topic:3"}, _map(box)
 
 
