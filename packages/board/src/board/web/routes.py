@@ -1,4 +1,5 @@
 import hashlib
+import time
 from collections.abc import AsyncIterator, Awaitable
 from typing import Annotated, Any, TypedDict
 from urllib.parse import urlencode
@@ -8,6 +9,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
 
+from board.asks.actions import AskRefused, Asks
 from board.constants import HUMAN
 from board.files import Declaration, FileEntry, Files
 from board.forum.actions import Forum, Refused
@@ -37,13 +39,14 @@ _TICKET_REFUSALS = {
 }
 
 
-def install(app: FastAPI, forum: Forum, tickets: Tickets, files: Files) -> None:
+def install(app: FastAPI, forum: Forum, tickets: Tickets, files: Files, asks: Asks) -> None:
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     app.include_router(_login_pages())
     app.include_router(_forum_pages(forum, tickets, files))
     app.include_router(_ticket_pages(tickets))
     app.include_router(_file_pages(files))
     app.include_router(_agent_pages(forum))
+    app.include_router(_ask_pages(asks))
     app.exception_handler(LoginRequired)(_to_login)
     app.exception_handler(CrossSite)(_cross_site)
 
@@ -364,6 +367,38 @@ def _ticket_pages(tickets: Tickets) -> APIRouter:
     @router.post("/{ticket_id}/move")
     async def move(ticket_id: int, column: Annotated[str, Form()]) -> Response:
         return await _back_to_board(tickets.move(HUMAN, ticket_id, column))
+
+    return router
+
+
+_ASK_REFUSALS = {
+    "bad_payload": "Write the outcome as one line of at most 200 characters.",
+    "no_such_ask": "That ask no longer exists.",
+    "ask_closed": "That ask was already closed.",
+}
+
+
+def _ask_pages(asks: Asks) -> APIRouter:
+    router = APIRouter(prefix="/asks", dependencies=[Depends(same_origin), Depends(current_human)])
+
+    @router.get("")
+    async def asks_page(request: Request, error: str = "") -> Response:
+        return _page(
+            request,
+            "asks/index.html",
+            open_asks=await asks.listing("open"),
+            closed_asks=await asks.listing("closed", 20),
+            now=time.time(),
+            refusal=_ASK_REFUSALS.get(error),
+        )
+
+    @router.post("/{ask_id}/close")
+    async def close(ask_id: int, outcome: Annotated[str, Form()] = "") -> Response:
+        try:
+            await asks.close(HUMAN, ask_id, outcome)
+        except AskRefused as refused:
+            return _see_other(f"/asks?error={refused.reason}")
+        return _see_other("/asks")
 
     return router
 
