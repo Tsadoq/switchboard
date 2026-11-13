@@ -524,6 +524,9 @@ def test_read_last_shows_only_the_newest_posts_and_says_older_ones_exist(
         pytest.param(["--last", "201"], id="over-a-page"),
         pytest.param(["--last", "5", "--after", "1"], id="with-after"),
         pytest.param(["--last", "5", "--new"], id="with-new"),
+        pytest.param(["--last", "5", "--consumer", "c" * 32], id="with-consumer"),
+        pytest.param(["--last", "5", "--recover-after", "1"], id="with-recover-after"),
+        pytest.param(["--last", "5", "--start-after", "1"], id="with-start-after"),
     ],
 )
 def test_read_last_refuses_bad_or_mixed_options(

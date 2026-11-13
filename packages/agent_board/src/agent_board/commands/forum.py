@@ -155,8 +155,12 @@ def _threads(args: argparse.Namespace) -> int:
 
 def _read(args: argparse.Namespace) -> int:
     if args.last is not None:
-        if args.new or args.after is not None or args.limit is not None or args.start_after is not None:
-            raise SystemExit("agent-board read: --last cannot be combined with --new, --after or --limit")
+        cursor_options = (args.after, args.limit, args.start_after, args.recover_after, args.consumer)
+        if args.new or any(option is not None for option in cursor_options):
+            raise SystemExit(
+                "agent-board read: --last reads no cursor; it cannot be combined with "
+                "--new, --after, --limit, --start-after, --recover-after or --consumer"
+            )
         return _read_last(args)
     if args.new:
         return _read_new(args)
