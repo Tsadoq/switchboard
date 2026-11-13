@@ -118,9 +118,7 @@ class SessionPool:
                     return False
                 if self._clock() > deadline:
                     return False
-            opened = self._open_or_fall_back(
-                entries, key, _with_rebuild_context(key, _text(prompt, True)), model
-            )
+            opened = self._open_or_fall_back(entries, key, prompt, model)
             if opened is not None and on_sent is not None:
                 on_sent(opened.id)
             return True
@@ -154,10 +152,11 @@ class SessionPool:
             return self._open(entries, key, prompt, None)
 
     def _open_or_fall_back(
-        self, entries: list[_Entry], key: str | None, prompt: str, model: str | None
+        self, entries: list[_Entry], key: str | None, prompt: str | Callable[[bool], str], model: str | None
     ) -> Session | None:
+        """A new runner session gets a consumer, so it is offered --new; a Remote Control fallback has none."""
         try:
-            return self._open(entries, key, prompt, model)
+            return self._open(entries, key, _with_rebuild_context(key, _text(prompt, True)), model)
         except HappierError as error:
             fallback_allowed = model is None and self._settings.fallback == REMOTE_CONTROL
             if not fallback_allowed or not remote_control.serves(self._me.kind):
@@ -165,7 +164,11 @@ class SessionPool:
             logger.warning(
                 "%s: create failed (%s); falling back to remote control", self._me.principal, error
             )
-            remote_control.start(self._settings.workdir, f"board-{self._me.kind}", prompt)
+            remote_control.start(
+                self._settings.workdir,
+                f"board-{self._me.kind}",
+                _with_rebuild_context(key, _text(prompt, False)),
+            )
             return None
 
     def _open(self, entries: list[_Entry], key: str | None, prompt: str, model: str | None) -> Session:

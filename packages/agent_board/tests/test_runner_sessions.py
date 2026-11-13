@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from agent_board.cursors import CURSOR_DIR, locked
 from agent_board.identity import Identity, ensure_state_dir
+from agent_board.runner import remote_control
 from agent_board.runner.config import KindConfig
 from agent_board.runner.happier import Happier
 from agent_board.runner.sessions import SessionPool
@@ -509,3 +510,19 @@ def test_the_prompt_form_follows_whether_the_receiving_session_has_a_consumer(
 
     assert sessions.deliver("topic:1", _builder, None, float("inf"))
     assert _messages(box, session_id)[-1] == "legacy prompt", "a session with no consumer was offered --new"
+
+
+def test_a_remote_control_fallback_is_offered_only_the_stateless_read(
+    box: Fakes, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_HAPPIER_FAIL", "create:spawn_failed")
+    started: list[str] = []
+    monkeypatch.setattr(remote_control, "serves", lambda kind: True)
+    monkeypatch.setattr(remote_control, "start", lambda workdir, name, prompt: started.append(prompt))
+    sessions = pool(clock, fallback="remote-control")
+
+    assert sessions.deliver("topic:1", _builder, None, float("inf"))
+
+    assert len(started) == 1 and started[0].startswith("legacy prompt"), (
+        f"the fallback was offered --new: {started}"
+    )
