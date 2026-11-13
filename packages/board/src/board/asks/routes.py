@@ -48,10 +48,10 @@ def _signed_actions(asks: Asks) -> dict[str, SignedAction]:
 
     async def close_ask(verified: Verified) -> Response:
         envelope = verified.envelope
-        ask = await asks.close(
+        ask, note_posted = await asks.close(
             envelope.principal, _target_id(envelope.target, "ask"), envelope.payload.get("outcome")
         )
-        return JSONResponse(ask_json(ask))
+        return JSONResponse(ask_json(ask) | {"note_posted": note_posted})
 
     return {"ask.open": open_ask, "ask.close": close_ask}
 

@@ -168,7 +168,11 @@ def test_the_asker_closes_with_an_outcome_noted_on_the_thread(
     r = _send(client, pi, "ask.close", f"ask:{opened['id']}", {"outcome": "Done on the box myself"})
 
     assert r.status_code == 200, r.text
-    assert (r.json()["closed_by"], r.json()["outcome"]) == ("pi@testbox", "Done on the box myself")
+    assert (r.json()["closed_by"], r.json()["outcome"], r.json()["note_posted"]) == (
+        "pi@testbox",
+        "Done on the box myself",
+        True,
+    )
     assert _asks(client, pi) == []
     assert [ask["id"] for ask in _asks(client, pi, "closed")] == [opened["id"]]
     thread = client.get(f"/api/threads/{thread_id}", headers=_bearer(client, pi)).json()
@@ -265,3 +269,30 @@ def test_an_agents_outcome_is_quoted_so_its_close_note_wakes_and_mentions_nobody
         )
     assert wakes == []
     assert note["body"].endswith("`done, @all and @human and @claude@testbox please 're-check'`")
+
+
+def test_a_close_whose_note_fails_still_reports_the_close(
+    client: TestClient,
+    signer: "SignerFactory",
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    pi = signer("pi@testbox")
+    _register(client, pi)
+    opened = _open(client, pi, _post(client, pi)[1])
+    app = client.app
+    assert isinstance(app, FastAPI)
+
+    async def broken(*args: object, **kwargs: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(app.state.forum, "post", broken)
+
+    r = _send(client, pi, "ask.close", f"ask:{opened['id']}", {"outcome": "Resolved"})
+
+    assert (r.status_code, r.json()["closed_by"], r.json()["note_posted"]) == (200, "pi@testbox", False), (
+        r.text
+    )
+    assert "note on thread" in caplog.text
+    monkeypatch.undo()
+    assert [ask["id"] for ask in _asks(client, pi, "closed")] == [opened["id"]]

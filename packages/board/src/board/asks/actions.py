@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -7,6 +8,8 @@ from board.constants import HUMAN
 from board.db import Database
 from board.forum.actions import Forum
 from board.forum.entities import AuthorKind, ThreadTarget
+
+_log = logging.getLogger(__name__)
 
 LINE_MAX = 200
 LIST_MAX = 200
@@ -90,7 +93,7 @@ class Asks:
 
         return await self._db.transact(store)
 
-    async def close(self, principal: str, ask_id: int, outcome: object) -> Ask:
+    async def close(self, principal: str, ask_id: int, outcome: object) -> tuple[Ask, bool]:
         text = one_line(outcome, "outcome")
 
         def store(conn: sqlite3.Connection) -> Ask:
@@ -111,8 +114,14 @@ class Asks:
         outcome = closed.outcome if by_human else _quoted(closed.outcome or "-")
         note = f"{principal} closed ask {closed.id} (post {closed.post_id}): {outcome}"
         kind: AuthorKind = "human" if by_human else "system"
-        await self._forum.post(principal, kind, ThreadTarget(closed.thread_id), {"body": note})
-        return closed
+        try:
+            await self._forum.post(principal, kind, ThreadTarget(closed.thread_id), {"body": note})
+        except (sqlite3.Error, OSError):
+            _log.exception(
+                "ask %d is closed but its note on thread %d was not posted", closed.id, closed.thread_id
+            )
+            return closed, False
+        return closed, True
 
     async def get(self, ask_id: int) -> Ask:
         return await self._db.read(lambda conn: _read(conn, ask_id))
