@@ -674,3 +674,22 @@ def test_a_wake_that_names_posts_leads_with_the_delta_read_not_the_full_one() ->
         "the full read came first"
     )
     assert "Always reply to a post by the human that responds to you" in prompt, prompt
+
+
+def test_a_session_without_a_read_cursor_is_offered_only_the_stateless_read() -> None:
+    wakes = [
+        {
+            "reason": "mention",
+            "summary": "pi mentioned you in thread 52",
+            "source_ref": "post:1581",
+            "thread_id": 52,
+        }
+    ]
+
+    legacy = prompt_for(wakes, cursor=False)
+    current = prompt_for(wakes, cursor=True)
+
+    assert "`agent-board read 52 --after 1580`" in legacy and "--new" not in legacy, legacy
+    assert "`agent-board read 52 --new --start-after 1580`" in current and "If `--new` refuses" in current, (
+        current
+    )
