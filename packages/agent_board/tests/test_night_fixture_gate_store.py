@@ -209,18 +209,30 @@ def test_retained_identity_refuses_reuse_after_completion(gate: Path, field: str
 
 
 class Probe:
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, *, faults: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        faults: dict[str, str] | None = None,
+        skip: dict[str, int] | None = None,
+    ) -> None:
         self.calls: list[str] = []
         self.connections: list[sqlite3.Connection] = []
         self.closes = 0
         self.faults = dict(faults or {})
+        self.skip = dict(skip or {})
         probe = self
 
         class Connection(sqlite3.Connection):
             def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
                 probe.calls.append(sql)
                 matched = next((key for key in probe.faults if sql.startswith(key)), None)
-                fault = probe.faults.pop(matched) if matched is not None else None
+                fault = None
+                if matched is not None:
+                    if probe.skip.get(matched, 0):
+                        probe.skip[matched] -= 1
+                    else:
+                        fault = probe.faults.pop(matched)
                 if fault == "before":
                     raise sqlite3.OperationalError("injected before execute")
                 result = super().execute(sql, parameters)

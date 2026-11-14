@@ -110,6 +110,23 @@ def _require(condition: bool, reason: Refusal = Refusal.STATE_MISMATCH) -> None:
         raise StoreRefusal(reason)
 
 
+def _input_context(context: Context) -> Context:
+    _require(type(context) is Context, Refusal.CONTEXT_MISMATCH)
+    try:
+        return Context(*astuple(context))
+    except (InvalidRecord, AttributeError, TypeError):
+        raise StoreRefusal(Refusal.CONTEXT_MISMATCH) from None
+
+
+def _input_owner(owner: RuntimeOwner | None) -> RuntimeOwner:
+    if type(owner) is not RuntimeOwner:
+        raise StoreRefusal(Refusal.OWNER_MISMATCH)
+    try:
+        return RuntimeOwner(*astuple(owner))
+    except (InvalidRecord, AttributeError, TypeError):
+        raise StoreRefusal(Refusal.OWNER_MISMATCH) from None
+
+
 def _close_fd(fd: int, execution: _Execution) -> None:
     try:
         os.close(fd)
@@ -120,7 +137,12 @@ def _close_fd(fd: int, execution: _Execution) -> None:
 
 
 def _path(path: Path) -> None:
-    if not path.is_absolute() or path.anchor != "/" or path != Path(os.path.normpath(path)):
+    if (
+        not isinstance(path, Path)
+        or not path.is_absolute()
+        or path.anchor != "/"
+        or path != Path(os.path.normpath(path))
+    ):
         raise StateError("invalid_state_path")
     _check_ancestors(path.parent)
 
@@ -358,9 +380,9 @@ def _execute(
     execution = _Execution()
     conn: sqlite3.Connection | None = None
     try:
-        _require(type(context) is Context, Refusal.CONTEXT_MISMATCH)
+        context = _input_context(context)
         if action == "begin":
-            _require(type(owner) is RuntimeOwner, Refusal.OWNER_MISMATCH)
+            owner = _input_owner(owner)
         elif action == "complete":
             _require(type(attestation) is NormalAttestation, Refusal.ATTESTATION_REFUSED)
             if attestation is not None:
