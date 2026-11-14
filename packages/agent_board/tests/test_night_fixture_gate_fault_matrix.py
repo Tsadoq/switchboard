@@ -28,6 +28,7 @@ if TYPE_CHECKING:
         committed,
         gate,
         invoke,
+        private_dir,
         probe_factory,
     )
 else:
@@ -40,10 +41,11 @@ else:
         committed,
         gate,
         invoke,
+        private_dir,
         probe_factory,
     )
 
-__all__ = ["gate", "probe_factory"]
+__all__ = ["gate", "private_dir", "probe_factory"]
 
 
 def stages(action: str) -> list[tuple[str, str, int]]:
@@ -260,7 +262,7 @@ def test_real_path_replacement_after_connect_is_detected_before_setup(
     ],
 )
 def test_mutated_frozen_context_is_revalidated_before_file_creation(
-    tmp_path: Path,
+    private_dir: Path,
     field: str,
     value: Any,
     probe_factory: Callable[..., Probe],
@@ -268,7 +270,7 @@ def test_mutated_frozen_context_is_revalidated_before_file_creation(
     context = copy(CONTEXT)
     object.__setattr__(context, field, value)
     probe = probe_factory()
-    path = tmp_path / "new.sqlite"
+    path = private_dir / "new.sqlite"
     result = store.provision_fixture(path, context=context)
     assert result.refusal == store.Refusal.CONTEXT_MISMATCH
     assert result.mutation == MutationOutcome.NOT_ATTEMPTED and not result.observed_created_path

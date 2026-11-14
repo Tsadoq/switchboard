@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterator
 from contextlib import closing
 from dataclasses import astuple, replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 from uuid import UUID
 
@@ -74,8 +75,14 @@ def classification(path: Path) -> str:
 
 
 @pytest.fixture
-def gate(tmp_path: Path) -> Path:
-    path = tmp_path / "gate.sqlite"
+def private_dir() -> Iterator[Path]:
+    with TemporaryDirectory(prefix="fg.", dir=Path.home()) as directory:
+        yield Path(directory)
+
+
+@pytest.fixture
+def gate(private_dir: Path) -> Path:
+    path = private_dir / "gate.sqlite"
     result = store.provision_fixture(path, context=CONTEXT)
     committed(result)
     assert result.observed_created_path and result.path_publication == store.Publication.CONFIRMED
@@ -134,12 +141,12 @@ def test_lock_preserves_owner_and_validated_history(gate: Path, initial: str, re
 
 
 @pytest.mark.parametrize("kind", ["empty", "corrupt", "valid", "symlink", "directory", "journal"])
-def test_provision_never_adopts_truncates_or_replaces_an_existing_path(tmp_path: Path, kind: str) -> None:
-    path = tmp_path / "gate.sqlite"
+def test_provision_never_adopts_truncates_or_replaces_an_existing_path(private_dir: Path, kind: str) -> None:
+    path = private_dir / "gate.sqlite"
     if kind == "valid":
         committed(store.provision_fixture(path, context=CONTEXT))
     elif kind == "symlink":
-        path.symlink_to(tmp_path / "absent")
+        path.symlink_to(private_dir / "absent")
     elif kind == "directory":
         path.mkdir()
     else:
@@ -159,11 +166,11 @@ def test_provision_never_adopts_truncates_or_replaces_an_existing_path(tmp_path:
 
 
 @pytest.mark.parametrize("operation", ["observe", "begin", "complete", "fault"])
-def test_runtime_missing_file_never_creates_it(tmp_path: Path, operation: str) -> None:
-    path = tmp_path / "absent.sqlite"
+def test_runtime_missing_file_never_creates_it(private_dir: Path, operation: str) -> None:
+    path = private_dir / "absent.sqlite"
     result = invoke(operation, path)
     assert result.fault == store.Fault.FILE_FAILURE
-    assert not path.exists() and list(tmp_path.iterdir()) == []
+    assert not path.exists() and list(private_dir.iterdir()) == []
 
 
 def invoke(action: str, path: Path) -> store.WriteResult | store.ReadResult:
@@ -385,7 +392,7 @@ def test_commit_rollback_and_close_faults_are_independent_and_never_retried(
 
 @pytest.mark.parametrize("sync_call", [1, 2])
 def test_failed_directory_sync_does_not_rewrite_sqlite_knowledge(
-    tmp_path: Path,
+    private_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     sync_call: int,
 ) -> None:
@@ -400,7 +407,7 @@ def test_failed_directory_sync_does_not_rewrite_sqlite_knowledge(
         original(fd)
 
     monkeypatch.setattr(os, "fsync", fsync)
-    path = tmp_path / "gate.sqlite"
+    path = private_dir / "gate.sqlite"
     result = store.provision_fixture(path, context=CONTEXT)
     assert result.observed_created_path and result.path_publication == store.Publication.UNKNOWN
     assert result.fault == store.Fault.DIRECTORY_PUBLICATION_FAILURE

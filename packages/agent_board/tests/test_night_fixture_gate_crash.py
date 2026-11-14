@@ -17,9 +17,20 @@ if TYPE_CHECKING:
         attestation,
         classification,
         committed,
+        private_dir,
     )
 else:
-    from test_night_fixture_gate_store import CONNECT, CONTEXT, OWNER, attestation, classification, committed
+    from test_night_fixture_gate_store import (
+        CONNECT,
+        CONTEXT,
+        OWNER,
+        attestation,
+        classification,
+        committed,
+        private_dir,
+    )
+
+__all__ = ["private_dir"]
 
 SCRIPT = """
 import os
@@ -120,12 +131,12 @@ def maintenance_control(path: Path) -> tuple[str, str, str, str | None]:
 @pytest.mark.parametrize("action,statement", CASES)
 @pytest.mark.parametrize("when", ["before", "after"])
 def test_actual_process_crash_never_publishes_a_partial_completion_or_implicitly_repairs(
-    tmp_path: Path,
+    private_dir: Path,
     action: str,
     statement: str,
     when: str,
 ) -> None:
-    path = tmp_path / "gate.sqlite"
+    path = private_dir / "gate.sqlite"
     if action != "provision":
         committed(store.provision_fixture(path, context=CONTEXT))
     if action in ("complete", "fault"):

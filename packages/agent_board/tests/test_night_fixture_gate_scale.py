@@ -30,6 +30,7 @@ if TYPE_CHECKING:
         classification,
         committed,
         gate,
+        private_dir,
         probe_factory,
     )
 else:
@@ -42,10 +43,11 @@ else:
         classification,
         committed,
         gate,
+        private_dir,
         probe_factory,
     )
 
-__all__ = ["gate", "probe_factory"]
+__all__ = ["gate", "private_dir", "probe_factory"]
 
 
 @pytest.mark.parametrize("when", ["before", "after"])
@@ -267,3 +269,51 @@ def test_file_descriptor_close_and_directory_publication_knowledge_are_independe
             store.Publication.CONFIRMED if stage == "directory2" else store.Publication.UNKNOWN
         )
         assert store.provision_fixture(path, context=CONTEXT).refusal == store.Refusal.PREEXISTING_PATH
+
+
+@pytest.mark.parametrize("when", ["before", "after"])
+def test_file_validation_plus_probe_close_failure_selects_cleanup_fault(
+    gate: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    when: str,
+) -> None:
+    gate.write_bytes(b"unsupported header")
+    baseline = store.observe(gate, context=CONTEXT)
+    assert baseline.fault == store.Fault.FILE_FAILURE and baseline.cleanup == CleanupOutcome.CLOSED
+    original_close = os.close
+    identity = gate.stat()
+    retained: list[int] = []
+
+    def close(fd: int) -> None:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (identity.st_dev, identity.st_ino):
+            original_close(fd)
+            return
+        if when == "before":
+            retained.append(fd)
+            raise OSError("injected before probe close")
+        original_close(fd)
+        raise OSError("injected after probe close")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "close", close)
+        try:
+            result = store.observe(gate, context=CONTEXT)
+        finally:
+            for fd in retained:
+                original_close(fd)
+    assert result.fault == store.Fault.CLOSE_FAILURE
+    assert result.cleanup == CleanupOutcome.UNCERTAIN and result.observation is None
+    assert gate.read_bytes() == b"unsupported header"
+
+
+def test_private_leaf_does_not_make_a_world_writable_ancestor_trusted(private_dir: Path) -> None:
+    shared = private_dir / "shared"
+    shared.mkdir(mode=0o700)
+    shared.chmod(0o1777)
+    leaf = shared / "private"
+    leaf.mkdir(mode=0o700)
+    path = leaf / "gate.sqlite"
+    result = store.provision_fixture(path, context=CONTEXT)
+    assert result.fault == store.Fault.FILE_FAILURE and not result.observed_created_path
+    assert result.mutation == MutationOutcome.NOT_ATTEMPTED and not path.exists()
