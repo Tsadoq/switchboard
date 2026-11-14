@@ -39,29 +39,69 @@ def read(path: Path) -> list[tuple[Any, ...]]:
 
 
 class Tape:
-    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def __init__(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        fail_at: int | None = None,
+        when: str = "before",
+        rollback_fault: str | None = None,
+        close_fault: str | None = None,
+    ) -> None:
         self.attempts: list[str] = []
         self.native: list[str] = []
         self.closes = 0
+        self.connections: list[sqlite3.Connection] = []
+        self.injected: list[str] = []
+        self.unexecuted: list[int] = []
+        self.rollback_fault = rollback_fault
+        self.close_fault = close_fault
         tape = self
 
         class Connection(sqlite3.Connection):
             def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
+                index = len(tape.attempts)
                 tape.attempts.append(sql)
-                return super().execute(sql, parameters)
+                fault = when if index == fail_at else None
+                if sql == "ROLLBACK" and tape.rollback_fault is not None:
+                    fault, tape.rollback_fault = tape.rollback_fault, None
+                if fault is not None:
+                    tape.injected.append(sql)
+                if fault == "before":
+                    tape.unexecuted.append(index)
+                    raise sqlite3.OperationalError("injected before execute")
+                cursor = super().execute(sql, parameters)
+                if fault == "after":
+                    raise sqlite3.OperationalError("injected after execute")
+                return cursor
 
             def close(self) -> None:
                 tape.closes += 1
+                fault, tape.close_fault = tape.close_fault, None
+                if fault is not None:
+                    tape.injected.append("close")
+                if fault == "before":
+                    raise sqlite3.OperationalError("injected before close")
                 super().close()
+                if fault == "after":
+                    raise sqlite3.OperationalError("injected after close")
 
         def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
             assert kwargs == {"uri": True, "isolation_level": None, "timeout": 0}
             assert args[0].endswith("?mode=rw")
             conn = CONNECT(*args, **kwargs, factory=Connection)
             conn.set_trace_callback(self.native.append)
+            self.connections.append(conn)
             return conn
 
         monkeypatch.setattr(sqlite3, "connect", connect)
+
+    def reconcile(self) -> None:
+        assert len(self.native) + len(self.unexecuted) == len(self.attempts)
+
+    def dispose(self) -> None:
+        for conn in self.connections:
+            sqlite3.Connection.close(conn)
 
 
 @pytest.mark.parametrize(
