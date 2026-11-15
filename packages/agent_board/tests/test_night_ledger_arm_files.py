@@ -163,6 +163,7 @@ def test_probe_close_failure_is_independent_and_outweighs_header_failure(
             closed.append(fd)
             if close_when == "after":
                 CLOSE(fd)
+                owned.remove(fd)
             raise OSError("injected probe close failure")
         CLOSE(fd)
 
@@ -171,7 +172,8 @@ def test_probe_close_failure_is_independent_and_outweighs_header_failure(
     tape = Tape(monkeypatch)
     try:
         result = writer.compare_and_set_arm(ledger_path, journal_id=JOURNAL, desired=ARM, expected_prior=None)
-        assert len(owned) == len(closed) == 1 and not tape.connections
+        assert len(closed) == 1 and len(owned) == (1 if close_when == "before" else 0)
+        assert not tape.connections
         assert result.fault == writer.Fault.CLOSE_FAILURE and result.refusal is None
         assert result.cleanup == CleanupOutcome.UNCERTAIN and result.mutation == MutationOutcome.NOT_ATTEMPTED
         assert result.stored is None
@@ -188,25 +190,32 @@ def test_actual_resource_boundary_failures_do_not_enter_body_or_leak_owned_probe
     stage: str,
 ) -> None:
     closed: list[int] = []
+    live: set[int] = set()
 
     def opened(*args: Any, **kwargs: Any) -> int:
-        if args[0] == ledger_path:
+        if args[0] == ledger_path and stage == "probe_open":
             raise OSError("injected probe open failure")
-        return OPEN(*args, **kwargs)
+        fd = OPEN(*args, **kwargs)
+        if args[0] == ledger_path:
+            live.add(fd)
+        return fd
 
     def read(fd: int, count: int) -> bytes:
-        raise OSError("injected probe read failure")
+        if fd in live:
+            raise OSError("injected probe read failure")
+        return READ(fd, count)
 
     def close(fd: int) -> None:
-        closed.append(fd)
+        if fd in live:
+            closed.append(fd)
+            live.remove(fd)
         CLOSE(fd)
 
     def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
         raise sqlite3.OperationalError("not a typed busy error")
 
-    if stage == "probe_open":
-        monkeypatch.setattr(os, "open", opened)
-    elif stage == "probe_read":
+    monkeypatch.setattr(os, "open", opened)
+    if stage == "probe_read":
         monkeypatch.setattr(os, "read", read)
     monkeypatch.setattr(os, "close", close)
     monkeypatch.setattr(sqlite3, "connect", connect)
@@ -216,6 +225,15 @@ def test_actual_resource_boundary_failures_do_not_enter_body_or_leak_owned_probe
         result.refusal is None and result.stored is None and result.mutation == MutationOutcome.NOT_ATTEMPTED
     )
     assert result.cleanup == CleanupOutcome.CLOSED and len(closed) == (0 if stage == "probe_open" else 1)
+    assert not live
+    other = ledger_path.with_name("unrelated")
+    other.write_bytes(b"unrelated")
+    fd = os.open(other, os.O_RDONLY)
+    try:
+        assert os.read(fd, 9) == b"unrelated"
+    finally:
+        os.close(fd)
+    assert len(closed) == (0 if stage == "probe_open" else 1)
 
 
 @pytest.mark.parametrize("boundary", ["probe_open", "connect"])
