@@ -130,7 +130,8 @@ def _claim(value: BindingClaim) -> BindingClaim:
         and re.fullmatch("[0-9a-f]{32}", value.invocation_id) is not None
         and value.invocation_id != "0" * 32
     )
-    _require(type(value.cgroup) is str and len(value.cgroup.encode("utf-8")) <= 4096)
+    _require(type(value.cgroup) is str and len(value.cgroup) <= 4096)
+    _require(len(value.cgroup.encode("utf-8")) <= 4096)
     _require(value.cgroup == unit_cgroup(f"switchboard-night-{run_id}.service"))
     return BindingClaim(run_id, value.uid, boot_id, value.invocation_id, value.cgroup)
 

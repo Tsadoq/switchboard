@@ -9,9 +9,11 @@ from agent_board.night.journal_latch import CleanupOutcome, MutationOutcome
 if TYPE_CHECKING:
     from packages.agent_board.tests.test_night_ledger_arm import JOURNAL, Tape
     from packages.agent_board.tests.test_night_ledger_binding import CLAIM, ledger_path, put, read
+    from packages.agent_board.tests.test_night_ledger_binding_semantics import change
 else:
     from test_night_ledger_arm import JOURNAL, Tape
     from test_night_ledger_binding import CLAIM, ledger_path, put, read
+    from test_night_ledger_binding_semantics import change
 
 __all__ = ["ledger_path"]
 
@@ -141,6 +143,55 @@ def test_after_native_commit_exception_then_close_fault_keeps_durable_state_dist
         assert result.fault == writer.Fault.CLOSE_FAILURE and result.cleanup == CleanupOutcome.UNCERTAIN
         assert result.stored is None and result.refusal is None
         assert read(ledger_path) == ([(*astuple(CLAIM), 0)] if when == "after" else [])
+        tape.reconcile()
+    finally:
+        tape.dispose()
+
+
+@pytest.mark.parametrize("branch", ["conflict", "identity", "row", "schema"])
+@pytest.mark.parametrize("rollback", [None, "before", "after"])
+@pytest.mark.parametrize("close", [None, "before", "after"])
+def test_semantic_refusal_coexists_with_independent_cleanup_fault_and_no_late_mutation(
+    ledger_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    branch: str,
+    rollback: str | None,
+    close: str | None,
+) -> None:
+    from dataclasses import replace
+
+    put(ledger_path, ack=1)
+    claim, journal = CLAIM, JOURNAL
+    if branch == "conflict":
+        claim = replace(CLAIM, uid=1001)
+    elif branch == "identity":
+        journal = CLAIM.run_id
+    elif branch == "row":
+        change(ledger_path, "UPDATE bindings SET uid=0")
+    else:
+        change(ledger_path, "PRAGMA user_version=0")
+    before = ledger_path.read_bytes()
+    expected = {
+        "conflict": writer.Refusal.BINDING_CONFLICT,
+        "identity": writer.Refusal.LEDGER_IDENTITY_MISMATCH,
+        "row": writer.Refusal.ROW_REFUSED,
+        "schema": writer.Refusal.SCHEMA_REFUSED,
+    }[branch]
+    tape = Tape(monkeypatch, rollback_fault=rollback, close_fault=close)
+    try:
+        result = writer.publish_binding(ledger_path, journal_id=journal, claim=claim)
+        assert result.refusal == expected and result.stored is None
+        assert result.fault == (
+            writer.Fault.CLOSE_FAILURE if close else writer.Fault.ROLLBACK_FAILURE if rollback else None
+        )
+        assert result.cleanup == (CleanupOutcome.UNCERTAIN if close else CleanupOutcome.CLOSED)
+        uncertain = bool(close and rollback)
+        assert result.mutation == (MutationOutcome.UNKNOWN if uncertain else MutationOutcome.ROLLED_BACK)
+        assert result.changed is (None if uncertain else False)
+        assert tape.attempts.count("ROLLBACK") == tape.closes == 1
+        assert "COMMIT" not in tape.attempts and len(tape.attempts) <= 10
+        assert not any(sql.startswith(("INSERT", "UPDATE", "DELETE")) for sql in tape.attempts)
+        assert ledger_path.read_bytes() == before
         tape.reconcile()
     finally:
         tape.dispose()
