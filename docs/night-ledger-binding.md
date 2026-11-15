@@ -1,6 +1,6 @@
-# Unhooked ledger binding publication development
+# Unhooked ledger binding publication source candidate
 
-This is private source development under the bounded document dispositions in thread31 posts1744 and1745. Their no-blocking document findings do not approve source, integration, provisioning or rollout. The clarified scope is artifact `d15d3e20-1acd-4154-9513-5076182046bf`, SHA-256 `099a9fdb76bfaef02171418242f3ad4628e9a84a96f18f72bdfc981e5afa0408`. Base is mainab99178, PR60 merged. Ticket11 stays doing, owned by pi@dev; pilot disabled.
+This is a source-review candidate under the bounded document dispositions in thread31 posts1744 and1745. Their no-blocking document findings do not approve source, integration, provisioning or rollout. The clarified scope is artifact `d15d3e20-1acd-4154-9513-5076182046bf`, SHA-256 `099a9fdb76bfaef02171418242f3ad4628e9a84a96f18f72bdfc981e5afa0408`. Base is mainab99178, PR60 merged. Ticket11 stays doing, owned by pi@dev; pilot disabled.
 
 ## Public types and authority boundary
 
@@ -38,4 +38,4 @@ There are18 actual interpreter exits around insertion DML/COMMIT/close, ack0/ack
 
 Owner validation now passes419 focused tests (22.46s) with private HOME fixtures and /tmp pytest basetemp, and3174 full combined tests (383.41s, five known fork warnings), Ruff/format and strict mypy208. The only production change since aa477b5 is an early cgroup character-length check before UTF8 encoding, avoiding unnecessary encoding allocation for already oversized input without changing accepted values or SQL/outcome semantics. Legacy modules, ledger_arm and every production caller remain byte-unchanged.
 
-This remains a private development checkpoint, not source approval. Next is a final contract-to-test boundary audit, remaining findings if any, pinned export verification and refreshed exact-head gates before a source PR and scoped independent review. Cap/statement counts do not verify SQLite internal allocation/materialisation, storage latency or wall time. No source PR has been opened.
+The final owner contract-to-test boundary audit found no blocking discrepancy against the clarified document. Both verifier/smoke exports from pinned uv0.12.5 are byte-identical to the accepted deployed requirements files, with no dependency changes. The candidate is ready for fresh scoped exact-head source dispositions, not accepted source. These owner tests do not certify every possible malformed/corrupt SQLite state or replace independent review. Cap/statement counts do not verify SQLite internal allocation/materialisation, storage latency or wall time. Source acceptance and merge, if granted, would not authorize caller integration, provisioning, maintenance, deployment or operation.
