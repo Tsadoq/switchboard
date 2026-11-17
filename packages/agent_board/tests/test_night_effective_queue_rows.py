@@ -363,3 +363,41 @@ def test_any_other_catalog_or_version_refuses_as_schema(queue_path: Path, statem
         queue.publish_ordinary(queue_path, expected=EMPTY, publication=BINDING),
     ):
         refused(result, queue.Refusal.SCHEMA_REFUSED)
+
+
+def deleted(value: object, name: str) -> object:
+    object.__delattr__(value, name)
+    return value
+
+
+@pytest.mark.parametrize(
+    ("operation", "field"),
+    [
+        pytest.param("observe", "active_seq", id="control-active-seq"),
+        pytest.param("observe", "generation", id="control-generation"),
+        pytest.param("publish", "claim", id="publication-claim"),
+        pytest.param("publish", "fence", id="publication-fence"),
+        pytest.param("acknowledge", "state", id="ack-state"),
+        pytest.param("acknowledge", "counter", id="ack-counter"),
+    ],
+)
+def test_a_deleted_dto_field_is_invalid_input_before_any_sql(
+    queue_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, field: str
+) -> None:
+    tape = Tape(monkeypatch)
+    if operation == "observe":
+        result = queue.observe_ordinary(queue_path, expected=deleted(replace(EMPTY), field))  # type: ignore[arg-type]
+    elif operation == "publish":
+        result = queue.publish_ordinary(
+            queue_path,
+            expected=EMPTY,
+            publication=deleted(replace(BINDING), field),  # type: ignore[arg-type]
+        )
+    else:
+        result = queue.acknowledge_ordinary(
+            queue_path,
+            expected=EMPTY,
+            ack=deleted(ack_for(EMPTY, RECEIPT, "running"), field),  # type: ignore[arg-type]
+        )
+    refused(result, queue.Refusal.INVALID_INPUT)
+    assert tape.attempts == [] and tape.connections == []

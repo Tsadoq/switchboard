@@ -66,22 +66,32 @@ def test_a_failure_at_any_statement_returns_no_authority_and_keeps_uncertainty(
 
 
 COMPOUND = [
-    pytest.param(name, prepare, operation, rollback, close, id=f"{name}-rollback-{rollback}-close-{close}")
+    pytest.param(
+        name,
+        prepare,
+        operation,
+        landed,
+        rollback,
+        close,
+        id=f"{name}-{landed}-rollback-{rollback}-close-{close}",
+    )
     for name, _, prepare, operation in TRANSITIONS
     if name.startswith(("publish", "acknowledge")) and name != "publish-identical"
+    for landed in ("before", "after")
     for rollback in ("before", "after", None)
     for close in ("before", "after", None)
     if rollback or close
 ]
 
 
-@pytest.mark.parametrize(("name", "prepare", "operation", "rollback", "close"), COMPOUND)
+@pytest.mark.parametrize(("name", "prepare", "operation", "landed", "rollback", "close"), COMPOUND)
 def test_a_commit_failure_compounded_with_cleanup_faults_stays_unknown_with_cleanup_first_precedence(
     queue_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     name: str,
     prepare: Prepare,
     operation: Operation,
+    landed: str,
     rollback: str | None,
     close: str | None,
 ) -> None:
@@ -95,23 +105,27 @@ def test_a_commit_failure_compounded_with_cleanup_faults_stays_unknown_with_clea
     queue_path.unlink()
     create_fixture(queue_path)
     control = prepare(queue_path)
-    tape = Tape(monkeypatch, fail_at=commit_at, when="before", rollback_fault=rollback, close_fault=close)
+    before = tables(queue_path)
+    tape = Tape(monkeypatch, fail_at=commit_at, when=landed, rollback_fault=rollback, close_fault=close)
 
     result = operation(queue_path, control)
     tape.dispose()
 
+    assert (tables(queue_path) != before) is (landed == "after")
+
     assert result.mutation == MutationOutcome.UNKNOWN and result.changed is None
     assert result.control is None and result.selected is None
+    rolled = landed == "before"
     expected = (
         queue.Fault.CLOSE_FAILURE
         if close
         else queue.Fault.ROLLBACK_FAILURE
-        if rollback
+        if rollback and rolled
         else queue.Fault.SQLITE_FAILURE
     )
     assert result.fault == expected
     assert result.cleanup == (CleanupOutcome.UNCERTAIN if close else CleanupOutcome.CLOSED)
-    assert tape.attempts.count("ROLLBACK") <= 1
+    assert tape.attempts.count("ROLLBACK") == int(rolled)
 
 
 @pytest.mark.parametrize("lock", ["EXCLUSIVE", "IMMEDIATE"])

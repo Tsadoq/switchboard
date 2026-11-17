@@ -613,12 +613,13 @@ def _publish(
     after = ExpectedControl(
         expected.journal_id, expected.generation, expected.revision + 1, seq, expected.acked_counter
     )
-    selected = _after(conn, after)
-    if (selected.receipt_id, selected.action, selected.run_id, selected.payload) != (
+    selected, claim = _after(conn, after)
+    if (selected.receipt_id, selected.action, selected.run_id, selected.payload, claim) != (
         publication.receipt_id,
         action,
         publication.run_id,
         payload,
+        publication.claim,
     ):
         raise _Failed(Fault.SNAPSHOT_FAILURE)
     _commit(conn, attempt, after, selected)
@@ -631,7 +632,7 @@ def _acknowledge(
     ack: OrdinaryAckClaim,
 ) -> None:
     _require(expected.active_seq is not None, Refusal.NOTHING_SELECTED)
-    selected, _ = _selected(conn, expected)
+    selected, claim = _selected(conn, expected)
     outcome = _strict_json(selected.payload).get("outcome")
     states = {
         "binding": ("running",),
@@ -668,22 +669,25 @@ def _acknowledge(
         if _read_control(conn) != after:
             raise _Failed(Fault.SNAPSHOT_FAILURE)
         rows = conn.execute(SELECTED_QUERY, (selected.seq,)).fetchall()
-        _require(len(rows) == 1 and _row(rows[0], _RECEIPT)["acked"] == 1)
-        stored = _binding(conn, selected.run_id)
-        _require(stored is not None and stored[1])
+        _require(len(rows) == 1)
+        row = _row(rows[0], _RECEIPT)
+        _require(
+            (row["seq"], row["receipt_id"], row["action"], row["run_id"], row["payload"], row["acked"])
+            == (selected.seq, selected.receipt_id, selected.action, selected.run_id, selected.payload, 1)
+        )
+        _require(_binding(conn, selected.run_id) == (claim, True))
     except _Refused:
         raise _Failed(Fault.SNAPSHOT_FAILURE) from None
     _commit(conn, attempt, after, None)
 
 
-def _after(conn: sqlite3.Connection, after: ExpectedControl) -> SelectedReceipt:
+def _after(conn: sqlite3.Connection, after: ExpectedControl) -> tuple[SelectedReceipt, BindingClaim]:
     try:
         if _read_control(conn) != after:
             raise _Failed(Fault.SNAPSHOT_FAILURE)
-        selected, _ = _selected(conn, after)
+        return _selected(conn, after)
     except _Refused:
         raise _Failed(Fault.SNAPSHOT_FAILURE) from None
-    return selected
 
 
 def _write(conn: sqlite3.Connection, statement: str, parameters: tuple[object, ...]) -> sqlite3.Cursor:
@@ -772,9 +776,12 @@ def _run(path: object, expected: object, operation: str, argument: object) -> Qu
     attempt = _Attempt()
     conn: sqlite3.Connection | None = None
     try:
-        checked_path, control = _path(path), _control(expected)
-        publication = _publication(argument) if operation == "publish" else None
-        ack = _ack(argument) if operation == "acknowledge" else None
+        try:
+            checked_path, control = _path(path), _control(expected)
+            publication = _publication(argument) if operation == "publish" else None
+            ack = _ack(argument) if operation == "acknowledge" else None
+        except AttributeError:
+            raise _Refused(Refusal.INVALID_INPUT) from None
         identity = _existing(checked_path, attempt)
         conn = sqlite3.connect(f"{checked_path.as_uri()}?mode=rw", uri=True, isolation_level=None, timeout=0)
         conn.row_factory = sqlite3.Row
