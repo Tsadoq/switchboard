@@ -2,7 +2,7 @@ import json
 import math
 import re
 import sqlite3
-from dataclasses import asdict, astuple, dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
@@ -40,6 +40,7 @@ _PROOF_FIELDS = frozenset(
     ("journal_id", "run_id", "abort_id", "capture_id", "capture_counter", "counter", "outcome", "capture")
 )
 _POLICY_FIELDS = frozenset(NightPolicy.__dataclass_fields__)
+_POLICY_TEXT = ("repository_key", "base_commit", "backend", "permission_mode")
 
 
 class Refusal(StrEnum):
@@ -108,6 +109,7 @@ class CaptureEpisode:
     seq: int
     action: Literal["capture", "capture_abort"]
     run_id: str
+    capture_seq: int
     capture_receipt_id: str
     capture_payload: str
     choices: CaptureChoices
@@ -189,6 +191,30 @@ def _canonical(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
 
 
+def _strict(text: str, refusal: Refusal) -> dict[str, Any]:
+    """Strict canonical JSON: an exponent overflowing to infinity is refused, never decoded as a float."""
+
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        _require(len({key for key, _ in items}) == len(items), refusal)
+        return dict(items)
+
+    def constant(name: str) -> None:
+        raise _Refused(refusal)
+
+    def number(literal: str) -> float:
+        value = float(literal)
+        _require(math.isfinite(value), refusal)
+        return value
+
+    try:
+        value: object = json.loads(text, object_pairs_hook=pairs, parse_constant=constant, parse_float=number)
+        _require(type(value) is dict and _canonical(value) == text, refusal)
+    except (ValueError, RecursionError):
+        raise _Refused(refusal) from None
+    assert isinstance(value, dict)
+    return value
+
+
 def _choices(value: object) -> CaptureChoices:
     bad = Refusal.INVALID_INPUT
     _require(type(value) is CaptureChoices, bad)
@@ -199,6 +225,10 @@ def _choices(value: object) -> CaptureChoices:
     _require(type(cutoff) is float and math.isfinite(cutoff) and cutoff > 0, bad)
     _require(type(policy) is NightPolicy, bad)
     fields = tuple(getattr(policy, name) for name in NightPolicy.__dataclass_fields__)
+    model = policy.model
+    _require(all(type(getattr(policy, name)) is str for name in _POLICY_TEXT), bad)
+    _require(model is None or type(model) is str, bad)
+    _require(type(policy.turn_seconds) is int, bad)
     try:
         _check_choices(*fields)
     except AssignmentError:
@@ -234,7 +264,10 @@ def _abort_publication(value: object) -> CaptureAbortPublication:
     _require(type(value) is CaptureAbortPublication, bad)
     assert isinstance(value, CaptureAbortPublication)
     try:
-        ids = [eq._uuid(item, eq.Refusal.INVALID_INPUT) for item in astuple(value)]
+        ids = [
+            eq._uuid(item, eq.Refusal.INVALID_INPUT)
+            for item in (value.receipt_id, value.run_id, value.capture_receipt_id)
+        ]
     except eq._Refused:
         raise _Refused(bad) from None
     _require(ids[0] != ids[2], bad)
@@ -256,13 +289,7 @@ def _packet(value: object, kind: type[CaptureAckClaim] | type[AbortResolutionCla
 def _decode(packet: bytes, cap: int) -> dict[str, Any]:
     unusable = Refusal.CAPTURE_UNUSABLE
     _require(len(packet) <= cap and packet.isascii(), unusable)
-    text = packet.decode("ascii")
-    try:
-        value = eq._strict_json(text)
-    except eq._Refused:
-        raise _Refused(unusable) from None
-    _require(_canonical(value) == text, unusable)
-    return value
+    return _strict(packet.decode("ascii"), unusable)
 
 
 def _snapshot(value: object) -> dict[str, Any]:
@@ -287,6 +314,9 @@ def _snapshot(value: object) -> dict[str, Any]:
     _require(type(wakes) is list, unusable)
     for wake in wakes:
         _require(type(wake) is dict, unusable)
+        for key in ("id", "thread_id", "topic_id"):
+            number = wake.get(key)
+            _require(number is None or type(number) is not int or number <= MAX_INT, unusable)
         for key in ("reason", "source_ref"):
             text = wake.get(key)
             _require(text is None or (type(text) is str and len(text) <= TEXT_MAX), unusable)
@@ -318,7 +348,10 @@ def _proof_packet(packet: bytes) -> tuple[str, dict[str, Any], tuple[str, dict[s
     if capture is None:
         return packet.decode("ascii"), proof, None
     snapshot = _snapshot(capture)
-    text = _canonical(snapshot)
+    try:
+        text = _canonical(snapshot)
+    except (ValueError, RecursionError):
+        raise _Refused(unusable) from None
     _require(len(text) <= SNAPSHOT_MAX, unusable)
     return packet.decode("ascii"), proof, (text, snapshot)
 
@@ -440,12 +473,7 @@ CAPTURES_QUERY = f"SELECT {_projection_real(_CAPTURES)} FROM captures WHERE run_
 
 
 def _strict_row_json(text: str) -> dict[str, Any]:
-    try:
-        value = eq._strict_json(text)
-    except eq._Refused:
-        raise _Refused(Refusal.ROW_REFUSED) from None
-    _require(_canonical(value) == text)
-    return value
+    return _strict(text, Refusal.ROW_REFUSED)
 
 
 def _receipt(rows: list[sqlite3.Row]) -> dict[str, Any]:
@@ -520,7 +548,7 @@ def _episode(conn: sqlite3.Connection, control: ExpectedControl) -> tuple[Captur
         claim = _bound(conn, run_id, payload)
         choices, _ = _context(conn, run_id, receipt_id)
         return CaptureEpisode(
-            seq, "capture", run_id, receipt_id, selected["payload"], choices, None, None
+            seq, "capture", run_id, seq, receipt_id, selected["payload"], choices, None, None
         ), claim
     links = conn.execute(LINK_BY_ABORT_QUERY, (receipt_id,)).fetchall()
     _require(len(links) == 1)
@@ -530,7 +558,7 @@ def _episode(conn: sqlite3.Connection, control: ExpectedControl) -> tuple[Captur
     _require(parent_id != receipt_id)
     parent = _receipt(conn.execute(RECEIPT_BY_ID_QUERY, (parent_id,)).fetchall())
     _require(parent["action"] == "capture" and parent["acked"] == 0 and parent["run_id"] == run_id)
-    _require(parent["receipt_id"] == parent_id)
+    _require(parent["receipt_id"] == parent_id and 1 <= parent["seq"] <= MAX_INT and parent["seq"] != seq)
     payload = _capture_payload(parent["payload"], control, parent_id)
     abort_text = selected["payload"]
     _strict_row_json(abort_text)
@@ -538,7 +566,15 @@ def _episode(conn: sqlite3.Connection, control: ExpectedControl) -> tuple[Captur
     claim = _bound(conn, run_id, payload)
     choices, _ = _context(conn, run_id, parent_id)
     episode = CaptureEpisode(
-        seq, "capture_abort", run_id, parent_id, parent["payload"], choices, receipt_id, abort_text
+        seq,
+        "capture_abort",
+        run_id,
+        parent["seq"],
+        parent_id,
+        parent["payload"],
+        choices,
+        receipt_id,
+        abort_text,
     )
     return episode, claim
 
@@ -640,7 +676,7 @@ def _publish_capture(
     )
     after = _advance(conn, expected, seq)
     episode = CaptureEpisode(
-        seq, "capture", publication.run_id, publication.receipt_id, payload, choices, None, None
+        seq, "capture", publication.run_id, seq, publication.receipt_id, payload, choices, None, None
     )
     _after(conn, after, episode, publication.claim)
     _commit(conn, attempt, after, episode, None)
@@ -714,6 +750,7 @@ def _publish_abort(
         seq,
         "capture_abort",
         episode.run_id,
+        episode.capture_seq,
         episode.capture_receipt_id,
         episode.capture_payload,
         episode.choices,
@@ -852,8 +889,22 @@ def _resolved(
         else:
             parent = selected
         _require(
-            (parent["receipt_id"], parent["action"], parent["payload"], parent["acked"])
-            == (episode.capture_receipt_id, "capture", episode.capture_payload, int(parent_acked))
+            (
+                parent["seq"],
+                parent["receipt_id"],
+                parent["action"],
+                parent["run_id"],
+                parent["payload"],
+                parent["acked"],
+            )
+            == (
+                episode.capture_seq,
+                episode.capture_receipt_id,
+                "capture",
+                episode.run_id,
+                episode.capture_payload,
+                int(parent_acked),
+            )
         )
         choices, context = _context(conn, episode.run_id, episode.capture_receipt_id, resolved=True)
         _require(choices == episode.choices)
