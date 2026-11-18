@@ -469,3 +469,46 @@ def test_an_overflowing_value_written_during_publication_is_a_snapshot_fault(
     result = cq.publish_capture(queue_path, expected=empty, publication=PUBLICATION)
     assert result.fault == cq.Fault.SNAPSHOT_FAILURE and result.control is None
     assert tables(queue_path) == before
+
+
+@pytest.mark.parametrize(
+    ("operation", "raw"),
+    [
+        pytest.param("capture", "[" * 3000 + "]" * 3000, id="capture-array-depth-under-cap"),
+        pytest.param("capture", '{"a":' * 3000 + "1" + "}" * 3000, id="capture-object-depth-under-cap"),
+        pytest.param("aborted", "[" * 3000 + "]" * 3000, id="proof-array-depth-under-cap"),
+        pytest.param("aborted", '{"a":' * 3000 + "1" + "}" * 3000, id="proof-object-depth-under-cap"),
+    ],
+)
+def test_over_deep_packets_within_their_byte_caps_are_unusable_before_sql(
+    queue_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, raw: str
+) -> None:
+    assert len(raw) < cq.SNAPSHOT_MAX
+    active = captured(queue_path) if operation == "capture" else aborting(queue_path)
+    tape = Tape(monkeypatch)
+    if operation == "capture":
+        result = cq.acknowledge_capture(
+            queue_path, expected=active, claim=cq.CaptureAckClaim(CAPTURE, raw.encode())
+        )
+    else:
+        result = cq.resolve_capture_abort(
+            queue_path, expected=active, claim=cq.AbortResolutionClaim(ABORT, raw.encode())
+        )
+    tape.dispose()
+    refused(result, cq.Refusal.CAPTURE_UNUSABLE)
+    assert result.fault is None and tape.attempts == []
+
+
+@pytest.mark.parametrize(
+    ("table", "column", "value"),
+    [
+        pytest.param("receipts", "payload", "[" * 4000 + "]" * 4000, id="receipt-payload-depth-under-cap"),
+        pytest.param("captures", "policy", "[" * 1000 + "]" * 1000, id="policy-depth-under-cap"),
+    ],
+)
+def test_over_deep_stored_rows_within_their_caps_are_row_refusals(
+    queue_path: Path, table: str, column: str, value: str
+) -> None:
+    active = captured(queue_path)
+    sql(queue_path, f"UPDATE {table} SET {column}=? WHERE receipt_id=?", value, CAPTURE)
+    refused(cq.observe_capture_episode(queue_path, expected=active), cq.Refusal.ROW_REFUSED)

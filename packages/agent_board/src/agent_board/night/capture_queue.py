@@ -872,7 +872,9 @@ def _resolved(
         if eq._read_control(conn) != after:
             raise eq._Failed(Fault.SNAPSHOT_FAILURE)
         selected = _receipt(conn.execute(eq.SELECTED_QUERY, (episode.seq,)).fetchall())
-        _require(selected["acked"] == 1 and selected["run_id"] == episode.run_id)
+        _require(
+            selected["seq"] == episode.seq and selected["acked"] == 1 and selected["run_id"] == episode.run_id
+        )
         if episode.action == "capture_abort":
             _require(
                 (selected["receipt_id"], selected["action"], selected["payload"])
@@ -883,8 +885,8 @@ def _resolved(
             _require(len(links) == 1)
             row = _row(links[0], _LINK, frozenset(("outcome", "proof")))
             _require(
-                (row["parent_receipt_id"], row["outcome"], row["proof"])
-                == (episode.capture_receipt_id, *(link or (None, None)))
+                (row["parent_receipt_id"], row["abort_receipt_id"], row["outcome"], row["proof"])
+                == (episode.capture_receipt_id, episode.abort_receipt_id, *(link or (None, None)))
             )
         else:
             parent = selected
