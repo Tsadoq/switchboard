@@ -317,3 +317,71 @@ def test_a_close_on_a_thread_whose_room_was_archived_still_reports_the_close(
     )
     assert "room_archived" in caplog.text
     assert [ask["id"] for ask in _asks(browser, pi, "closed")] == [opened["id"]]
+
+
+def _human_ask_wakes(settings: Settings) -> list[tuple[Any, ...]]:
+    with closing(sqlite3.connect(settings.db_path)) as conn:
+        return conn.execute(
+            "SELECT reason, source_ref, summary, thread_id, topic_id FROM wakes "
+            "WHERE principal = 'human' AND reason = 'ask' ORDER BY id"
+        ).fetchall()
+
+
+def test_opening_an_ask_wakes_the_human_once_with_the_ask_itself(
+    client: TestClient, signer: "SignerFactory", settings: Settings
+) -> None:
+    pi = signer("pi@testbox")
+    _register(client, pi)
+    thread_id, post_id = _post(client, pi)
+
+    opened = _open(client, pi, post_id, "Publish the two reviewed draft PRs")
+
+    assert _human_ask_wakes(settings) == [
+        (
+            "ask",
+            f"ask:{opened['id']}",
+            f"ask {opened['id']} from pi@testbox (thread {thread_id}): Publish the two reviewed draft PRs",
+            thread_id,
+            thread_id,
+        )
+    ]
+
+
+def test_a_reply_with_an_ask_makes_exactly_one_ask_wake(
+    client: TestClient, signer: "SignerFactory", settings: Settings
+) -> None:
+    pi = signer("pi@testbox")
+    _register(client, pi)
+    thread_id, _ = _post(client, pi)
+    reply = _send(client, pi, "post", f"thread:{thread_id}", {"body": "ready to ship"})
+    assert reply.status_code == 201, reply.text
+
+    _open(client, pi, reply.json()["post_id"], "Approve the deploy")
+
+    assert len(_human_ask_wakes(settings)) == 1
+
+
+def test_a_refused_second_mark_and_closing_wake_nobody_about_an_ask(
+    client: TestClient, signer: "SignerFactory", settings: Settings
+) -> None:
+    pi = signer("pi@testbox")
+    _register(client, pi)
+    _, post_id = _post(client, pi)
+    opened = _open(client, pi, post_id)
+    assert len(_human_ask_wakes(settings)) == 1
+
+    again = _send(client, pi, "ask.open", f"post:{post_id}", {"ask": "Again"})
+    closed = _send(client, pi, "ask.close", f"ask:{opened['id']}", {"outcome": "Resolved"})
+
+    assert (again.status_code, closed.status_code) == (409, 200)
+    assert len(_human_ask_wakes(settings)) == 1
+
+
+def test_a_refused_open_wakes_nobody(client: TestClient, signer: "SignerFactory", settings: Settings) -> None:
+    pi, claude = signer("pi@testbox"), signer("claude@testbox")
+    _register(client, pi, claude)
+    _, post_id = _post(client, pi)
+
+    refused = _send(client, claude, "ask.open", f"post:{post_id}", {"ask": "Not my post"})
+
+    assert refused.status_code == 403 and _human_ask_wakes(settings) == []

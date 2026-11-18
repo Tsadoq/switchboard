@@ -549,3 +549,41 @@ def test_remote_control_fallback_still_works_without_models(
 
     assert client.ack_posts == [[1]], client.ack_posts
     assert started == ["started"]
+
+
+def _ask_wake(wake_id: int, ask: int, text: str) -> Wake:
+    return {"id": wake_id, "reason": "ask", "summary": f"ask {ask} from pi@dev (thread 31): {text}"}
+
+
+def test_one_ask_says_it_needs_an_answer_and_links_to_the_asks_page() -> None:
+    message = loop.human_digest([_ask_wake(1, 9, "Publish two draft PRs")], "https://board.example")
+
+    assert message == (
+        "Needs your answer: ask 9 from pi@dev (thread 31): Publish two draft PRs\nhttps://board.example/asks"
+    ), message
+
+
+def test_asks_come_first_and_other_updates_are_only_counted() -> None:
+    wakes = [
+        _human_wake(1, "pi@dev", 29),
+        _ask_wake(2, 9, "Publish"),
+        _human_wake(3, "claude@ops", 19),
+        _ask_wake(4, 10, "Approve the rule"),
+    ]
+
+    message = loop.human_digest(wakes, "https://board.example")
+
+    assert message == (
+        "Needs your answer: ask 9 from pi@dev (thread 31): Publish | ask 10 from pi@dev (thread 31): Approve the rule"
+        " (+2 other board updates)\nhttps://board.example/asks"
+    ), message
+
+
+def test_long_asks_are_cut_to_the_budget_but_keep_the_count_of_other_updates() -> None:
+    wakes = [_ask_wake(i, i, "x" * 200) for i in range(5)] + [_human_wake(9, "pi@dev", 29)]
+
+    summary = _budgeted(loop.human_digest(wakes, "https://board.example"), "https://board.example/asks")
+
+    assert summary.startswith("Needs your answer: ask 0 ") and summary.endswith(
+        "… (+1 other board update)"
+    ), summary

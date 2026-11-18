@@ -103,7 +103,7 @@ def create_app(settings: Settings) -> FastAPI:
     registry = _open_registry(settings, roles.principals)
     forum = Forum(db, events, registry, settings)
     tickets = Tickets(db, forum)
-    asks = Asks(db, forum)
+    asks = Asks(db, forum, events)
     file_store = Store(settings.state_dir / "files", settings.file_max_mb * 1024 * 1024)
     files = Files(db, file_store, settings.file_ttl_days)
     app.state.settings = settings
