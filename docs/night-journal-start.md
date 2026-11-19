@@ -48,7 +48,7 @@ The journal must already exist:
 - mode exactly 0600, one link, private ancestry;
 - a SQLite header and no `-journal`, `-wal` or `-shm` sidecar. A sidecar means refusal by presence only: no diagnosis and no clearing.
 
-The header is read and its descriptor closed before SQLite connects (`mode=rw`, no autocommit, timeout 0). After the connect, only `lstat` identity and the mode are rechecked.
+The header is read and its descriptor closed before SQLite connects with `mode=rw`, `timeout=0` and `isolation_level=None`. With that setting the driver issues no implicit BEGIN or COMMIT. The only transaction boundaries are the explicit `BEGIN IMMEDIATE`, `COMMIT` and at most one `ROLLBACK` in the schedule below, and the PRAGMAs before BEGIN run outside any transaction. After the connect, only `lstat` identity and the mode are rechecked.
 
 The schedule is 13 statements:
 1. `PRAGMA busy_timeout=0`, `synchronous=EXTRA`, `trusted_schema=OFF`, `BEGIN IMMEDIATE`;
@@ -120,7 +120,7 @@ How the outcome is decided:
   - each postwrite column changed in value and in type, and the rowcount, cardinality and active mismatches;
   - prewrite row and schema refusals;
   - interrupts;
-  - descriptor counts;
+  - path-scoped descriptor checks and SQLite connection closure, with an unrelated-close regression and true-leak and unclosed-connection controls;
   - 10, 10,000 and 100,000 stopped-history rows, with and without an active row. Those show unchanged SEARCH plans on `sqlite_autoindex_runs_1` and `one_active_run`, and identical VM step counts.
 
 These are fixture tests. They do not certify SQLite's allocation, latency, every corrupt state, owner or uid enforcement under root, or anything native or operational.

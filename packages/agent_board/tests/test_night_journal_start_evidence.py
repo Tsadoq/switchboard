@@ -137,8 +137,25 @@ def journal() -> Iterator[Path]:
         yield path
 
 
-def descriptors() -> int:
-    return len(os.listdir("/proc/self/fd"))
+def path_descriptors(path: Path) -> list[int]:
+    owned: list[int] = []
+    names = {str(path), *(f"{path}{suffix}" for suffix in ("-journal", "-wal", "-shm"))}
+    for entry in os.listdir("/proc/self/fd"):
+        try:
+            target = os.readlink(f"/proc/self/fd/{entry}")
+        except FileNotFoundError:
+            continue
+        if target in names:
+            owned.append(int(entry))
+    return owned
+
+
+def assert_released(path: Path, tape: Tape) -> None:
+    assert path_descriptors(path) == []
+    assert tape.connections
+    for conn in tape.connections:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            sqlite3.Connection.execute(conn, "SELECT 1")
 
 
 def test_normal_schedule_is_thirteen_statements(journal: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -165,7 +182,7 @@ def _expected(index: int, when: str) -> StartClaimResult:
 def test_fault_before_and_after_every_statement(
     journal: Path, monkeypatch: pytest.MonkeyPatch, index: int, when: str
 ) -> None:
-    before = descriptors()
+    assert path_descriptors(journal) == []
     tape = Tape(monkeypatch, fail_at=index, when=when)
     outcome = claim(journal)
     assert outcome == _expected(index, when)
@@ -174,7 +191,7 @@ def test_fault_before_and_after_every_statement(
     rollback = ["ROLLBACK"] if begun else []
     assert tape.attempts == SCHEDULE[: index + 1] + rollback
     assert len(tape.native) == len(tape.attempts) - (1 if when == "before" else 0)
-    assert descriptors() == before
+    assert_released(journal, tape)
     if SCHEDULE[index] != "COMMIT":
         assert rows(journal) == []
 
@@ -503,10 +520,61 @@ def test_fields_are_owned_scalars_not_caller_objects(journal: Path) -> None:
 def test_interrupt_propagates_after_bounded_cleanup(
     journal: Path, monkeypatch: pytest.MonkeyPatch, index: int
 ) -> None:
-    before = descriptors()
+    assert path_descriptors(journal) == []
     tape = Tape(monkeypatch, interrupt_at=index)
     with pytest.raises(KeyboardInterrupt):
         claim(journal)
     assert (tape.attempts[-1] == "ROLLBACK") == (index > 3)
-    assert descriptors() == before
+    assert_released(journal, tape)
     assert rows(journal) == []
+
+
+def test_unrelated_descriptor_reclaimed_during_claim_does_not_matter(
+    journal: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unrelated = os.open(os.devnull, os.O_RDONLY | os.O_CLOEXEC)
+    tape = Tape(monkeypatch)
+    original = sqlite3.connect
+
+    def connect(*args: Any, **kwargs: Any) -> Any:
+        os.close(unrelated)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    before = len(os.listdir("/proc/self/fd"))
+    assert claim(journal).usable
+    assert len(os.listdir("/proc/self/fd")) == before - 1
+    assert_released(journal, tape)
+
+
+def test_path_scoped_check_detects_a_real_leak(journal: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    leaked: list[int] = []
+    tape = Tape(monkeypatch)
+    original = sqlite3.connect
+
+    def connect(*args: Any, **kwargs: Any) -> Any:
+        leaked.append(os.open(journal, os.O_RDONLY | os.O_CLOEXEC))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    try:
+        assert claim(journal).usable
+        assert path_descriptors(journal) == leaked
+        with pytest.raises(AssertionError):
+            assert_released(journal, tape)
+    finally:
+        for fd in leaked:
+            os.close(fd)
+    assert_released(journal, tape)
+
+
+def test_unclosed_connection_is_detected(journal: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tape = Tape(monkeypatch, close="before")
+    try:
+        assert claim(journal).fault is Fault.CLOSE_FAILURE
+        assert path_descriptors(journal) != []
+        with pytest.raises(AssertionError):
+            assert_released(journal, tape)
+    finally:
+        tape.dispose()
+    assert_released(journal, tape)
