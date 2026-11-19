@@ -361,3 +361,35 @@ def test_only_mode_0600_is_admitted(
     finally:
         path.chmod(0o600)
     refused(result, qs.Refusal.PATH_REFUSED)
+
+
+BYTES_SNAPSHOT: Any = b"{}"
+TEXT_ASSIGNMENT: Any = "text"
+
+
+@pytest.mark.parametrize(
+    ("completion", "reason"),
+    [
+        pytest.param(
+            cq.CapturedCompletion("é" * 10, None), qs.Refusal.COMPLETION_UNUSABLE, id="snapshot-not-ascii"
+        ),
+        pytest.param(
+            cq.CapturedCompletion("[]", None), qs.Refusal.COMPLETION_UNUSABLE, id="snapshot-not-an-object"
+        ),
+        pytest.param(
+            cq.CapturedCompletion(BYTES_SNAPSHOT, None), qs.Refusal.INVALID_INPUT, id="snapshot-bytes"
+        ),
+        pytest.param(
+            cq.CapturedCompletion("{}", b"x" * 131073), qs.Refusal.INVALID_INPUT, id="assignment-oversized"
+        ),
+        pytest.param(
+            cq.CapturedCompletion("{}", TEXT_ASSIGNMENT), qs.Refusal.INVALID_INPUT, id="assignment-text"
+        ),
+    ],
+)
+def test_completion_staging_separates_unusable_packets_from_invalid_fields(
+    live: Live, monkeypatch: pytest.MonkeyPatch, completion: Any, reason: qs.Refusal
+) -> None:
+    tape = Tape(monkeypatch)
+    refused(live.read(completion=completion), reason)
+    assert tape.attempts == []
