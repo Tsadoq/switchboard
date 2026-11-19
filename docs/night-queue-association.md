@@ -27,7 +27,9 @@ Everything in `docs/night-effective-queue.md` and `docs/night-capture-queue.md` 
 - The 25-statement success schedule, pinned, and identical with 10, 10000 and 100000 rows of history in both files, including ack0 parents behind resolved aborts. Journal lookups use an index with constant VM steps on hit and miss.
 - Every refusal class: invalid input, unusable completion, path, sidecar, schema, identity, control, active queue, rows, journal eligibility, association mismatch, abort link and expiry; exact mode 0600 for both files.
 - A failure before and after every statement; rollback and close faults on either file with per-file cleanup and close-first precedence; the typed BUSY/LOCKED stages; a real held lock.
-- Every column of every read altered and every read given the wrong cardinality; deleted input fields; inputs changed during the open; no owned descriptor or connection left after any outcome.
+- Every column of the eight named metadata reads (run, active slot, binding, capture, capture receipt, arm, identity and control) altered, except the capture receipt's sequence number, which is range-checked only; each of those reads and the abort-link lookup given the wrong cardinality. The catalog and schema queries are not part of this matrix.
+- Deleted input fields and inputs changed during the open.
+- After a success, an expired grant and an invalid input, no owned descriptor or connection is left open. After a failed close the reader reports that file's cleanup as UNCERTAIN and does not promise the connection was physically closed.
 - With exclusion deliberately absent, an open reader makes a journal stop COMMIT fail with BUSY, as the contract warns.
 
 These are fixture tests. They do not certify SQLite's internal allocation, latency, every corrupt state, or anything about native execution, the guard, the server or operation.
