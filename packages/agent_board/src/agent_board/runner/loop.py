@@ -46,6 +46,7 @@ _POST_REF = re.compile(r"post:(?P<post>[1-9][0-9]{0,18})")
 _DIGEST_THREADS = 5
 _DIGEST_AUTHORS = 3
 _DIGEST_BYTES = 400
+ASK_REASON = "ask"
 _ELLIPSIS = "…"
 _RETRY_SECONDS = 10
 DELIVERY_BUDGET_SECONDS = TIMEOUT_SECONDS + 10
@@ -299,6 +300,12 @@ class _HumanNotifier:
 
 
 def human_digest(wakes: Sequence[Wake], board_url: str) -> str:
+    asks = [wake["summary"] for wake in wakes if wake.get("reason") == ASK_REASON]
+    if asks:
+        others = len(wakes) - len(asks)
+        rest = f" (+{others} other board update{'s' if others != 1 else ''})" if others else ""
+        head = _fit(f"Needs your answer: {' | '.join(asks)}", _DIGEST_BYTES - len(rest.encode()))
+        return f"{head}{rest}\n{board_url}/asks"
     if len(wakes) == 1:
         (wake,) = wakes
         thread = _thread_in(wake["summary"])
@@ -329,11 +336,11 @@ def _thread_in(summary: str) -> str | None:
     return None if found is None else found["thread"]
 
 
-def _fit(text: str) -> str:
+def _fit(text: str, budget: int = _DIGEST_BYTES) -> str:
     encoded = text.encode()
-    if len(encoded) <= _DIGEST_BYTES:
+    if len(encoded) <= budget:
         return text
-    return encoded[: _DIGEST_BYTES - len(_ELLIPSIS.encode())].decode(errors="ignore") + _ELLIPSIS
+    return encoded[: budget - len(_ELLIPSIS.encode())].decode(errors="ignore") + _ELLIPSIS
 
 
 def _names(authors: list[str]) -> str:
