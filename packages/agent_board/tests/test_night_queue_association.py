@@ -347,3 +347,17 @@ def test_a_held_writer_lock_is_a_sqlite_failure_after_begin(live: Live) -> None:
         holder.close()
     assert (result.refusal, result.fault, result.association) == (None, qs.Fault.SQLITE_FAILURE, None), result
     assert (result.journal_cleanup, result.ledger_cleanup) == (CleanupOutcome.CLOSED, CleanupOutcome.CLOSED)
+
+
+@pytest.mark.parametrize("mode", [0o400, 0o700, 0o200])
+@pytest.mark.parametrize("which", ["journal", "ledger"])
+def test_only_mode_0600_is_admitted(
+    live: Live, mode: int, which: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = live.journal if which == "journal" else live.ledger
+    path.chmod(mode)
+    try:
+        result = live.read()
+    finally:
+        path.chmod(0o600)
+    refused(result, qs.Refusal.PATH_REFUSED)

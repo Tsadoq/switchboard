@@ -1,6 +1,7 @@
 import math
 import re
 import sqlite3
+import stat
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -266,9 +267,18 @@ class _State:
             self.fault = fault
 
 
+def _exact_mode(path: Path) -> None:
+    try:
+        mode = stat.S_IMODE(path.lstat().st_mode)
+    except OSError:
+        raise _Refused(Refusal.PATH_REFUSED) from None
+    _require(mode == 0o600, Refusal.PATH_REFUSED)
+
+
 def _preflight(path: Path, slot: _Connection) -> tuple[int, int]:
     probe = eq._Attempt()
     try:
+        _exact_mode(path)
         return eq._existing(path, probe)
     except eq._Refused as error:
         raise _Refused(Refusal(error.reason.value)) from None
@@ -294,6 +304,7 @@ def _open(path: Path, identity: tuple[int, int], slot: _Connection) -> sqlite3.C
     except (StateError, OSError):
         raise _Refused(Refusal.PATH_REFUSED) from None
     _require((metadata.st_dev, metadata.st_ino) == identity, Refusal.PATH_REFUSED)
+    _require(stat.S_IMODE(metadata.st_mode) == 0o600, Refusal.PATH_REFUSED)
     return conn
 
 
