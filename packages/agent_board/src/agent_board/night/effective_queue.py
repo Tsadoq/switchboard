@@ -488,8 +488,13 @@ def _strict_json(text: str) -> dict[str, Any]:
     def constant(name: str) -> None:
         raise _Refused(Refusal.ROW_REFUSED)
 
+    def number(literal: str) -> float:
+        value = float(literal)
+        _require(math.isfinite(value))
+        return value
+
     try:
-        value: object = json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
+        value: object = json.loads(text, object_pairs_hook=pairs, parse_constant=constant, parse_float=number)
     except (ValueError, RecursionError):
         raise _Refused(Refusal.ROW_REFUSED) from None
     if type(value) is not dict:
@@ -524,7 +529,11 @@ def _selected(conn: sqlite3.Connection, control: ExpectedControl) -> tuple[Selec
     _require(conn.execute(PARENT_QUERY, (receipt_id,)).fetchall() == [])
     payload = _strict_json(text)
     _require(set(payload) == (_BINDING_FIELDS if action == "binding" else _EVIDENCE_FIELDS))
-    _require(_canonical(payload) == text)
+    try:
+        canonical = _canonical(payload)
+    except (ValueError, RecursionError):
+        raise _Refused(Refusal.ROW_REFUSED) from None
+    _require(canonical == text)
     _fence(payload["fence"])
     _require(payload["journal_id"] == control.journal_id and payload["receipt_id"] == receipt_id)
     _require(type(payload["counter"]) is int and payload["counter"] == control.acked_counter)
