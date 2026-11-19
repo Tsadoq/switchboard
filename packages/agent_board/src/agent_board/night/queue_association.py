@@ -490,6 +490,18 @@ def _receipt(
     )
 
 
+def _in_transaction(state: _State) -> bool:
+    for slot in (state.journal, state.ledger):
+        if slot.conn is None:
+            continue
+        try:
+            if slot.conn.in_transaction:
+                return True
+        except sqlite3.Error:
+            return True
+    return False
+
+
 def _finish(slot: _Connection, state: _State) -> None:
     conn = slot.conn
     if conn is None:
@@ -498,6 +510,7 @@ def _finish(slot: _Connection, state: _State) -> None:
         if slot.begun or conn.in_transaction:
             conn.execute("ROLLBACK")
     except sqlite3.Error:
+        slot.cleanup = CleanupOutcome.UNCERTAIN
         state.failed(Fault.ROLLBACK_FAILURE)
     finally:
         try:
@@ -545,7 +558,9 @@ def read_capture_association(
         code = getattr(error, "sqlite_errorcode", None)
         if (
             not state.any_begun
+            and not _in_transaction(state)
             and type(code) is int
+            and code >= 0
             and code & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
         ):
             state.refusal = Refusal.BUSY

@@ -48,6 +48,7 @@ class Tape:
         fail_at: int | None = None,
         when: str = "before",
         error: tuple[object, str | int] | None = None,
+        error_when: str = "before",
         rollback: dict[str, str] | None = None,
         close: dict[str, str] | None = None,
         rows: tuple[str, int, Any] | None = None,
@@ -90,8 +91,11 @@ class Tape:
             def execute(self, sql: str, parameters: Any = (), /) -> Any:
                 index = len(tape.attempts)
                 tape.attempts.append(sql)
-                if error is not None and error[1] == index:
+                if error is not None and error[1] == index and error_when == "before":
                     tape.skipped.append(index)
+                    raise failure()
+                if error is not None and error[1] == index:
+                    super().execute(sql, parameters)
                     raise failure()
                 fault = when if index == fail_at else None
                 if sql == "ROLLBACK":
@@ -159,7 +163,13 @@ def test_a_failure_at_any_statement_returns_no_association_and_closes_both(
     assert tape.closes == len(tape.connections) == 2
     assert all(count <= 1 for count in tape.rollbacks.values())
     assert len(tape.native) + len(tape.skipped) == len(tape.attempts) <= 25
-    assert (result.journal_cleanup, result.ledger_cleanup) == (CleanupOutcome.CLOSED, CleanupOutcome.CLOSED)
+    rolled_back = {23: "ledger", 24: "journal"}.get(index) if statement == "ROLLBACK" else None
+    assert result.journal_cleanup == (
+        CleanupOutcome.UNCERTAIN if rolled_back == "journal" else CleanupOutcome.CLOSED
+    )
+    assert result.ledger_cleanup == (
+        CleanupOutcome.UNCERTAIN if rolled_back == "ledger" else CleanupOutcome.CLOSED
+    )
     assert unchanged(live) == before
 
 
@@ -182,27 +192,46 @@ def test_cleanup_faults_keep_per_file_status_and_close_first_precedence(
 
     no_association(result)
     assert result.fault == (qs.Fault.CLOSE_FAILURE if close_role else qs.Fault.ROLLBACK_FAILURE)
+    uncertain = {rollback_role, close_role}
     assert result.journal_cleanup == (
-        CleanupOutcome.UNCERTAIN if close_role == "journal" else CleanupOutcome.CLOSED
+        CleanupOutcome.UNCERTAIN if "journal" in uncertain else CleanupOutcome.CLOSED
     )
     assert result.ledger_cleanup == (
-        CleanupOutcome.UNCERTAIN if close_role == "ledger" else CleanupOutcome.CLOSED
+        CleanupOutcome.UNCERTAIN if "ledger" in uncertain else CleanupOutcome.CLOSED
     )
     assert tape.closes == 2 and tape.rollbacks == {"journal": 1, "ledger": 1}
 
 
-@pytest.mark.parametrize("code", [None, True, "5", 5, 6, 261, 262, 517])
-@pytest.mark.parametrize("stage", ["connect-journal", "connect-ledger", 0, 3, 4, 7, 8])
+@pytest.mark.parametrize("code", [None, True, "5", 5, 6, 261, 262, 517, -251, -250, -5])
+@pytest.mark.parametrize(
+    ("stage", "when"),
+    [
+        ("connect-journal", "before"),
+        ("connect-ledger", "before"),
+        (0, "before"),
+        (3, "before"),
+        (3, "after"),
+        (4, "before"),
+        (7, "before"),
+        (7, "after"),
+        (8, "before"),
+    ],
+)
 def test_only_typed_busy_before_any_successful_begin_is_busy(
-    live: Live, monkeypatch: pytest.MonkeyPatch, code: Any, stage: str | int
+    live: Live, monkeypatch: pytest.MonkeyPatch, code: Any, stage: str | int, when: str
 ) -> None:
-    tape = Tape(monkeypatch, error=(code, stage))
+    tape = Tape(monkeypatch, error=(code, stage), error_when=when)
 
     result = live.read()
     tape.dispose()
 
-    early = stage in ("connect-journal", "connect-ledger", 0, 3)
-    busy = early and type(code) is int and code & 0xFF in (5, 6)
+    early = (stage, when) in (
+        ("connect-journal", "before"),
+        ("connect-ledger", "before"),
+        (0, "before"),
+        (3, "before"),
+    )
+    busy = early and type(code) is int and code >= 0 and code & 0xFF in (5, 6)
     assert result.refusal == (qs.Refusal.BUSY if busy else None), result
     assert result.fault == (None if busy else qs.Fault.SQLITE_FAILURE)
     no_association(result)
