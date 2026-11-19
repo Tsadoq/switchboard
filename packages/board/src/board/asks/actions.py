@@ -6,12 +6,15 @@ from typing import Literal
 
 from board.constants import HUMAN
 from board.db import Database
+from board.events import EventHub
 from board.forum.actions import Forum, Refused
 from board.forum.entities import AuthorKind, ThreadTarget
+from board.forum.fanout import WakeRequest, WakeRequested
 
 _log = logging.getLogger(__name__)
 
 LINE_MAX = 200
+ASK_REASON = "ask"
 LIST_MAX = 200
 
 type AskState = Literal["open", "closed"]
@@ -67,14 +70,15 @@ class Ask:
 
 
 class Asks:
-    def __init__(self, db: Database, forum: Forum) -> None:
+    def __init__(self, db: Database, forum: Forum, events: EventHub) -> None:
         self._db = db
         self._forum = forum
+        self._events = events
 
     async def open(self, principal: str, post_id: int, ask: object) -> Ask:
         text = one_line(ask, "ask")
 
-        def store(conn: sqlite3.Connection) -> Ask:
+        def store(conn: sqlite3.Connection) -> tuple[Ask, int]:
             post = conn.execute("SELECT author, author_kind FROM posts WHERE id = ?", (post_id,)).fetchone()
             if post is None:
                 raise AskRefused("no_such_post")
@@ -89,9 +93,15 @@ class Asks:
                 raise AskRefused("ask_open") from None
             if cursor.lastrowid is None:
                 raise RuntimeError("INSERT reported no row id")
-            return _read(conn, cursor.lastrowid)
+            opened = _read(conn, cursor.lastrowid)
+            topic = conn.execute(
+                "SELECT COALESCE(topic_id, id) FROM threads WHERE id = ?", (opened.thread_id,)
+            ).fetchone()[0]
+            return opened, topic
 
-        return await self._db.transact(store)
+        opened, topic_id = await self._db.transact(store)
+        await self._events.publish(WakeRequested(_human_wake(opened, topic_id)))
+        return opened
 
     async def close(self, principal: str, ask_id: int, outcome: object) -> tuple[Ask, bool]:
         text = one_line(outcome, "outcome")
@@ -151,6 +161,11 @@ class Asks:
             return int(conn.execute("SELECT COUNT(*) FROM human_asks WHERE closed_at IS NULL").fetchone()[0])
 
         return await self._db.read(count)
+
+
+def _human_wake(ask: Ask, topic_id: int) -> WakeRequest:
+    summary = f"ask {ask.id} from {ask.asker} (thread {ask.thread_id}): {ask.ask}"
+    return WakeRequest(HUMAN, ASK_REASON, f"ask:{ask.id}", summary, ask.thread_id, topic_id)
 
 
 def one_line(value: object, field: str) -> str:
