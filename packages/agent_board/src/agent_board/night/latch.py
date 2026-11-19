@@ -54,12 +54,25 @@ def latch_stop(
     fence: str | None,
     events: Callable[[Path], str] = lambda path: path.read_text(),
 ) -> Outcome:
-    """Durably requests stop for night runs once the only journal writer, the verifier, is proven gone.
+    """Requests stop for a named fenced run, or for every run the legacy journal lists as open.
 
-    Arguments are validated and the verifier proven stopped before the journal is even opened, since opening
-    it already refreshes expiry state. It only latches: no run is marked stopped, no slot is released.
-    A named run needs its fence; --all-open (run_id None) latches every open run on root's authority alone,
-    which is sound only because no request writer can still be adding or starting runs.
+    The arguments and the configured verifier socket and service are checked before the journal is opened,
+    because opening it can already create, refresh or recover legacy state. No other unit is queried, and
+    no stop, kill, mask or unmask is issued. The verifier is not the only journal writer: the guard, the
+    controller's reserve and claim_start, gate and exec journal construction, root latch paths and expiry
+    refresh can all write. A point-in-time unit observation is not all-writer exclusion and does not stop a
+    later start; the caller must hold no-new-admission and no-new-start ordering over the whole call. The
+    guard must not be required stopped first: run units bind to it, so stopping it can end runs before
+    their stop request is persisted.
+
+    The latch itself never marks a run stopped and never releases a claimed run, which stays stopping or
+    quarantined until separate settlement. The journal constructor, active() and each latch first run the
+    expiry refresh, which stops an expired or boot-changed never-claimed, non-uncertain reservation (so it
+    leaves the active slot) and quarantines an expired claimed or uncertain run. So `already` only means
+    this call did not change the latch, `no_run` only describes the legacy journal view, and enumeration
+    and each per-run latch are separate transactions. A refusal after open does not mean the files are
+    unchanged. None of these results is a physical-stop, settlement, all-writer-absence or
+    universal-emptiness certificate.
     """
     if run_id is not None and (_UUID.fullmatch(run_id) is None or not fence):
         return Outcome(refused="invalid_run")
@@ -89,7 +102,12 @@ def _latch_all(journal: LocalJournal) -> Outcome:
 
 
 def unit_not_stopped(manager: Manager, unit: str, events: Callable[[Path], str]) -> str | None:
-    """None only on a positive stop proof: every property exactly once, inactive, no job, cgroups empty or gone."""
+    """None only when the observation shows the unit stopped at that instant.
+
+    Every property must appear exactly once, LoadState must be loaded or not-found (masked is refused),
+    ActiveState inactive or failed, no job, and each cgroup empty or gone. It does not exclude a later
+    start, a process outside the unit's cgroups or any other writer, and it is not a maintenance proof.
+    """
     try:
         shown = manager.show(unit, _PROPERTIES)
     except OSError as error:
