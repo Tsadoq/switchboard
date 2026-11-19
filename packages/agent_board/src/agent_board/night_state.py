@@ -205,11 +205,15 @@ class LocalJournal:
             return self._fenced(conn, run_id, fence)
 
     def latch_stop(self, run_id: str, fence: str) -> tuple[Record, bool]:
-        """Durably requests stop without ever completing it: a live run becomes stopping and keeps its slot.
+        """Requests stop without completing it and returns the record and whether the latch changed it.
 
-        Unlike request_stop, a never-claimed reservation is not released here; it is latched as stopping too,
-        so claim_start refuses it and it is only freed by the ordinary expiry sweep. Returns the record and
-        whether this call changed it.
+        The transaction first runs the expiry refresh. That refresh marks an expired or boot-changed
+        never-claimed, non-uncertain reservation stopped, which leaves the active slot, and quarantines an
+        expired claimed or uncertain run, which keeps it. The latch then sets an unexpired reserved or
+        starting run to stopping with stop_requested, so claim_start refuses it; a claimed run keeps its slot.
+        A record that was already stop-requested, quarantined or stopped is returned unchanged with False,
+        which says nothing about physical stop or settlement. On a wrong fence or missing run the refusal
+        rolls back and then commits a fresh expiry refresh before raising.
         """
         with self._transaction() as conn:
             self._refresh(conn, self._clock())
