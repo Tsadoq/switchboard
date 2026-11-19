@@ -153,8 +153,8 @@ def test_provision_never_adopts_truncates_or_replaces_an_existing_path(private_d
         path.write_bytes(b"corrupt" if kind == "corrupt" else b"")
         if kind == "journal":
             path.with_name(path.name + "-journal").write_bytes(b"retained")
-    metadata = path.lstat()
     data = path.read_bytes() if path.is_file() else None
+    metadata = path.lstat()
     result = store.provision_fixture(path, context=CONTEXT)
     assert result.refusal == store.Refusal.PREEXISTING_PATH
     assert result.mutation == MutationOutcome.NOT_ATTEMPTED
