@@ -533,17 +533,18 @@ def test_unrelated_descriptor_reclaimed_during_claim_does_not_matter(
     journal: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     unrelated = os.open(os.devnull, os.O_RDONLY | os.O_CLOEXEC)
+    reclaimed: list[int] = []
     tape = Tape(monkeypatch)
     original = sqlite3.connect
 
     def connect(*args: Any, **kwargs: Any) -> Any:
         os.close(unrelated)
+        reclaimed.append(unrelated)
         return original(*args, **kwargs)
 
     monkeypatch.setattr(sqlite3, "connect", connect)
-    before = len(os.listdir("/proc/self/fd"))
     assert claim(journal).usable
-    assert len(os.listdir("/proc/self/fd")) == before - 1
+    assert reclaimed == [unrelated]
     assert_released(journal, tape)
 
 
