@@ -1,3 +1,4 @@
+import hashlib
 import itertools
 import os
 import sqlite3
@@ -98,6 +99,61 @@ def test_constants_are_the_pinned_association_constants() -> None:
         "PRAGMA trusted_schema=OFF",
         "BEGIN IMMEDIATE",
     )
+
+
+REVIEWED_DIGESTS = {
+    "RUN_QUERY": "96dcb226ab00264211776d9891e67c538f6ccde11bb76985bba32521cef1f069",
+    "JOURNAL_CATALOG_QUERY": "91b61a289674b09b44d41e2310136a29e7d489c58d54bcca9407c20c49fcb039",
+    "_JOURNAL_CATALOG": "0f48619a5c6a9a1c75ed27a3fa74b3620fe8fc22bb10a28e01c7ade874c6406e",
+}
+REVIEWED_RUN = {
+    "run_id": ("text", 36),
+    "fence": ("text", 128),
+    "principal": ("text", 128),
+    "uid": ("integer", 0),
+    "boot_id": ("text", 36),
+    "deadline_boottime": ("real", 0),
+    "deadline_utc": ("real", 0),
+    "state": ("text", 16),
+    "launch_claimed": ("integer", 0),
+    "stop_requested": ("integer", 0),
+    "uncertain": ("integer", 0),
+    "reason": ("text", 256),
+    "slot": ("integer", 0),
+}
+
+
+def _digest(name: str, value: object) -> str:
+    text = repr(sorted(value.items())) if isinstance(value, dict) else str(value)
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def test_reused_constants_match_reviewed_content() -> None:
+    for name, digest in REVIEWED_DIGESTS.items():
+        assert _digest(name, vars(js)[name]) == digest
+    assert list(vars(js)["_RUN"].items()) == list(REVIEWED_RUN.items())
+    assert vars(js)["ACTIVE_QUERY"] == (
+        "SELECT substr(CAST(run_id AS BLOB),1,37) AS run_id,typeof(run_id) AS run_id_kind "
+        "FROM runs INDEXED BY one_active_run WHERE slot=1 AND state != 'stopped' LIMIT 2"
+    )
+    assert vars(js)["JOURNAL_VERSION"] == 2
+    assert vars(js)["LEGACY_FENCE"].pattern == "[A-Za-z0-9_-]{32,128}"
+    assert js.FENCE.pattern == "[A-Za-z0-9_-]{43}"
+    assert vars(js)["RUN_QUERY"].endswith(
+        "FROM runs INDEXED BY sqlite_autoindex_runs_1 WHERE run_id=? LIMIT 2"
+    )
+    assert vars(js)["JOURNAL_CATALOG_QUERY"].endswith("FROM sqlite_schema LIMIT 4")
+    assert js.INSERT == (
+        "INSERT INTO runs (run_id, fence, principal, uid, boot_id, deadline_boottime, deadline_utc, "
+        "state, launch_claimed, stop_requested, uncertain, reason, slot) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 'starting', 1, 0, 0, NULL, 1)"
+    )
+
+
+def test_reviewed_digest_detects_a_widened_limit() -> None:
+    widened = qs.JOURNAL_CATALOG_QUERY.replace("LIMIT 4", "LIMIT 4000")
+    assert widened != qs.JOURNAL_CATALOG_QUERY
+    assert _digest("JOURNAL_CATALOG_QUERY", widened) != REVIEWED_DIGESTS["JOURNAL_CATALOG_QUERY"]
 
 
 def test_claim_inserts_one_starting_claimed_row(journal: Path) -> None:
