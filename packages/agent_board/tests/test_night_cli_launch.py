@@ -19,6 +19,7 @@ from agent_board.night.cli_launch import (
 )
 from agent_board.night.config import VerifierConfigError, parse
 from agent_board.night.controller import RunSpec, unit_name
+from agent_board.night.environment import MIRROR_ROOT
 from agent_board.night.launch import EXIT_BUDGET, EXIT_DONE, LaunchRefused
 from agent_board.night.systemd import run_argv
 
@@ -219,7 +220,7 @@ class Assignments:
 
 class Repositories:
     def resolve(self, repository_key: str, principal: str) -> Path:
-        return Path("/var/lib/switchboard-night/mirrors") / f"{repository_key}.git"
+        return Path("/var/lib/switchboard-night-mirrors") / f"{repository_key}.git"
 
 
 def _prepared(tmp_path: Path) -> CliSettings:
@@ -241,7 +242,7 @@ def test_launch_clones_then_runs_the_cli_in_the_run_workdir_within_budget(
 
     assert result == expected
     assert host.cloned == [
-        (Path("/var/lib/switchboard-night/mirrors/switchboard.git"), settings.workdir, "a" * 40)
+        (Path("/var/lib/switchboard-night-mirrors/switchboard.git"), settings.workdir, "a" * 40)
     ]
     assert host.ran == [([str(settings.cli), "-p", "work the held wakes"], settings.workdir, 300.0)]
 
@@ -271,7 +272,7 @@ def test_the_live_host_kills_a_cli_that_outlives_its_budget(tmp_path: Path) -> N
     script = tmp_path / "slow"
     script.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(30)\n")
     script.chmod(stat.S_IRWXU)
-    host = LiveCliHost(_settings(tmp_path))
+    host = LiveCliHost(_settings(tmp_path), _identity_config(tmp_path))
 
     assert host.run_cli([str(script)], tmp_path, 0.5) is None
     assert host.run_cli(["/bin/sh", "-c", "exit 4"], tmp_path, 5) == 4
@@ -339,3 +340,17 @@ def test_setup_time_is_charged_and_a_clone_past_the_deadline_never_starts_the_cl
         launch(settings, host=late, assignments=Assignments(_assignment()), repositories=Repositories())
     assert refused.value.exit_code == EXIT_BUDGET
     assert late.ran == []
+
+
+def test_the_mirror_root_lies_outside_the_private_state_directory() -> None:
+    config = parse(_table(dict(EXISTING)))
+
+    assert not Path(MIRROR_ROOT).is_relative_to(config.state_path.parent)
+
+
+@pytest.mark.parametrize(
+    "state_path", ["/var/lib/switchboard-night-mirrors/state/journal.sqlite3", "/var/lib/journal.sqlite3"]
+)
+def test_a_state_directory_overlapping_the_mirror_root_is_refused(state_path: str) -> None:
+    with pytest.raises(VerifierConfigError, match="overlap the mirror root"):
+        parse({**_table(dict(EXISTING)), "state_path": state_path})

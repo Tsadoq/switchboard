@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_board.night.assignment import AssignmentError, NightPolicy, policy_from
+from agent_board.night.environment import MIRROR_ROOT
 from agent_board.night_inspection import NIGHT_SLICE
 
 _BOX = re.compile(r"[a-z0-9_-]+")
@@ -187,7 +188,7 @@ def parse(table: Mapping[str, Any]) -> VerifierConfig:
         board_url=board_url,
         ca_path=_absolute(table["ca_path"], "ca_path") if "ca_path" in table else None,
         signer_key=_absolute(table["signer_key"], "signer_key"),
-        state_path=_absolute(table["state_path"], "state_path"),
+        state_path=_state_path(table["state_path"]),
         slice=_night_slice(table["slice"]),
         launcher_python=_absolute(launcher["python"], "launcher.python"),
         launcher_module=_match(launcher["module"], _MODULE, "launcher.module"),
@@ -288,6 +289,17 @@ def _existing_login(table: Mapping[str, Any], principal: str, home: Path) -> tup
         if home not in path.parents:
             raise VerifierConfigError(f"{where}.login_paths must lie inside home {home}")
     return cli, login_paths
+
+
+def _state_path(value: Any) -> Path:
+    """The private state directory may not contain the mirrors, which the dropped run account must read."""
+    path = _absolute(value, "state_path")
+    mirrors = Path(MIRROR_ROOT)
+    if mirrors.is_relative_to(path.parent) or path.parent.is_relative_to(mirrors):
+        raise VerifierConfigError(
+            f"state_path's directory {path.parent} must not overlap the mirror root {MIRROR_ROOT}"
+        )
+    return path
 
 
 def _policy(value: Any, principal: str) -> NightPolicy | None:

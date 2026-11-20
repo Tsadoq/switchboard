@@ -58,7 +58,7 @@ turn_seconds = 1200
 ```
 
 - **`workdir_root`:** a directory the account owns with mode 0700, in a root-managed parent.
-- **Mirrors:** `/etc/switchboard-night/repositories.toml` and the root-owned bare mirrors work as described in `night/repositories.py`. Only public repositories are accepted.
+- **Mirrors:** `/etc/switchboard-night/repositories.toml` and the root-owned bare mirrors work as described in `night/repositories.py`, and only public repositories are accepted. The mirrors live under `/var/lib/switchboard-night-mirrors`, outside the 0700 state directory, because the dropped run account must traverse and read them. The config refuses a `state_path` whose directory overlaps that root. The run account must also be able to traverse to and read `repositories.toml`.
 - **Board side:** run `board-serve night-enroll <principal> on` and `board-serve night-control on` through `board-admin`. The `ops` and `heimdall` boxes are refused.
 
 ## Risks accepted with this mode

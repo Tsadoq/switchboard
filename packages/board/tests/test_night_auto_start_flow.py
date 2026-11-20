@@ -134,7 +134,7 @@ class CliHost:
 
 class Repositories:
     def resolve(self, repository_key: str, principal: str) -> Path:
-        return Path(f"/var/lib/switchboard-night/mirrors/{repository_key}.git")
+        return Path(f"/var/lib/switchboard-night-mirrors/{repository_key}.git")
 
 
 @dataclass
