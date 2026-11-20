@@ -2,7 +2,7 @@ import os
 import stat
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -16,6 +16,7 @@ from agent_board.night.cli_launch import (
     LiveCliHost,
     cli_argv,
     cli_settings_from,
+    existing_token,
     launch,
 )
 from agent_board.night.config import VerifierConfigError, parse
@@ -203,8 +204,11 @@ class Host:
     def clone(self, source: Path, destination: Path, commit: str) -> None:
         self.cloned.append((source, destination, commit))
 
-    def run_cli(self, argv: Sequence[str], cwd: Path, timeout: float) -> int | None:
+    def run_cli(
+        self, argv: Sequence[str], cwd: Path, timeout: float, extra_env: Mapping[str, str]
+    ) -> int | None:
         self.ran.append((list(argv), cwd, timeout))
+        self.extra_env = dict(extra_env)
         return self.code
 
     def utc(self) -> float:
@@ -275,8 +279,8 @@ def test_the_live_host_kills_a_cli_that_outlives_its_budget(tmp_path: Path) -> N
     script.chmod(stat.S_IRWXU)
     host = LiveCliHost(_settings(tmp_path), _identity_config(tmp_path))
 
-    assert host.run_cli([str(script)], tmp_path, 0.5) is None
-    assert host.run_cli(["/bin/sh", "-c", "exit 4"], tmp_path, 5) == 4
+    assert host.run_cli([str(script)], tmp_path, 0.5, {}) is None
+    assert host.run_cli(["/bin/sh", "-c", "exit 4"], tmp_path, 5, {}) == 4
 
 
 def _identity_config(tmp_path: Path) -> Path:
@@ -421,3 +425,171 @@ def test_without_the_per_clone_trust_git_refuses_the_foreign_mirror(tmp_path: Pa
     )
 
     assert refused.returncode != 0 and "dubious ownership" in refused.stderr
+
+
+CLAUDE_EXISTING = {
+    **EXISTING,
+    "cli": "/home/dev/.local/bin/claude",
+    "login_paths": ["/home/dev/.claude", "/home/dev/.claude.json"],
+    "token_file": "/home/dev/.claude/oauth-token.env",
+}
+TOKEN = "sk-ant-oat01-" + "A" * 40
+
+
+def test_a_claude_existing_login_may_name_its_own_token_file() -> None:
+    agent = parse(_table(dict(CLAUDE_EXISTING))).agents["pi@dev"]
+
+    assert agent.token_file == Path("/home/dev/.claude/oauth-token.env")
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        pytest.param(
+            {"cli": "/home/dev/.local/bin/pi", "login_paths": ["/home/dev/.pi"]}, "only supported", id="pi"
+        ),
+        pytest.param({"token_file": "/etc/oauth-token.env"}, "inside home", id="outside-home"),
+        pytest.param({"token_file": "token.env"}, "normalized absolute", id="relative"),
+    ],
+)
+def test_bad_token_files_are_config_errors(change: dict[str, Any], message: str) -> None:
+    with pytest.raises(VerifierConfigError, match=message):
+        parse(_table({**CLAUDE_EXISTING, **change}))
+
+
+def test_an_isolated_agent_cannot_name_a_token_file() -> None:
+    isolated = {
+        "uid": 1000,
+        "night_uid": 3001,
+        "night_gid": 3001,
+        "home": "/home/dev",
+        "happier_home": "/var/lib/h",
+        "workdir_root": "/srv/n",
+        "token_file": "/home/dev/.claude/oauth-token.env",
+    }
+    with pytest.raises(VerifierConfigError, match="need login"):
+        parse(_table(isolated))
+
+
+def _token_settings(tmp_path: Path, text: str | bytes | None, mode: int = 0o600) -> CliSettings:
+    token_file = tmp_path / "oauth-token.env"
+    if text is not None:
+        token_file.write_bytes(text.encode() if isinstance(text, str) else text)
+        token_file.chmod(mode)
+    return replace(_settings(tmp_path, "claude"), token_file=token_file)
+
+
+CLAUDE_ASSIGNMENT = _assignment(backend="claude", permission_mode="auto")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"CLAUDE_CODE_OAUTH_TOKEN={TOKEN}\n",
+        f'# day login\n\nOTHER=ignored\nCLAUDE_CODE_OAUTH_TOKEN="{TOKEN}"\n',
+        f"CLAUDE_CODE_OAUTH_TOKEN='{TOKEN}'",
+    ],
+)
+def test_the_existing_token_is_read_as_that_one_variable_alone(tmp_path: Path, text: str) -> None:
+    settings = _token_settings(tmp_path, text)
+
+    assert existing_token(settings, CLAUDE_ASSIGNMENT, UID) == {"CLAUDE_CODE_OAUTH_TOKEN": TOKEN}
+
+
+@pytest.mark.parametrize(
+    ("text", "mode", "reason"),
+    [
+        pytest.param(None, 0o600, "existing_token_unavailable", id="missing"),
+        pytest.param(f"CLAUDE_CODE_OAUTH_TOKEN={TOKEN}", 0o620, "not_the_accounts", id="group-writable"),
+        pytest.param(
+            f"CLAUDE_CODE_OAUTH_TOKEN={TOKEN}", 0o000, "existing_token_unavailable", id="unreadable"
+        ),
+        pytest.param("OTHER=1\n", 0o600, "malformed", id="no-token"),
+        pytest.param(
+            f"CLAUDE_CODE_OAUTH_TOKEN={TOKEN}\nCLAUDE_CODE_OAUTH_TOKEN={TOKEN}",
+            0o600,
+            "malformed",
+            id="twice",
+        ),
+        pytest.param("CLAUDE_CODE_OAUTH_TOKEN=\n", 0o600, "malformed", id="empty"),
+        pytest.param("export CLAUDE_CODE_OAUTH_TOKEN=x\n", 0o600, "malformed", id="shell-syntax"),
+        pytest.param("CLAUDE_CODE_OAUTH_TOKEN=$(id)\n", 0o600, "malformed", id="substitution"),
+        pytest.param("garbage\n", 0o600, "malformed", id="no-equals"),
+        pytest.param(b"CLAUDE_CODE_OAUTH_TOKEN=\xff\xfe\n", 0o600, "malformed", id="non-ascii"),
+        pytest.param("X=" + "y" * 5000, 0o600, "malformed", id="oversized"),
+    ],
+)
+def test_bad_token_files_refuse(tmp_path: Path, text: str | bytes | None, mode: int, reason: str) -> None:
+    if mode == 0 and os.geteuid() == 0:
+        pytest.skip("root reads unreadable files")
+    settings = _token_settings(tmp_path, text, mode)
+
+    with pytest.raises(LaunchRefused, match=reason):
+        existing_token(settings, CLAUDE_ASSIGNMENT, UID)
+
+
+def test_a_token_file_of_another_account_or_a_symlink_refuses(tmp_path: Path) -> None:
+    settings = _token_settings(tmp_path, f"CLAUDE_CODE_OAUTH_TOKEN={TOKEN}")
+    with pytest.raises(LaunchRefused, match="not_the_accounts"):
+        existing_token(settings, CLAUDE_ASSIGNMENT, UID + 1)
+
+    link = tmp_path / "link.env"
+    link.symlink_to(settings.token_file or tmp_path)
+    with pytest.raises(LaunchRefused, match="existing_token_unavailable"):
+        existing_token(replace(settings, token_file=link), CLAUDE_ASSIGNMENT, UID)
+
+
+def test_a_token_file_refuses_for_a_backend_other_than_claude(tmp_path: Path) -> None:
+    settings = _token_settings(tmp_path, f"CLAUDE_CODE_OAUTH_TOKEN={TOKEN}")
+
+    with pytest.raises(LaunchRefused, match="token_file_unsupported_backend"):
+        existing_token(settings, _assignment(), UID)
+
+
+def test_launch_passes_the_token_only_to_the_cli_and_refuses_before_cloning_without_it(
+    tmp_path: Path,
+) -> None:
+    settings = replace(_prepared(tmp_path), cli=tmp_path / "bin" / "claude")
+    settings.cli.write_text("#!/bin/sh\n")
+    settings.cli.chmod(0o700)
+    good = tmp_path / "token.env"
+    good.write_text(f"CLAUDE_CODE_OAUTH_TOKEN={TOKEN}\n")
+    good.chmod(0o600)
+    host = Host()
+
+    launch(
+        replace(settings, token_file=good),
+        host=host,
+        assignments=Assignments(CLAUDE_ASSIGNMENT),
+        repositories=Repositories(),
+    )
+    assert host.extra_env == {"CLAUDE_CODE_OAUTH_TOKEN": TOKEN}
+    assert TOKEN not in " ".join(host.ran[0][0])
+
+    refusing = Host()
+    with pytest.raises(LaunchRefused, match="existing_token_unavailable"):
+        launch(
+            replace(settings, token_file=tmp_path / "absent.env"),
+            host=refusing,
+            assignments=Assignments(CLAUDE_ASSIGNMENT),
+            repositories=Repositories(),
+        )
+    assert refusing.cloned == [] and refusing.ran == []
+
+
+def test_the_live_host_gives_the_token_to_the_child_and_nothing_else_from_the_file(tmp_path: Path) -> None:
+    host = LiveCliHost(_settings(tmp_path), _identity_config(tmp_path))
+    out = tmp_path / "env.txt"
+    probe = f"import os; open({str(out)!r}, 'w').write(repr(sorted(os.environ)))"
+
+    assert host.run_cli([sys.executable, "-c", probe], tmp_path, 10, {"CLAUDE_CODE_OAUTH_TOKEN": TOKEN}) == 0
+    names = out.read_text()
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in names and "OTHER" not in names
+
+
+def test_settings_carry_the_token_file_path_from_the_environment(tmp_path: Path) -> None:
+    environ = _environ(tmp_path, SWITCHBOARD_NIGHT_TOKEN_FILE=str(tmp_path / "t.env"))
+
+    assert cli_settings_from(RUN, environ, UID).token_file == tmp_path / "t.env"
+    with pytest.raises(LaunchRefused, match="unsafe_path"):
+        cli_settings_from(RUN, _environ(tmp_path, SWITCHBOARD_NIGHT_TOKEN_FILE="relative"), UID)

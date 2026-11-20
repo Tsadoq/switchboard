@@ -108,10 +108,12 @@ EXISTING_AGENT = {
 }
 
 
-def _config(existing: bool = False) -> Any:
+def _config(existing: bool = False, token_file: str | None = None) -> Any:
     table = _config_table()
     if existing:
         table["agents"]["pi@huginn"] = dict(EXISTING_AGENT)
+        if token_file is not None:
+            table["agents"]["pi@huginn"]["token_file"] = token_file
     return parse(table)
 
 
@@ -194,10 +196,10 @@ class Rig:
         self.assignment = store_assignment(self.ledger, self.run_id, "pi@huginn")
         self.system = FakeSystem(self.run_id)
 
-    def run(self, invocation: str = OWN, existing: bool = False) -> None:
+    def run(self, invocation: str = OWN, existing: bool = False, token_file: str | None = None) -> None:
         exec_native(
             self.run_id,
-            config=_config(existing),
+            config=_config(existing, token_file),
             journal=self.journal,
             ledger=self.ledger,
             environ={"INVOCATION_ID": invocation, "SECRET": "root-only"},
@@ -448,4 +450,15 @@ def test_an_existing_login_run_execs_the_cli_launcher_as_the_account_with_its_ow
     assert environment["SWITCHBOARD_NIGHT_CLI"] == "/home/agent/.local/bin/claude"
     assert environment["SWITCHBOARD_NIGHT_UID"] == environment["SWITCHBOARD_NIGHT_DAY_UID"] == str(UID)
     assert not {"HAPPIER_HOME_DIR", "SWITCHBOARD_NIGHT_HAPPIER", "XDG_RUNTIME_DIR"} & set(environment)
+    os.close(int(environment["SWITCHBOARD_NIGHT_ASSIGNMENT_FD"]))
+
+
+def test_an_existing_login_token_file_reaches_the_launcher_as_a_path_only(rig: Rig) -> None:
+    with pytest.raises(Executed):
+        rig.run(existing=True, token_file="/home/agent/.claude/oauth-token.env")
+
+    assert rig.system.executed is not None
+    environment = rig.system.executed[2]
+    assert environment["SWITCHBOARD_NIGHT_TOKEN_FILE"] == "/home/agent/.claude/oauth-token.env"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in environment
     os.close(int(environment["SWITCHBOARD_NIGHT_ASSIGNMENT_FD"]))

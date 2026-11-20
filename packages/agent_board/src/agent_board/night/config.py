@@ -52,6 +52,7 @@ _AGENT_KEYS = {
     "login",
     "cli",
     "login_paths",
+    "token_file",
 }
 ISOLATED_LOGIN = "isolated"
 EXISTING_LOGIN = "existing"
@@ -77,6 +78,7 @@ class Agent:
     login: str = ISOLATED_LOGIN
     cli: Path | None = None
     login_paths: tuple[Path, ...] = ()
+    token_file: Path | None = None
 
     @property
     def existing_login(self) -> bool:
@@ -230,7 +232,16 @@ def _agent(principal: str, value: Any, box: str) -> Agent:
         table,
         _AGENT_KEYS,
         f"agents.{principal}",
-        optional={"night_uid", "night_gid", "policy", "login", "cli", "login_paths", "happier_home"},
+        optional={
+            "night_uid",
+            "night_gid",
+            "policy",
+            "login",
+            "cli",
+            "login_paths",
+            "happier_home",
+            "token_file",
+        },
     )
     ids = {key: table[key] for key in ("uid", "night_uid", "night_gid") if key in table}
     for key, number in ids.items():
@@ -246,12 +257,14 @@ def _agent(principal: str, value: Any, box: str) -> Agent:
     home = _absolute(table["home"], f"agents.{principal}.home")
     if login == EXISTING_LOGIN:
         cli, login_paths = _existing_login(table, principal, home)
+        token_file = _token_file(table, principal, home, cli)
         happier_home = None
     else:
-        if {"cli", "login_paths"} & set(table):
+        if {"cli", "login_paths", "token_file"} & set(table):
             raise VerifierConfigError(
-                f"agents.{principal}: cli and login_paths need login = {EXISTING_LOGIN!r}"
+                f"agents.{principal}: cli, login_paths and token_file need login = {EXISTING_LOGIN!r}"
             )
+        token_file = None
         if "happier_home" not in table:
             raise VerifierConfigError(f"agents.{principal}: missing keys ['happier_home']")
         cli, login_paths = None, ()
@@ -268,6 +281,7 @@ def _agent(principal: str, value: Any, box: str) -> Agent:
         login,
         cli,
         login_paths,
+        token_file,
     )
 
 
@@ -289,6 +303,19 @@ def _existing_login(table: Mapping[str, Any], principal: str, home: Path) -> tup
         if home not in path.parents:
             raise VerifierConfigError(f"{where}.login_paths must lie inside home {home}")
     return cli, login_paths
+
+
+def _token_file(table: Mapping[str, Any], principal: str, home: Path, cli: Path) -> Path | None:
+    """The account's own Claude token file, for an account whose day login lives only in that file."""
+    if "token_file" not in table:
+        return None
+    where = f"agents.{principal}.token_file"
+    if cli.name != "claude":
+        raise VerifierConfigError(f"{where} is only supported for the claude CLI")
+    path = _absolute(table["token_file"], where)
+    if home not in path.parents:
+        raise VerifierConfigError(f"{where} must lie inside home {home}")
+    return path
 
 
 def _state_path(value: Any) -> Path:

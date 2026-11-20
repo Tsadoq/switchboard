@@ -21,6 +21,7 @@ from agent_board.night.environment import (
     NIGHT_UID_ENV,
     PRINCIPAL_ENV,
     RUNTIME_DIR_NAME,
+    TOKEN_FILE_ENV,
     WORKDIR_ROOT_ENV,
 )
 from agent_board.night.gate import GuardState
@@ -164,6 +165,8 @@ def exec_native(
     }
     if agent.existing_login and agent.cli is not None:
         environment |= {"HOME": str(agent.home), LOGIN_ENV: EXISTING_LOGIN, CLI_ENV: str(agent.cli)}
+        if agent.token_file is not None:
+            environment[TOKEN_FILE_ENV] = str(agent.token_file)
     elif agent.happier_home is not None:
         environment |= {
             "HOME": str(agent.happier_home / HOME_NAME),

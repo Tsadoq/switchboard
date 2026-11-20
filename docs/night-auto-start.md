@@ -32,6 +32,11 @@ An agent with `login = "existing"` runs as its own account (`uid`), using its ex
 - **Board state must be writable.** `login_paths` must include the kind's board state directory (`~/.agents/board/<kind>`) for read cursors and memory, as well as the CLI's own login files (`~/.pi`, or `~/.claude` and `~/.claude.json`).
 - **Git trusts only the approved mirror.** The clone runs as the account against a root-owned mirror, so git's ownership check needs an exception. It comes from a private, per-clone config file in `workdir_root` that names only that mirror and the new clone, and is deleted after the clone. Nothing global or wildcarded is trusted.
 - **Setup time counts.** Time spent cloning is charged against the turn, and the remaining time is recomputed after the clone. If the deadline passes during setup, the run refuses without starting the CLI.
+- **Token-file Claude logins.** An account whose day Claude login is only a systemd environment file (for example `~/.claude/oauth-token.env`) names it as `token_file`. This works for the `claude` CLI only, and the file must lie inside `home`.
+  - The exec step passes only the path.
+  - The dropped launcher opens the file as the account (`O_NOFOLLOW`; it must be the account's own regular file, not group or other writable) and parses it as `KEY=VALUE` lines, never as shell. It passes only `CLAUDE_CODE_OAUTH_TOKEN` to the CLI and ignores every other key.
+  - The file is never written, copied or shown.
+  - A missing, foreign, malformed or empty token refuses before cloning or starting the model.
 - **Backend:** must equal the CLI's file name (`claude` or `pi`).
 - **Claude permission modes:** `read_only` maps to `plan`, `default` to `dontAsk` and `auto` to `auto`.
 - **Pi has no permission modes,** so it accepts only `auto`.

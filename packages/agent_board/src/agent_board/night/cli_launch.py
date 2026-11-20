@@ -2,6 +2,7 @@ import json
 import logging
 import math
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -20,6 +21,7 @@ from agent_board.night.environment import (
     LOGIN_ENV,
     NIGHT_UID_ENV,
     PRINCIPAL_ENV,
+    TOKEN_FILE_ENV,
     WORKDIR_ROOT_ENV,
 )
 from agent_board.night.launch import (
@@ -46,6 +48,10 @@ from agent_board.night.launch import (
 
 EXISTING_LOGIN = "existing"
 EXIT_CLI_FAILED = 8
+TOKEN_VARIABLE = "CLAUDE_CODE_OAUTH_TOKEN"
+MAX_TOKEN_FILE_BYTES = 4096
+_ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_TOKEN = re.compile(r"[A-Za-z0-9._~+/=-]{16,2048}")
 AGENT_ENV = "AI_AGENT"
 CLAUDE_PERMISSION_MODES = {"read_only": "plan", "default": "dontAsk", "auto": "auto"}
 logger = logging.getLogger(__name__)
@@ -60,6 +66,7 @@ class CliSettings:
     workdir_root: Path
     cli: Path
     deadline_utc: float
+    token_file: Path | None = None
 
     @property
     def workdir(self) -> Path:
@@ -73,7 +80,9 @@ class CliHost(Protocol):
 
     def clone(self, source: Path, destination: Path, commit: str) -> None: ...
 
-    def run_cli(self, argv: Sequence[str], cwd: Path, timeout: float) -> int | None: ...
+    def run_cli(
+        self, argv: Sequence[str], cwd: Path, timeout: float, extra_env: Mapping[str, str]
+    ) -> int | None: ...
 
     def utc(self) -> float: ...
 
@@ -100,7 +109,12 @@ def cli_settings_from(run_id: str, environ: Mapping[str, str], uid: int) -> CliS
     exec_uid, day_uid = (_positive_id(environ.get(name)) for name in (NIGHT_UID_ENV, DAY_UID_ENV))
     if exec_uid != uid or day_uid != uid:
         raise LaunchRefused(EXIT_PREFLIGHT, "wrong_uid")
-    return CliSettings(run_id, environ[PRINCIPAL_ENV], uid, home, workdir_root, cli, deadline_utc)
+    token_file = None
+    if TOKEN_FILE_ENV in environ:
+        token_file = _absolute(environ[TOKEN_FILE_ENV])
+        if token_file is None:
+            raise LaunchRefused(EXIT_PREFLIGHT, "unsafe_path_in_environment")
+    return CliSettings(run_id, environ[PRINCIPAL_ENV], uid, home, workdir_root, cli, deadline_utc, token_file)
 
 
 def preflight(settings: CliSettings, host: CliHost) -> None:
@@ -134,6 +148,54 @@ def cli_argv(settings: CliSettings, assignment: Assignment) -> list[str]:
     return argv
 
 
+def existing_token(settings: CliSettings, assignment: Assignment, uid: int) -> dict[str, str]:
+    """The account's own Claude token, read only after the drop and passed as that one variable alone.
+
+    The file is the account's existing systemd environment file. It is parsed, never sourced, and every other
+    key in it is ignored; a missing, foreign, malformed or empty token refuses before the model starts.
+    """
+    if settings.token_file is None:
+        return {}
+    if assignment.backend != "claude":
+        raise LaunchRefused(EXIT_PREFLIGHT, "token_file_unsupported_backend")
+    try:
+        fd = os.open(settings.token_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        raise LaunchRefused(EXIT_PREFLIGHT, "existing_token_unavailable") from None
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != uid or metadata.st_mode & 0o022:
+            raise LaunchRefused(EXIT_PREFLIGHT, "existing_token_not_the_accounts")
+        if metadata.st_size > MAX_TOKEN_FILE_BYTES:
+            raise LaunchRefused(EXIT_PREFLIGHT, "existing_token_malformed")
+        data = os.read(fd, MAX_TOKEN_FILE_BYTES + 1)
+    finally:
+        os.close(fd)
+    try:
+        lines = data.decode("ascii").splitlines()
+    except UnicodeDecodeError:
+        raise LaunchRefused(EXIT_PREFLIGHT, "existing_token_malformed") from None
+    values: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        key, separator, value = stripped.partition("=")
+        if not separator or _ENV_KEY.fullmatch(key.strip()) is None:
+            raise LaunchRefused(EXIT_PREFLIGHT, "existing_token_malformed")
+        if key.strip() == TOKEN_VARIABLE:
+            values.append(_unquoted(value.strip()))
+    if len(values) != 1 or _TOKEN.fullmatch(values[0]) is None:
+        raise LaunchRefused(EXIT_PREFLIGHT, "existing_token_malformed")
+    return {TOKEN_VARIABLE: values[0]}
+
+
+def _unquoted(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
+
+
 def launch(
     settings: CliSettings, *, host: CliHost, assignments: AssignmentSource, repositories: RepositoryPolicy
 ) -> int:
@@ -147,6 +209,7 @@ def launch(
     if assignment.run_id != settings.run_id or assignment.principal != settings.principal:
         raise LaunchRefused(EXIT_ASSIGNMENT, "assignment_mismatch")
     argv = cli_argv(settings, assignment)
+    extra_env = existing_token(settings, assignment, host.uid())
     source = repositories.resolve(assignment.repository_key, settings.principal)
     deadline = min(settings.deadline_utc, assignment.deadline_utc)
     started = host.utc()
@@ -157,7 +220,7 @@ def launch(
     budget = min(float(assignment.turn_seconds) - (now - started), deadline - now)
     if budget <= 0:
         raise LaunchRefused(EXIT_BUDGET, "run_deadline_passed_during_setup")
-    code = host.run_cli(argv, settings.workdir, budget)
+    code = host.run_cli(argv, settings.workdir, budget, extra_env)
     if code is None:
         return EXIT_BUDGET
     return EXIT_DONE if code == 0 else EXIT_CLI_FAILED
@@ -203,11 +266,17 @@ class LiveCliHost:
     def clone(self, source: Path, destination: Path, commit: str) -> None:
         clone_mirror(source, destination, commit, self._git)
 
-    def run_cli(self, argv: Sequence[str], cwd: Path, timeout: float) -> int | None:
+    def run_cli(
+        self, argv: Sequence[str], cwd: Path, timeout: float, extra_env: Mapping[str, str]
+    ) -> int | None:
         """The CLI's exit code; a run cut off at its budget is killed with its process group and reports None."""
         try:
             process = subprocess.Popen(
-                list(argv), cwd=cwd, env=self._env, stdin=subprocess.DEVNULL, start_new_session=True
+                list(argv),
+                cwd=cwd,
+                env={**self._env, **extra_env},
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
             )
         except OSError as error:
             raise LaunchRefused(EXIT_SESSION, f"cli_failed_to_start:{type(error).__name__}") from None

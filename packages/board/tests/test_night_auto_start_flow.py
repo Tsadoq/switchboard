@@ -124,7 +124,9 @@ class CliHost:
     def clone(self, source: Path, destination: Path, commit: str) -> None:
         self.cloned.append((source, destination, commit))
 
-    def run_cli(self, argv: Sequence[str], cwd: Path, timeout: float) -> int | None:
+    def run_cli(
+        self, argv: Sequence[str], cwd: Path, timeout: float, extra_env: Mapping[str, str]
+    ) -> int | None:
         self.ran.append(list(argv))
         return 0
 
