@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
 
-BACKENDS = ("claude",)
+BACKENDS = ("claude", "pi")
 PERMISSION_MODES = ("read_only", "default", "auto")
 MAX_PROMPT_CHARS = 48_000
 MAX_TURN_SECONDS = 3600

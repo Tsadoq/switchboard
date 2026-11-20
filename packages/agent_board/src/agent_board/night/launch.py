@@ -14,8 +14,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from agent_board.night.assignment import Assignment
+from agent_board.night.assignment import Assignment, AssignmentError, decode, read_sealed
 from agent_board.night.environment import (
+    ASSIGNMENT_FD_ENV,
     DAY_UID_ENV,
     DEADLINE_UTC_ENV,
     HAPPIER_BIN_ENV,
@@ -495,6 +496,34 @@ class LiveDaemon:
         return self._process.poll()
 
 
+def clone_mirror(
+    source: Path,
+    destination: Path,
+    commit: str,
+    git: Callable[[Sequence[str]], subprocess.CompletedProcess[str]],
+) -> None:
+    """A local, hook-free clone of a reviewed mirror, detached at exactly `commit`."""
+    local_only = ("-c", "protocol.allow=never", "-c", "protocol.file.allow=always")
+    hooks_off = ("-c", "core.hooksPath=/dev/null", *local_only)
+    git(
+        [GIT, *hooks_off, "clone", "--quiet", "--no-hardlinks", "--no-checkout", "--template="]
+        + ["--", str(source), str(destination)]
+    )
+    git([GIT, *hooks_off, "-C", str(destination), "checkout", "--quiet", "--detach", commit])
+    head = git([GIT, "-C", str(destination), "rev-parse", "HEAD"]).stdout.strip()
+    if head != commit:
+        raise LaunchRefused(EXIT_ASSIGNMENT, "checkout_mismatch")
+
+
+GIT_SAFETY_ENV = {
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_ASKPASS": "/bin/false",
+    "GIT_PROTOCOL_FROM_USER": "0",
+}
+
+
 class LiveHost:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -507,14 +536,7 @@ class LiveHost:
             "HAPPIER_CLI_UPDATE_CHECK": "0",
             "HAPPIER_FEATURE_BUG_REPORTS__ENABLED": "0",
         }
-        self._git_env = {
-            **self._env,
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_CONFIG_GLOBAL": "/dev/null",
-            "GIT_TERMINAL_PROMPT": "0",
-            "GIT_ASKPASS": "/bin/false",
-            "GIT_PROTOCOL_FROM_USER": "0",
-        }
+        self._git_env = {**self._env, **GIT_SAFETY_ENV}
 
     def uid(self) -> int:
         return os.getuid()
@@ -566,16 +588,7 @@ class LiveHost:
         self._run([str(self._settings.happier_bin), "daemon", "stop", "--kill-sessions"])
 
     def clone(self, source: Path, destination: Path, commit: str) -> None:
-        local_only = ("-c", "protocol.allow=never", "-c", "protocol.file.allow=always")
-        hooks_off = ("-c", "core.hooksPath=/dev/null", *local_only)
-        self._git(
-            [GIT, *hooks_off, "clone", "--quiet", "--no-hardlinks", "--no-checkout", "--template="]
-            + ["--", str(source), str(destination)]
-        )
-        self._git([GIT, *hooks_off, "-C", str(destination), "checkout", "--quiet", "--detach", commit])
-        head = self._git([GIT, "-C", str(destination), "rev-parse", "HEAD"]).stdout.strip()
-        if head != commit:
-            raise LaunchRefused(EXIT_ASSIGNMENT, "checkout_mismatch")
+        clone_mirror(source, destination, commit, self._git)
 
     def monotonic(self) -> float:
         return time.monotonic()
@@ -608,17 +621,28 @@ class LiveHost:
         return completed
 
 
-class UnavailableAssignments:
-    """Stands in until the fenced server delivery of assignments exists, so a real launch refuses."""
+class SealedAssignments:
+    """The assignment the root exec step captured, handed over as a sealed memfd it named in the environment."""
+
+    def __init__(self, environ: Mapping[str, str]) -> None:
+        self._environ = environ
 
     def fetch(self, run_id: str, principal: str) -> Assignment:
-        raise LaunchRefused(EXIT_ASSIGNMENT, "assignment_source_not_configured")
+        fd = _positive_id(self._environ.get(ASSIGNMENT_FD_ENV))
+        if fd is None:
+            raise LaunchRefused(EXIT_ASSIGNMENT, "assignment_fd_missing")
+        try:
+            return decode(read_sealed(fd))
+        except AssignmentError as error:
+            raise LaunchRefused(EXIT_ASSIGNMENT, f"assignment_unreadable:{error}") from None
+        finally:
+            os.close(fd)
 
 
 def main(
     argv: Sequence[str],
     environ: Mapping[str, str] = os.environ,
-    assignments: Callable[[Settings], AssignmentSource] = lambda settings: UnavailableAssignments(),
+    assignments: Callable[[Settings], AssignmentSource] = lambda settings: SealedAssignments(os.environ),
     repositories: Callable[[Settings], RepositoryPolicy] = lambda settings: _mirror_policy(),
 ) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")

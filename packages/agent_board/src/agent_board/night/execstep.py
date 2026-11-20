@@ -7,22 +7,28 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import NoReturn, Protocol
 
-from agent_board.night.config import VerifierConfig
+from agent_board.night.assignment import AssignmentError, decode, seal
+from agent_board.night.config import EXISTING_LOGIN, VerifierConfig
 from agent_board.night.environment import (
+    ASSIGNMENT_FD_ENV,
+    CLI_ENV,
     DAY_UID_ENV,
     DEADLINE_UTC_ENV,
     HAPPIER_BIN_ENV,
     HOME_DIR_ENV,
     HOME_NAME,
+    LOGIN_ENV,
     NIGHT_UID_ENV,
     PRINCIPAL_ENV,
     RUNTIME_DIR_NAME,
     WORKDIR_ROOT_ENV,
 )
 from agent_board.night.gate import GuardState
-from agent_board.night.ledger import Ledger
+from agent_board.night.ledger import CapturedAssignment, Ledger
 from agent_board.night_inspection import unit_cgroup
 from agent_board.night_state import LocalJournal
+
+CLI_LAUNCHER = "agent_board.night.cli_launch"
 
 _INVOCATION = re.compile(r"[0-9a-f]{32}")
 logger = logging.getLogger(__name__)
@@ -64,7 +70,7 @@ class System(Protocol):
 
     def identity(self) -> tuple[tuple[int, int, int], tuple[int, int, int], list[int]]: ...
 
-    def close_inherited_descriptors(self) -> None: ...
+    def close_inherited_descriptors(self, keep: int) -> None: ...
 
     def execve(self, path: str, argv: list[str], environment: Mapping[str, str]) -> NoReturn: ...
 
@@ -119,6 +125,7 @@ def exec_native(
     agent = config.agents.get(record.principal)
     if agent is None or agent.uid != record.uid:
         raise ExecRefused("principal_mismatch")
+    assignment = _captured_assignment(ledger, run_id, record.principal)
     exec_uid = agent.exec_uid
     account = system.account(exec_uid)
     if account.uid != exec_uid or account.uid <= 0 or account.gid <= 0:
@@ -137,12 +144,13 @@ def exec_native(
     )
     if system.identity() != expected:
         raise ExecRefused("drop_unverified")
-    system.close_inherited_descriptors()
+    try:
+        assignment_fd = seal(assignment)
+    except AssignmentError as error:
+        raise ExecRefused(f"assignment_unsealed:{error}") from None
+    system.close_inherited_descriptors(keep=assignment_fd)
     python = str(config.launcher_python)
     environment = {
-        "HOME": str(agent.happier_home / HOME_NAME),
-        HOME_DIR_ENV: str(agent.happier_home),
-        "XDG_RUNTIME_DIR": str(agent.happier_home / RUNTIME_DIR_NAME),
         "USER": account.name,
         "LOGNAME": account.name,
         "PATH": "/usr/bin:/bin",
@@ -152,10 +160,37 @@ def exec_native(
         NIGHT_UID_ENV: str(exec_uid),
         DAY_UID_ENV: str(record.uid),
         DEADLINE_UTC_ENV: repr(record.deadline_utc - grace),
+        ASSIGNMENT_FD_ENV: str(assignment_fd),
     }
-    if config.launcher_happier is not None:
-        environment[HAPPIER_BIN_ENV] = str(config.launcher_happier)
-    system.execve(python, [python, "-I", "-m", config.launcher_module, run_id], environment)
+    if agent.existing_login and agent.cli is not None:
+        environment |= {"HOME": str(agent.home), LOGIN_ENV: EXISTING_LOGIN, CLI_ENV: str(agent.cli)}
+    elif agent.happier_home is not None:
+        environment |= {
+            "HOME": str(agent.happier_home / HOME_NAME),
+            HOME_DIR_ENV: str(agent.happier_home),
+            "XDG_RUNTIME_DIR": str(agent.happier_home / RUNTIME_DIR_NAME),
+        }
+        if config.launcher_happier is not None:
+            environment[HAPPIER_BIN_ENV] = str(config.launcher_happier)
+    else:
+        raise ExecRefused("agent_login_unconfigured")
+    module = CLI_LAUNCHER if agent.existing_login else config.launcher_module
+    system.execve(python, [python, "-I", "-m", module, run_id], environment)
+
+
+def _captured_assignment(ledger: Ledger, run_id: str, principal: str) -> bytes:
+    captured = ledger.captured(run_id)
+    if not isinstance(captured, CapturedAssignment) or captured.aborted_after_apply:
+        raise ExecRefused("no_captured_assignment")
+    if captured.assignment is None:
+        raise ExecRefused("empty_assignment")
+    try:
+        decoded = decode(captured.assignment)
+    except AssignmentError:
+        raise ExecRefused("invalid_assignment") from None
+    if decoded.run_id != run_id or decoded.principal != principal:
+        raise ExecRefused("assignment_mismatch")
+    return captured.assignment
 
 
 def _requesting_groups(config: VerifierConfig, system: System) -> set[int]:
@@ -207,8 +242,10 @@ class LiveSystem:
     def identity(self) -> tuple[tuple[int, int, int], tuple[int, int, int], list[int]]:
         return os.getresuid(), os.getresgid(), os.getgroups()
 
-    def close_inherited_descriptors(self) -> None:
-        os.closerange(3, os.sysconf("SC_OPEN_MAX"))
+    def close_inherited_descriptors(self, keep: int) -> None:
+        os.closerange(3, keep)
+        os.closerange(keep + 1, os.sysconf("SC_OPEN_MAX"))
+        os.set_inheritable(keep, True)
 
     def execve(self, path: str, argv: list[str], environment: Mapping[str, str]) -> NoReturn:
         os.execve(path, argv, dict(environment))

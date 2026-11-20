@@ -12,7 +12,7 @@ import pytest
 from agent_board import night_state
 from agent_board.night import server
 from agent_board.night.config import VerifierConfigError, parse
-from agent_board.night.controller import Controller, Observation, RunSpec, unit_name
+from agent_board.night.controller import AdmittedRun, Controller, Observation, RunSpec, unit_name
 from agent_board.night.sync import SyncError
 from agent_board.night_authority import ServerGrant
 from agent_board.night_protocol import Operation, Request
@@ -127,6 +127,14 @@ class Binder:
         self.settle_result = True
         self.reconciles = 0
         self.requested: frozenset[str] = frozenset()
+        self.captures: list[tuple[str, Any, float]] = []
+        self.capture_failure: SyncError | None = None
+
+    def capture(self, record: Any, policy: Any, cutoff_utc: float) -> object:
+        if self.capture_failure is not None:
+            raise self.capture_failure
+        self.captures.append((record.run_id, policy, cutoff_utc))
+        return None
 
     def requested_stops(self) -> frozenset[str]:
         return self.requested
@@ -689,3 +697,138 @@ def test_two_principals_cannot_share_a_night_primary_group() -> None:
 
     with pytest.raises(VerifierConfigError, match="night_gid is shared"):
         parse(table)
+
+
+class Admissions:
+    def __init__(self, runs: list[AdmittedRun]) -> None:
+        self.runs = runs
+        self.failure: SyncError | None = None
+        self.calls = 0
+
+    def admitted(self) -> list[AdmittedRun]:
+        self.calls += 1
+        if self.failure is not None:
+            raise self.failure
+        return self.runs
+
+
+def _admitting(rig: Rig, runs: list[AdmittedRun]) -> Admissions:
+    admissions = Admissions(runs)
+    rig.controller = Controller(
+        rig.config,
+        rig.journal,
+        rig.grants,
+        rig.runs,
+        rig.binder,
+        rig.clock,
+        lambda: rig.clock.monotonic,
+        admissions=admissions,
+    )
+    return admissions
+
+
+def test_the_sweep_starts_each_admitted_run_once_through_the_start_path(rig: Rig) -> None:
+    run_id = str(uuid4())
+    _admitting(rig, [AdmittedRun(run_id, FENCE, "pi@dev")])
+
+    rig.controller.sweep()
+    rig.controller.sweep()
+
+    assert [spec.unit for spec in rig.runs.launched] == [unit_name(run_id)], rig.runs.launched
+    assert rig.binder.bound == [run_id]
+    assert rig.grants.calls == 2
+
+
+def test_the_sweep_refuses_admitted_runs_the_grant_does_not_cover(rig: Rig) -> None:
+    run_id = str(uuid4())
+    _admitting(rig, [AdmittedRun(run_id, FENCE, "claude@dev")])
+
+    rig.controller.sweep()
+
+    assert rig.runs.launched == []
+    assert rig.journal.active() == ()
+
+
+def test_the_sweep_skips_unconfigured_principals_and_board_failures(rig: Rig) -> None:
+    admissions = _admitting(rig, [AdmittedRun(str(uuid4()), FENCE, "ghost@dev")])
+
+    rig.controller.sweep()
+    admissions.failure = SyncError("board down")
+    rig.controller.sweep()
+
+    assert rig.runs.launched == []
+    assert rig.grants.calls == 0
+    assert admissions.calls == 2
+
+
+def test_the_sweep_starts_nothing_while_frozen(rig: Rig) -> None:
+    run_id = str(uuid4())
+    _admitting(rig, [AdmittedRun(run_id, FENCE, "pi@dev")])
+    rig.binder.frozen = "counter_mismatch"
+
+    rig.controller.sweep()
+
+    assert rig.runs.launched == []
+
+
+POLICY_TABLE = {
+    "repository_key": "switchboard",
+    "base_commit": "a" * 40,
+    "backend": "pi",
+    "model": None,
+    "permission_mode": "default",
+    "turn_seconds": 1200,
+}
+
+
+def _with_policy(policy: dict[str, Any]) -> dict[str, Any]:
+    table = _config_table()
+    table["agents"]["pi@dev"]["policy"] = {key: value for key, value in policy.items() if value is not None}
+    return table
+
+
+def test_an_agent_policy_is_parsed_and_validated() -> None:
+    policy = parse(_with_policy(POLICY_TABLE)).agents["pi@dev"].policy
+
+    assert policy is not None and (policy.repository_key, policy.backend, policy.turn_seconds) == (
+        "switchboard",
+        "pi",
+        1200,
+    )
+    assert parse(_config_table()).agents["pi@dev"].policy is None
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"backend": "codex"},
+        {"base_commit": "abc"},
+        {"turn_seconds": 0},
+        {"extra": 1},
+        {"repository_key": None},
+    ],
+)
+def test_a_bad_agent_policy_is_a_config_error(change: dict[str, Any]) -> None:
+    policy = {**POLICY_TABLE, **change}
+    if change.get("repository_key", "") is None:
+        del policy["repository_key"]
+    with pytest.raises(VerifierConfigError, match="policy"):
+        parse(_with_policy(policy))
+
+
+def test_a_started_run_with_a_policy_is_captured_after_binding(rig: Rig) -> None:
+    rig.config = parse(_with_policy(POLICY_TABLE))
+    _admitting(rig, [])
+    run_id = str(uuid4())
+
+    assert rig.ask("start", run_id)["status"] == "running"
+
+    assert [(captured, cutoff) for captured, _, cutoff in rig.binder.captures] == [(run_id, 1_000.0 + 900.0)]
+
+
+def test_a_failed_capture_leaves_the_run_running_with_its_gate_shut(rig: Rig) -> None:
+    rig.config = parse(_with_policy(POLICY_TABLE))
+    _admitting(rig, [])
+    rig.binder.capture_failure = SyncError("not_bound")
+
+    assert rig.ask("start", str(uuid4()))["status"] == "running"

@@ -35,6 +35,7 @@ from board.identity.registry import BadSignerLine, Registry
 from board.identity.roles import VerifierRoles
 from board.identity.tokens import ReadTokens
 from board.identity.verifier import Verified, Verifier
+from board.night import AdmissionDenied, NightAdmission
 from board.settings import Settings
 from board.stats import routes as stats_routes
 from board.tickets import routes as ticket_routes
@@ -179,6 +180,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     add_subforum.add_argument("--description", default="", help="one line under the title")
     deny = commands.add_parser("deny", help="reject one public key outright, even if its line is re-added")
     deny.add_argument("pubkey_line", help="a line containing `ssh-ed25519 <key>`")
+    night_control = commands.add_parser("night-control", help="switch night runs on or off for the fleet")
+    night_control.add_argument("state", choices=("on", "off"))
+    night_enroll = commands.add_parser("night-enroll", help="opt one principal in or out of night runs")
+    night_enroll.add_argument("principal")
+    night_enroll.add_argument("state", choices=("on", "off"))
     args = parser.parse_args(argv)
     if args.command == "hash-password":
         return _print_password_hash()
@@ -191,7 +197,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         return asyncio.run(_add_subforum(settings, args.slug, args.title or args.slug, args.description))
     if args.command == "deny":
         return _deny(_open_registry(settings), args.pubkey_line)
+    if args.command == "night-control":
+        return asyncio.run(_night_control(settings, args.state == "on"))
+    if args.command == "night-enroll":
+        return asyncio.run(_night_enroll(settings, args.principal, args.state == "on"))
     return _serve(settings)
+
+
+async def _night_admission(settings: Settings) -> NightAdmission:
+    settings.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    db = Database(settings.db_path)
+    await db.transact(migrate)
+    return NightAdmission(db)
+
+
+async def _night_control(settings: Settings, enabled: bool) -> int:
+    await (await _night_admission(settings)).set_enabled(enabled)
+    print(f"night runs {'on' if enabled else 'off'}")
+    return 0
+
+
+async def _night_enroll(settings: Settings, principal: str, enabled: bool) -> int:
+    try:
+        await (await _night_admission(settings)).enroll(principal, enabled)
+    except AdmissionDenied as error:
+        print(f"board-serve: {principal} cannot run at night: {error}", file=sys.stderr)
+        return 1
+    print(f"{principal} night runs {'on' if enabled else 'off'}")
+    return 0
 
 
 def _serve(settings: Settings) -> int:

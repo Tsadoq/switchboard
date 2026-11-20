@@ -82,14 +82,14 @@ def run_argv(
     native code. The unit properties bound what that root could do even if the drop were skipped.
     """
     agent, limits = spec.agent, config.limits
-    paths = (
-        service_python,
-        config_path,
-        agent.workdir_root,
-        agent.happier_home,
-        config.state_path.parent,
-        config.signer_key,
+    writable = (
+        (agent.workdir_root, *agent.login_paths, config.state_path.parent)
+        if agent.existing_login
+        else (agent.workdir_root, agent.happier_home, config.state_path.parent)
     )
+    if any(path is None for path in writable):
+        raise RunManagerError("the night unit's writable paths are not configured")
+    paths = (service_python, config_path, *writable, config.signer_key)
     if any(_unsafe_in_command_line(str(path)) for path in paths):
         raise RunManagerError("a path in the night unit's command line or properties is unsafe")
     step = f"{service_python} -I -m agent_board.night"
@@ -109,7 +109,7 @@ def run_argv(
         f"--property=CapabilityBoundingSet={' '.join(DROP_CAPABILITIES)}",
         "--property=AmbientCapabilities=",
         "--property=ProtectSystem=strict",
-        f"--property=ReadWritePaths={agent.workdir_root} {agent.happier_home} {config.state_path.parent}",
+        f"--property=ReadWritePaths={' '.join(str(path) for path in writable)}",
         f"--property=InaccessiblePaths={config.signer_key}",
         "--property=PrivateTmp=yes",
         "--property=ProtectKernelTunables=yes",

@@ -79,7 +79,7 @@ def _serve(config: VerifierConfig, config_path: Path, ledger: Ledger, journal: L
     sync = BoardSync(config.box, ledger, board, inspector, journal)
     sync.reconcile()
     runs = SystemdRuns(config, config_path, ledger, inspector, LiveCommands(), _service_python())
-    controller = Controller(config, journal, board, runs, sync)
+    controller = Controller(config, journal, board, runs, sync, admissions=board)
     threading.Thread(target=_sweep_forever, args=(controller,), name="night-sweep", daemon=True).start()
     server.serve(server.inherited_listener(), controller)
 
