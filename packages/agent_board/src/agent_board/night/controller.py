@@ -2,10 +2,12 @@ import logging
 import secrets
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
+from uuid import uuid4
 
+from agent_board.night.assignment import NightPolicy
 from agent_board.night.config import Agent, VerifierConfig
 from agent_board.night.sync import SyncError
 from agent_board.night_authority import GrantUnavailable, ServerGrant
@@ -40,6 +42,19 @@ class GrantSource(Protocol):
 
 
 @dataclass(frozen=True)
+class AdmittedRun:
+    run_id: str
+    fence: str
+    principal: str
+
+
+class AdmissionSource(Protocol):
+    def admitted(self) -> Sequence[AdmittedRun]:
+        """The board's admitted runs for this box; raises SyncError when the board cannot answer."""
+        ...
+
+
+@dataclass(frozen=True)
 class RunSpec:
     run_id: str
     unit: str
@@ -63,6 +78,8 @@ class RunBinder(Protocol):
     def reconcile(self) -> str | None: ...
 
     def requested_stops(self) -> frozenset[str]: ...
+
+    def capture(self, record: Record, policy: NightPolicy, cutoff_utc: float) -> object: ...
 
 
 TRANSIENT_FREEZES = ("not_reconciled", "reconcile_failed:")
@@ -117,7 +134,9 @@ class Controller:
         binder: RunBinder,
         clock: Callable[[], ClockReading] = clock_reading,
         boottime: Callable[[], float] = lambda: time.clock_gettime(time.CLOCK_BOOTTIME),
+        admissions: AdmissionSource | None = None,
     ) -> None:
+        self._admissions = admissions
         self._config = config
         self._journal = journal
         self._grants = grants
@@ -184,6 +203,13 @@ class Controller:
             self._stop_quietly(unit_name(request.run_id))
             self._journal.quarantine(request.run_id, request.fence, "binding_conflict")
             return Response(request.request_id, request.run_id, "quarantined", "binding_conflict")
+        if agent.policy is not None:
+            try:
+                self._binder.capture(record, agent.policy, record.deadline_utc)
+            except SyncError as error:
+                logger.error(
+                    "run %s has no captured assignment, so its gate will not open: %s", request.run_id, error
+                )
         return Response(request.request_id, request.run_id, "running")
 
     def _stop_quietly(self, unit: str) -> None:
@@ -219,6 +245,7 @@ class Controller:
         frozen = self._binder.frozen
         if frozen is not None and frozen.startswith(TRANSIENT_FREEZES):
             self._binder.reconcile()
+        self._start_admitted()
         requested = self._binder.requested_stops()
         for record in self._journal.active():
             if record.run_id in requested and record.state in ("reserved", "starting"):
@@ -231,6 +258,27 @@ class Controller:
                 record = self._finished(record) or record
             if record.state in ("stopping", "quarantined"):
                 self._binder.settle(record, _settle_reason(record, requested))
+
+    def _start_admitted(self) -> None:
+        """Starts each run the board admitted for this box, through the same path as a requested start."""
+        if self._admissions is None or self._binder.frozen is not None:
+            return
+        try:
+            admitted = self._admissions.admitted()
+        except SyncError as error:
+            logger.warning("could not list admitted night runs: %s", error)
+            return
+        for run in admitted:
+            if run.principal not in self._config.agents:
+                logger.warning("admitted night run %s names an unconfigured principal", run.run_id)
+                continue
+            request = Request(v=1, request_id=str(uuid4()), op="start", run_id=run.run_id, fence=run.fence)
+            try:
+                response = self._start(request, frozenset({run.principal}))
+            except StateError as error:
+                logger.warning("admitted night run %s did not start: %s", run.run_id, error)
+                continue
+            logger.info("admitted night run %s: %s", run.run_id, response.status)
 
     def _server_stop(self, record: Record) -> Record:
         """The same path as a local stop: the journal latch is durable before the first kill."""

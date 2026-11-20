@@ -17,7 +17,15 @@ from board.db import Database
 from board.identity.roles import VerifierRoles
 from board.identity.routes import SignedRequest, _verify
 from board.identity.verifier import Verified
-from board.night import AdmissionDenied, Run, _find, settle_in_transaction, start_in_transaction, window_for
+from board.night import (
+    AdmissionDenied,
+    Run,
+    _find,
+    admitted_for_box_in_transaction,
+    settle_in_transaction,
+    start_in_transaction,
+    window_for,
+)
 from board.night_context import ContextDenied, read_context
 from board.night_delivery import CaptureDenied, capture_candidates, persist_capture
 
@@ -48,6 +56,7 @@ class NightVerifier:
             "night.capture": self._capture,
             "night.capture_abort": self._capture_abort,
             "night.thread_read": self._thread_read,
+            "night.admitted": self._admitted,
         }
         handler = handlers.get(envelope.action)
         if handler is None:
@@ -72,6 +81,18 @@ class NightVerifier:
             "journal_id": row["journal_id"] if row else None,
             "counter": row["counter"] if row else 0,
             "active": [dict(run) for run in active],
+        }
+
+    def _admitted(
+        self, conn: sqlite3.Connection, box: str, target: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        _fields(payload, set())
+        if target != "self":
+            raise Denied("invalid_target")
+        runs = admitted_for_box_in_transaction(conn, box, self._clock())
+        return {
+            "box": box,
+            "runs": [{"run_id": run.id, "fence": run.fence, "principal": run.principal} for run in runs],
         }
 
     def _bootstrap(

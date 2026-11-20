@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agent_board.night.assignment import AssignmentError, NightPolicy, policy_from
+from agent_board.night.environment import MIRROR_ROOT
 from agent_board.night_inspection import NIGHT_SLICE
 
 _BOX = re.compile(r"[a-z0-9_-]+")
@@ -39,7 +41,21 @@ _TOP_KEYS = {
     "verifier_socket",
 }
 _LAUNCHER_KEYS = {"python", "module", "happier"}
-_AGENT_KEYS = {"uid", "night_uid", "night_gid", "home", "happier_home", "workdir_root"}
+_AGENT_KEYS = {
+    "uid",
+    "night_uid",
+    "night_gid",
+    "home",
+    "happier_home",
+    "workdir_root",
+    "policy",
+    "login",
+    "cli",
+    "login_paths",
+    "token_file",
+}
+ISOLATED_LOGIN = "isolated"
+EXISTING_LOGIN = "existing"
 _LIMIT_KEYS = {"memory_max", "tasks_max", "cpu_quota", "stop_grace_seconds"}
 _MEMORY = re.compile(r"[1-9][0-9]*[KMG]")
 _QUOTA = re.compile(r"[1-9][0-9]*%")
@@ -54,10 +70,19 @@ class Agent:
     principal: str
     uid: int
     home: Path
-    happier_home: Path
+    happier_home: Path | None
     workdir_root: Path
     night_uid: int | None = None
     night_gid: int | None = None
+    policy: NightPolicy | None = None
+    login: str = ISOLATED_LOGIN
+    cli: Path | None = None
+    login_paths: tuple[Path, ...] = ()
+    token_file: Path | None = None
+
+    @property
+    def existing_login(self) -> bool:
+        return self.login == EXISTING_LOGIN
 
     @property
     def exec_uid(self) -> int:
@@ -165,7 +190,7 @@ def parse(table: Mapping[str, Any]) -> VerifierConfig:
         board_url=board_url,
         ca_path=_absolute(table["ca_path"], "ca_path") if "ca_path" in table else None,
         signer_key=_absolute(table["signer_key"], "signer_key"),
-        state_path=_absolute(table["state_path"], "state_path"),
+        state_path=_state_path(table["state_path"]),
         slice=_night_slice(table["slice"]),
         launcher_python=_absolute(launcher["python"], "launcher.python"),
         launcher_module=_match(launcher["module"], _MODULE, "launcher.module"),
@@ -203,7 +228,21 @@ def _agent(principal: str, value: Any, box: str) -> Agent:
     if principal.partition("@")[2] != box or principal.partition("@")[0].casefold() == "verifier":
         raise VerifierConfigError(f"agent {principal} does not belong to box {box}")
     table = _table(value, f"agents.{principal}")
-    _keys(table, _AGENT_KEYS, f"agents.{principal}", optional={"night_uid", "night_gid"})
+    _keys(
+        table,
+        _AGENT_KEYS,
+        f"agents.{principal}",
+        optional={
+            "night_uid",
+            "night_gid",
+            "policy",
+            "login",
+            "cli",
+            "login_paths",
+            "happier_home",
+            "token_file",
+        },
+    )
     ids = {key: table[key] for key in ("uid", "night_uid", "night_gid") if key in table}
     for key, number in ids.items():
         if type(number) is not int or number <= 0:
@@ -212,15 +251,92 @@ def _agent(principal: str, value: Any, box: str) -> Agent:
         raise VerifierConfigError(f"agents.{principal} needs night_uid and night_gid together")
     if ids.get("night_uid") == ids["uid"]:
         raise VerifierConfigError(f"agents.{principal}.night_uid must differ from the requesting uid")
+    login = table.get("login", ISOLATED_LOGIN)
+    if login not in (ISOLATED_LOGIN, EXISTING_LOGIN):
+        raise VerifierConfigError(f"agents.{principal}.login must be {ISOLATED_LOGIN} or {EXISTING_LOGIN}")
+    home = _absolute(table["home"], f"agents.{principal}.home")
+    if login == EXISTING_LOGIN:
+        cli, login_paths = _existing_login(table, principal, home)
+        token_file = _token_file(table, principal, home, cli)
+        happier_home = None
+    else:
+        if {"cli", "login_paths", "token_file"} & set(table):
+            raise VerifierConfigError(
+                f"agents.{principal}: cli, login_paths and token_file need login = {EXISTING_LOGIN!r}"
+            )
+        token_file = None
+        if "happier_home" not in table:
+            raise VerifierConfigError(f"agents.{principal}: missing keys ['happier_home']")
+        cli, login_paths = None, ()
+        happier_home = _absolute(table["happier_home"], f"agents.{principal}.happier_home")
     return Agent(
         principal,
         ids["uid"],
-        _absolute(table["home"], f"agents.{principal}.home"),
-        _absolute(table["happier_home"], f"agents.{principal}.happier_home"),
+        home,
+        happier_home,
         _absolute(table["workdir_root"], f"agents.{principal}.workdir_root"),
         ids.get("night_uid"),
         ids.get("night_gid"),
+        _policy(table.get("policy"), principal),
+        login,
+        cli,
+        login_paths,
+        token_file,
     )
+
+
+def _existing_login(table: Mapping[str, Any], principal: str, home: Path) -> tuple[Path, tuple[Path, ...]]:
+    """The run uses the account's own login, so it runs as that account and may write only the named login files."""
+    where = f"agents.{principal}"
+    if "night_uid" in table or "happier_home" in table:
+        raise VerifierConfigError(
+            f"{where}: login = {EXISTING_LOGIN!r} runs as uid, without night_uid or happier_home"
+        )
+    if "cli" not in table or "login_paths" not in table:
+        raise VerifierConfigError(f"{where}: login = {EXISTING_LOGIN!r} needs cli and login_paths")
+    cli = _absolute(table["cli"], f"{where}.cli")
+    paths = table["login_paths"]
+    if not isinstance(paths, list) or not paths:
+        raise VerifierConfigError(f"{where}.login_paths must be a non-empty list")
+    login_paths = tuple(_absolute(path, f"{where}.login_paths") for path in paths)
+    for path in login_paths:
+        if home not in path.parents:
+            raise VerifierConfigError(f"{where}.login_paths must lie inside home {home}")
+    return cli, login_paths
+
+
+def _token_file(table: Mapping[str, Any], principal: str, home: Path, cli: Path) -> Path | None:
+    """The account's own Claude token file, for an account whose day login lives only in that file."""
+    if "token_file" not in table:
+        return None
+    where = f"agents.{principal}.token_file"
+    if cli.name != "claude":
+        raise VerifierConfigError(f"{where} is only supported for the claude CLI")
+    path = _absolute(table["token_file"], where)
+    if home not in path.parents:
+        raise VerifierConfigError(f"{where} must lie inside home {home}")
+    return path
+
+
+def _state_path(value: Any) -> Path:
+    """The private state directory may not contain the mirrors, which the dropped run account must read."""
+    path = _absolute(value, "state_path")
+    mirrors = Path(MIRROR_ROOT)
+    if mirrors.is_relative_to(path.parent) or path.parent.is_relative_to(mirrors):
+        raise VerifierConfigError(
+            f"state_path's directory {path.parent} must not overlap the mirror root {MIRROR_ROOT}"
+        )
+    return path
+
+
+def _policy(value: Any, principal: str) -> NightPolicy | None:
+    if value is None:
+        return None
+    table = _table(value, f"agents.{principal}.policy")
+    try:
+        return policy_from({"model": None, **table})
+    except (AssignmentError, TypeError) as error:
+        raise VerifierConfigError(f"agents.{principal}.policy is invalid: {error}") from None
 
 
 def _night_identities(agents: Mapping[str, Agent], launcher: Mapping[str, Any]) -> None:
@@ -230,6 +346,8 @@ def _night_identities(agents: Mapping[str, Agent], launcher: Mapping[str, Any]) 
     night_uids: set[int] = set()
     night_gids: set[int] = set()
     for agent in agents.values():
+        if agent.existing_login:
+            continue
         if agent.night_uid is None or agent.night_gid is None:
             if native:
                 raise VerifierConfigError(f"agents.{agent.principal} needs a night_uid for a native launcher")

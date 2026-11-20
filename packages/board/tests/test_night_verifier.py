@@ -769,3 +769,133 @@ def test_capture_truncation_is_explicit_and_oversized_metadata_rolls_back(case: 
     response = case.send("night.capture", run.id, payload | {"receipt_id": str(uuid4()), "counter": 2})
     assert response.status_code == 409 and response.json()["reason"] == "wake_metadata_too_large"
     assert case.send("night.state", "self", {}).json()["counter"] == 2
+
+
+def _enroll(case: Case, principal: str = "pi@dev", *, control: bool = True) -> None:
+    assert case.client.portal is not None
+    admission = NightAdmission(case.app.state.db)
+    case.client.portal.call(admission.set_enabled, control)
+    case.client.portal.call(admission.enroll, principal, True)
+
+
+def _held_wake(case: Case, principal: str = "pi@dev", origin: str = "budgeted") -> None:
+    with sqlite3.connect(case.path) as conn:
+        conn.execute(
+            "INSERT INTO wakes (principal, reason, source_ref, summary, created_at, origin_kind) "
+            "VALUES (?, 'timer', ?, 'task', ?, ?)",
+            (principal, f"profile:{principal}", case.now - 10, origin),
+        )
+
+
+def test_admitted_admits_an_enrolled_principal_with_held_work_once(case: Case) -> None:
+    _enroll(case)
+    _held_wake(case)
+
+    first = case.send("night.admitted", "self", {})
+    second = case.send("night.admitted", "self", {})
+
+    assert first.status_code == 200, first.text
+    runs = first.json()["runs"]
+    assert first.json()["box"] == "dev"
+    assert [run["principal"] for run in runs] == ["pi@dev"]
+    assert second.json() == first.json()
+    with sqlite3.connect(case.path) as conn:
+        stored = conn.execute("SELECT id, fence, state FROM night_runs").fetchall()
+    assert stored == [(runs[0]["run_id"], runs[0]["fence"], "admitted")]
+
+
+def test_admitted_skips_principals_without_held_work(case: Case) -> None:
+    _enroll(case)
+
+    response = case.send("night.admitted", "self", {})
+
+    assert response.json() == {"box": "dev", "runs": []}
+    with sqlite3.connect(case.path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM night_runs").fetchone()[0] == 0
+
+
+def test_admitted_skips_human_work_other_boxes_and_disabled_control(case: Case) -> None:
+    _enroll(case, "pi@huginn")
+    _held_wake(case, "pi@huginn")
+    assert case.send("night.admitted", "self", {}).json()["runs"] == []
+
+    _enroll(case, "pi@dev", control=False)
+    _held_wake(case)
+    assert case.send("night.admitted", "self", {}).json()["runs"] == []
+
+    _enroll(case, "pi@dev")
+    _held_wake(case, origin="human")
+    assert case.send("night.admitted", "self", {}).json()["runs"] == []
+
+
+def test_admitted_lists_nothing_outside_the_window(case: Case) -> None:
+    _enroll(case)
+    _held_wake(case)
+    case.app.state.night_verifier._clock = lambda: case.now - 7200
+
+    assert case.send("night.admitted", "self", {}).json()["runs"] == []
+
+
+def test_admitted_omits_a_run_that_already_started(case: Case) -> None:
+    run = case.run()
+    assert case.send("night.binding", run.id, case.binding(run)).status_code == 200
+    _held_wake(case)
+
+    assert case.send("night.admitted", "self", {}).json()["runs"] == []
+
+
+@pytest.mark.parametrize(("target", "payload"), [("self", {"extra": 1}), ("other", {})])
+def test_admitted_refuses_bad_requests(case: Case, target: str, payload: dict[str, Any]) -> None:
+    assert case.send("night.admitted", target, payload).status_code == 409
+
+
+def test_agent_signature_cannot_list_admitted_runs(case: Case) -> None:
+    _enroll(case)
+    _held_wake(case)
+
+    assert case.send("night.admitted", "self", {}, actor=case.agent).status_code != 200
+    with sqlite3.connect(case.path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM night_runs").fetchone()[0] == 0
+
+
+def test_real_signed_client_lists_admitted_runs(case: Case) -> None:
+    client = NightAuthorityClient(
+        ClientConfig(), http=cast(AuthorityHTTP, case.client), signer=case.service.sign
+    )
+    board = SignedBoard("dev", client)
+    _enroll(case)
+    _held_wake(case)
+
+    runs = board.admitted()
+
+    assert len(runs) == 1 and runs[0].principal == "pi@dev"
+    assert board.fetch_grant(runs[0].run_id, runs[0].fence).state == "admitted"
+
+
+def test_admitted_starts_an_enrolled_principals_night_at_its_slot_without_any_posts(case: Case) -> None:
+    _enroll(case)
+    slot = window_on(date(2026, 11, 11)).slot("pi@dev")
+    case.app.state.night_verifier._clock = lambda: slot - 1
+    assert case.send("night.admitted", "self", {}).json()["runs"] == [], "admitted before the slot"
+
+    case.app.state.night_verifier._clock = lambda: slot + 5
+    first = case.send("night.admitted", "self", {}).json()["runs"]
+    case.app.state.night_verifier._clock = lambda: slot + 40
+    again = case.send("night.admitted", "self", {}).json()["runs"]
+
+    assert [run["principal"] for run in first] == ["pi@dev"] and again == first
+    with sqlite3.connect(case.path) as conn:
+        wakes = conn.execute("SELECT reason, source_ref, origin_kind FROM wakes").fetchall()
+        held = conn.execute("SELECT COUNT(*) FROM night_held_wakes").fetchone()[0]
+    assert wakes == [("night_initial", "night:2026-11-11", "budgeted")]
+    assert held == 1
+
+
+def test_a_missed_slot_is_skipped_rather_than_caught_up(case: Case) -> None:
+    _enroll(case)
+    slot = window_on(date(2026, 11, 11)).slot("pi@dev")
+    case.app.state.night_verifier._clock = lambda: slot + 120
+
+    assert case.send("night.admitted", "self", {}).json()["runs"] == []
+    with sqlite3.connect(case.path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM wakes").fetchone()[0] == 0

@@ -7,11 +7,12 @@ from uuid import uuid4
 
 import pytest
 from agent_board import night_state
+from agent_board.night.assignment import Assignment, NightPolicy, decode, encode, read_sealed
 from agent_board.night.config import parse
 from agent_board.night.execstep import Account, ExecRefused, exec_native
 from agent_board.night.gate import GuardState
 from agent_board.night.latch import latch_stop
-from agent_board.night.ledger import Arm, Ledger, Pending
+from agent_board.night.ledger import Arm, CaptureContext, Ledger, Pending
 from agent_board.night_inspection import unit_cgroup
 from agent_board.night_state import ClockReading, Grant, LocalJournal
 
@@ -73,8 +74,9 @@ class FakeSystem:
     def identity(self) -> tuple[tuple[int, int, int], tuple[int, int, int], list[int]]:
         return self.ids
 
-    def close_inherited_descriptors(self) -> None:
+    def close_inherited_descriptors(self, keep: int) -> None:
         self.calls.append("close")
+        self.kept = keep
 
     def execve(self, path: str, argv: list[str], environment: Mapping[str, str]) -> NoReturn:
         self.calls.append("execve")
@@ -96,34 +98,82 @@ def protected_fixture_boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(night_state, "_ancestor_stat", metadata, raising=False)
 
 
-def _config() -> Any:
-    return parse(
-        {
-            "box": "huginn",
-            "principal": "verifier@huginn",
-            "namespace": "switchboard",
-            "board_url": "https://board.test.invalid",
-            "signer_key": "/etc/switchboard-night/verifier_ed25519",
-            "state_path": "/var/lib/switchboard-night/journal.sqlite3",
-            "slice": "switchboard-night.slice",
-            "launcher": {
-                "python": "/opt/switchboard-night/releases/abc/bin/python",
-                "module": "agent_board.night.launch",
-                "happier": "/opt/happier/0.2.17/happier",
-            },
-            "agents": {
-                "pi@huginn": {
-                    "uid": UID,
-                    "night_uid": NIGHT_UID,
-                    "night_gid": NIGHT_GID,
-                    "home": "/home/agent",
-                    "happier_home": "/var/lib/switchboard-night/happier/pi",
-                    "workdir_root": "/srv/night/pi",
-                }
-            },
-            "limits": {"memory_max": "600M", "tasks_max": 128, "cpu_quota": "100%", "stop_grace_seconds": 5},
-        }
+EXISTING_AGENT = {
+    "uid": UID,
+    "login": "existing",
+    "cli": "/home/agent/.local/bin/claude",
+    "login_paths": ["/home/agent/.claude", "/home/agent/.claude.json"],
+    "home": "/home/agent",
+    "workdir_root": "/srv/night/pi",
+}
+
+
+def _config(existing: bool = False, token_file: str | None = None) -> Any:
+    table = _config_table()
+    if existing:
+        table["agents"]["pi@huginn"] = dict(EXISTING_AGENT)
+        if token_file is not None:
+            table["agents"]["pi@huginn"]["token_file"] = token_file
+    return parse(table)
+
+
+def _config_table() -> dict[str, Any]:
+    return {
+        "box": "huginn",
+        "principal": "verifier@huginn",
+        "namespace": "switchboard",
+        "board_url": "https://board.test.invalid",
+        "signer_key": "/etc/switchboard-night/verifier_ed25519",
+        "state_path": "/var/lib/switchboard-night/journal.sqlite3",
+        "slice": "switchboard-night.slice",
+        "launcher": {
+            "python": "/opt/switchboard-night/releases/abc/bin/python",
+            "module": "agent_board.night.launch",
+            "happier": "/opt/happier/0.2.17/happier",
+        },
+        "agents": {
+            "pi@huginn": {
+                "uid": UID,
+                "night_uid": NIGHT_UID,
+                "night_gid": NIGHT_GID,
+                "home": "/home/agent",
+                "happier_home": "/var/lib/switchboard-night/happier/pi",
+                "workdir_root": "/srv/night/pi",
+            }
+        },
+        "limits": {"memory_max": "600M", "tasks_max": 128, "cpu_quota": "100%", "stop_grace_seconds": 5},
+    }
+
+
+POLICY = NightPolicy("switchboard", "a" * 40, "claude", None, "default", 600)
+
+
+def store_assignment(
+    ledger: Ledger, run_id: str, principal: str, *, empty: bool = False, other: bool = False
+) -> bytes:
+    assignment = Assignment(
+        str(uuid4()) if other else run_id,
+        principal,
+        "switchboard",
+        "a" * 40,
+        "work on the held wakes",
+        "claude",
+        None,
+        "default",
+        600,
+        1_600.0,
     )
+    data = encode(assignment)
+    receipt = Pending(str(uuid4()), "capture", run_id, {"receipt_id": "c"})
+    ledger.persist_capture(receipt, CaptureContext(principal, 1_600.0, POLICY))
+    counter = ledger.identity().acked_counter + 1
+    ledger.acknowledge(
+        receipt.receipt_id,
+        journal_id=ledger.identity().journal_id or str(uuid4()),
+        counter=counter,
+        capture=('{"wakes": []}', None if empty else data),
+    )
+    return data
 
 
 class Rig:
@@ -143,12 +193,13 @@ class Rig:
         self.ledger.persist(receipt)
         self.ledger.acknowledge(receipt.receipt_id, journal_id=str(uuid4()), counter=1)
         self.ledger.arm(Arm(self.run_id, BOOT, GUARD, 700.0, 1_600.0))
+        self.assignment = store_assignment(self.ledger, self.run_id, "pi@huginn")
         self.system = FakeSystem(self.run_id)
 
-    def run(self, invocation: str = OWN) -> None:
+    def run(self, invocation: str = OWN, existing: bool = False, token_file: str | None = None) -> None:
         exec_native(
             self.run_id,
-            config=_config(),
+            config=_config(existing, token_file),
             journal=self.journal,
             ledger=self.ledger,
             environ={"INVOCATION_ID": invocation, "SECRET": "root-only"},
@@ -178,6 +229,13 @@ def test_a_bound_armed_live_run_drops_to_the_agent_then_execs_the_launcher(rig: 
     assert environment["SWITCHBOARD_NIGHT_HAPPIER"] == "/opt/happier/0.2.17/happier"
     assert float(environment["SWITCHBOARD_NIGHT_DEADLINE_UTC"]) == 1_600.0 - 5
     assert "SECRET" not in environment and "INVOCATION_ID" not in environment, "root environment leaked"
+    fd = int(environment["SWITCHBOARD_NIGHT_ASSIGNMENT_FD"])
+    try:
+        assert rig.system.kept == fd
+        assert read_sealed(fd) == rig.assignment
+        assert decode(read_sealed(fd)).run_id == rig.run_id
+    finally:
+        os.close(fd)
 
 
 def test_an_exec_that_starts_after_the_stop_commit_refuses_even_without_any_freeze(rig: Rig) -> None:
@@ -348,3 +406,59 @@ def test_a_night_group_any_requesting_account_belongs_to_is_refused_before_dropp
         rig.run()
 
     assert rig.system.calls == []
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        pytest.param("none", "no_captured_assignment", id="no-capture"),
+        pytest.param("empty", "empty_assignment", id="empty"),
+        pytest.param("other", "assignment_mismatch", id="other-run"),
+    ],
+)
+def test_exec_refuses_before_dropping_without_its_own_captured_assignment(
+    tmp_path: Path, change: str, reason: str
+) -> None:
+    rig = Rig(tmp_path)
+    fresh = Ledger(tmp_path / "state" / "fresh.sqlite3")
+    fresh.record_binding(rig.run_id, uid=UID, boot_id=BOOT, invocation_id=OWN, cgroup="/x")
+    receipt = Pending(str(uuid4()), "binding", rig.run_id, {"receipt_id": "r"})
+    fresh.persist(receipt)
+    fresh.acknowledge(receipt.receipt_id, journal_id=str(uuid4()), counter=1)
+    fresh.arm(Arm(rig.run_id, BOOT, GUARD, 700.0, 1_600.0))
+    if change != "none":
+        store_assignment(fresh, rig.run_id, "pi@huginn", empty=change == "empty", other=change == "other")
+    rig.ledger = fresh
+
+    with pytest.raises(ExecRefused, match=reason):
+        rig.run()
+
+    assert rig.system.calls == [], "exec reached the drop without its assignment"
+
+
+def test_an_existing_login_run_execs_the_cli_launcher_as_the_account_with_its_own_home(rig: Rig) -> None:
+    with pytest.raises(Executed):
+        rig.run(existing=True)
+
+    assert rig.system.calls == ["drop", "close", "execve"], rig.system.calls
+    assert rig.system.looked_up is None
+    assert rig.system.executed is not None
+    path, argv, environment = rig.system.executed
+    assert argv == [path, "-I", "-m", "agent_board.night.cli_launch", rig.run_id]
+    assert environment["HOME"] == "/home/agent"
+    assert environment["SWITCHBOARD_NIGHT_LOGIN"] == "existing"
+    assert environment["SWITCHBOARD_NIGHT_CLI"] == "/home/agent/.local/bin/claude"
+    assert environment["SWITCHBOARD_NIGHT_UID"] == environment["SWITCHBOARD_NIGHT_DAY_UID"] == str(UID)
+    assert not {"HAPPIER_HOME_DIR", "SWITCHBOARD_NIGHT_HAPPIER", "XDG_RUNTIME_DIR"} & set(environment)
+    os.close(int(environment["SWITCHBOARD_NIGHT_ASSIGNMENT_FD"]))
+
+
+def test_an_existing_login_token_file_reaches_the_launcher_as_a_path_only(rig: Rig) -> None:
+    with pytest.raises(Executed):
+        rig.run(existing=True, token_file="/home/agent/.claude/oauth-token.env")
+
+    assert rig.system.executed is not None
+    environment = rig.system.executed[2]
+    assert environment["SWITCHBOARD_NIGHT_TOKEN_FILE"] == "/home/agent/.claude/oauth-token.env"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in environment
+    os.close(int(environment["SWITCHBOARD_NIGHT_ASSIGNMENT_FD"]))

@@ -1,7 +1,7 @@
 import os
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import pytest
@@ -13,6 +13,11 @@ from agent_board.night.ledger import Arm, Ledger, Pending
 from agent_board.night.systemd import SystemdRuns, run_argv
 from agent_board.night_inspection import ROOT_EXEC, Binding, EmptyObservation, InspectionError
 from agent_board.night_state import ClockReading, Grant, LocalJournal
+
+if TYPE_CHECKING:
+    from packages.agent_board.tests.test_night_execstep import store_assignment
+else:
+    from test_night_execstep import store_assignment
 
 BOOT = str(uuid4())
 UID = 1001
@@ -271,12 +276,14 @@ class GateRig:
         self.clock = 0.0
         self.sleeps = 0
 
-    def bind_and_arm(self, guard: str = GUARD, invocation: str = OWN) -> None:
+    def bind_and_arm(self, guard: str = GUARD, invocation: str = OWN, *, assignment: str = "stored") -> None:
         self.ledger.record_binding(self.run_id, uid=UID, boot_id=BOOT, invocation_id=invocation, cgroup="/x")
         receipt = Pending(str(uuid4()), "binding", self.run_id, {"receipt_id": "r"})
         self.ledger.persist(receipt)
         self.ledger.acknowledge(receipt.receipt_id, journal_id=str(uuid4()), counter=1)
         self.ledger.arm(Arm(self.run_id, BOOT, guard, 700.0, 1_600.0))
+        if assignment != "none":
+            store_assignment(self.ledger, self.run_id, "pi@huginn", empty=assignment == "empty")
 
     def open(self, own: str = OWN) -> bool:
         def sleep(seconds: float) -> None:
@@ -301,6 +308,14 @@ def test_the_gate_opens_only_for_its_own_bound_and_armed_unit(tmp_path: Path) ->
 
     assert rig.open()
     assert not rig.open(own="d" * 32), "the gate opened for a different unit invocation"
+
+
+@pytest.mark.parametrize("assignment", ["none", "empty"])
+def test_the_gate_stays_shut_without_a_captured_assignment(tmp_path: Path, assignment: str) -> None:
+    rig = GateRig(tmp_path)
+    rig.bind_and_arm(assignment=assignment)
+
+    assert not rig.open()
 
 
 def test_the_gate_times_out_closed_without_the_boards_binding(tmp_path: Path) -> None:

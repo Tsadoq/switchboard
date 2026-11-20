@@ -7,6 +7,7 @@ import time as clock
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
+from functools import partial
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -15,6 +16,8 @@ from board.db import Database
 ROME = ZoneInfo("Europe/Rome")
 BUDGET_SECONDS = 1200
 FLEET_CAPACITY = 2
+INITIAL_REASON = "night_initial"
+INITIAL_SUMMARY = "the nightly start"
 
 
 class AdmissionDenied(ValueError):
@@ -102,60 +105,7 @@ class NightAdmission:
         await self._db.transact(write)
 
     async def admit(self, principal: str, now: float) -> Run:
-        box = _box(principal)
-
-        def write(conn: sqlite3.Connection) -> Run:
-            _eligible(conn, principal)
-            night = window_for(now)
-            if night is None:
-                raise AdmissionDenied("outside_window")
-            if conn.execute(
-                "SELECT 1 FROM wakes WHERE principal = ? AND acked_at IS NULL "
-                "AND origin_kind = 'human' LIMIT 1",
-                (principal,),
-            ).fetchone():
-                raise AdmissionDenied("human_priority")
-            existing = conn.execute(
-                "SELECT * FROM night_runs WHERE principal = ? AND state != 'finished'", (principal,)
-            ).fetchone()
-            if existing is not None:
-                if (
-                    existing["state"] in ("admitted", "running")
-                    and existing["deadline"] > now
-                    and existing["local_date"] == night.local_date
-                ):
-                    return _run(existing)
-                raise AdmissionDenied("capacity")
-            occupied = conn.execute(
-                "SELECT COUNT(*), COALESCE(SUM(box = ?), 0) FROM night_runs WHERE state != 'finished'", (box,)
-            ).fetchone()
-            if occupied[0] >= FLEET_CAPACITY or occupied[1]:
-                raise AdmissionDenied("capacity")
-            conn.execute(
-                "INSERT INTO night_budget (principal, local_date, starts_at, ends_at) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(principal, local_date) DO NOTHING",
-                (principal, night.local_date, night.start, night.end),
-            )
-            budget = conn.execute(
-                "SELECT spent, reserved FROM night_budget WHERE principal = ? AND local_date = ?",
-                (principal, night.local_date),
-            ).fetchone()
-            reserved = min(BUDGET_SECONDS - budget[0] - budget[1], night.end - now)
-            if reserved <= 0:
-                raise AdmissionDenied("budget")
-            run_id, fence = str(uuid4()), secrets.token_urlsafe(32)
-            conn.execute(
-                "UPDATE night_budget SET reserved = reserved + ? WHERE principal = ? AND local_date = ?",
-                (reserved, principal, night.local_date),
-            )
-            conn.execute(
-                "INSERT INTO night_runs (id, principal, box, local_date, fence, admitted_at, deadline, reserved, state) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'admitted')",
-                (run_id, principal, box, night.local_date, fence, now, now + reserved, reserved),
-            )
-            return _find(conn, run_id)
-
-        return await self._db.transact(write)
+        return await self._db.transact(lambda conn: admit_in_transaction(conn, principal, now))
 
     async def start(self, principal: str, run_id: str, fence: str, now: float) -> Run:
         return await self._db.transact(lambda conn: start_in_transaction(conn, principal, run_id, fence, now))
@@ -177,29 +127,149 @@ class NightAdmission:
         *,
         emit: Callable[[sqlite3.Connection, NightWindow], None] | None = None,
     ) -> bool:
-        def write(conn: sqlite3.Connection) -> bool:
-            try:
-                _eligible(conn, principal)
-            except AdmissionDenied:
-                return False
-            night = window_for(now)
-            if night is None:
-                return False
-            slot = night.slot(principal)
-            if now < slot:
-                return False
-            status = "fired" if now < slot + 60 else "skipped"
-            cursor = conn.execute(
-                "INSERT INTO night_initial_slots (principal, local_date, slot_at, status) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(principal, local_date) DO NOTHING",
-                (principal, night.local_date, slot, status),
-            )
-            fired = cursor.rowcount == 1 and status == "fired"
-            if fired and emit is not None:
-                emit(conn, night)
-            return fired
+        return await self._db.transact(
+            lambda conn: claim_initial_in_transaction(conn, principal, now, emit=emit)
+        )
 
-        return await self._db.transact(write)
+
+def claim_initial_in_transaction(
+    conn: sqlite3.Connection,
+    principal: str,
+    now: float,
+    *,
+    emit: Callable[[sqlite3.Connection, NightWindow], None] | None = None,
+) -> bool:
+    try:
+        _eligible(conn, principal)
+    except AdmissionDenied:
+        return False
+    night = window_for(now)
+    if night is None:
+        return False
+    slot = night.slot(principal)
+    if now < slot:
+        return False
+    status = "fired" if now < slot + 60 else "skipped"
+    cursor = conn.execute(
+        "INSERT INTO night_initial_slots (principal, local_date, slot_at, status) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(principal, local_date) DO NOTHING",
+        (principal, night.local_date, slot, status),
+    )
+    fired = cursor.rowcount == 1 and status == "fired"
+    if fired and emit is not None:
+        emit(conn, night)
+    return fired
+
+
+def initial_wake_in_transaction(
+    conn: sqlite3.Connection, night: NightWindow, *, principal: str, now: float
+) -> None:
+    """The board's own start for one principal's night, held like any budgeted wake for the night run."""
+    conn.execute(
+        "INSERT INTO wakes (principal, reason, source_ref, summary, created_at, origin_kind) "
+        "VALUES (?, ?, ?, ?, ?, 'budgeted')",
+        (principal, INITIAL_REASON, f"night:{night.local_date}", INITIAL_SUMMARY, now),
+    )
+
+
+def admit_in_transaction(conn: sqlite3.Connection, principal: str, now: float) -> Run:
+    box = _box(principal)
+    _eligible(conn, principal)
+    night = window_for(now)
+    if night is None:
+        raise AdmissionDenied("outside_window")
+    if conn.execute(
+        "SELECT 1 FROM wakes WHERE principal = ? AND acked_at IS NULL AND origin_kind = 'human' LIMIT 1",
+        (principal,),
+    ).fetchone():
+        raise AdmissionDenied("human_priority")
+    existing = conn.execute(
+        "SELECT * FROM night_runs WHERE principal = ? AND state != 'finished'", (principal,)
+    ).fetchone()
+    if existing is not None:
+        if (
+            existing["state"] in ("admitted", "running")
+            and existing["deadline"] > now
+            and existing["local_date"] == night.local_date
+        ):
+            return _run(existing)
+        raise AdmissionDenied("capacity")
+    occupied = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(box = ?), 0) FROM night_runs WHERE state != 'finished'", (box,)
+    ).fetchone()
+    if occupied[0] >= FLEET_CAPACITY or occupied[1]:
+        raise AdmissionDenied("capacity")
+    conn.execute(
+        "INSERT INTO night_budget (principal, local_date, starts_at, ends_at) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(principal, local_date) DO NOTHING",
+        (principal, night.local_date, night.start, night.end),
+    )
+    budget = conn.execute(
+        "SELECT spent, reserved FROM night_budget WHERE principal = ? AND local_date = ?",
+        (principal, night.local_date),
+    ).fetchone()
+    reserved = min(BUDGET_SECONDS - budget[0] - budget[1], night.end - now)
+    if reserved <= 0:
+        raise AdmissionDenied("budget")
+    run_id, fence = str(uuid4()), secrets.token_urlsafe(32)
+    conn.execute(
+        "UPDATE night_budget SET reserved = reserved + ? WHERE principal = ? AND local_date = ?",
+        (reserved, principal, night.local_date),
+    )
+    conn.execute(
+        "INSERT INTO night_runs (id, principal, box, local_date, fence, admitted_at, deadline, reserved, state) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'admitted')",
+        (run_id, principal, box, night.local_date, fence, now, now + reserved, reserved),
+    )
+    return _find(conn, run_id)
+
+
+def admitted_for_box_in_transaction(conn: sqlite3.Connection, box: str, now: float) -> list[Run]:
+    """Admits each enrolled principal of `box` that has held night work, and lists the box's admitted runs."""
+    night = window_for(now)
+    if night is None:
+        return []
+    runs: list[Run] = []
+    enrolled = conn.execute("SELECT principal FROM night_enrollment WHERE enabled = 1 ORDER BY principal")
+    for principal in [row[0] for row in enrolled]:
+        try:
+            if _box(principal) != box.casefold():
+                continue
+            claim_initial_in_transaction(
+                conn, principal, now, emit=partial(initial_wake_in_transaction, principal=principal, now=now)
+            )
+            hold_wakes_in_transaction(conn, now, principal)
+            if not _open_run(conn, principal) and not _held_work(conn, principal, night):
+                continue
+            run = admit_in_transaction(conn, principal, now)
+        except AdmissionDenied:
+            continue
+        if run.state == "admitted":
+            runs.append(run)
+    return runs
+
+
+def _open_run(conn: sqlite3.Connection, principal: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM night_runs WHERE principal = ? AND state != 'finished' LIMIT 1", (principal,)
+        ).fetchone()
+        is not None
+    )
+
+
+def _held_work(conn: sqlite3.Connection, principal: str, night: NightWindow) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM wakes w JOIN night_held_wakes h ON h.wake_id = w.id "
+            "WHERE w.principal = ? AND w.acked_at IS NULL AND w.origin_kind = 'budgeted' "
+            "AND h.local_date = ? AND NOT EXISTS (SELECT 1 FROM night_captured_wakes cw "
+            "JOIN night_wake_captures c ON c.receipt_id = cw.capture_id "
+            "JOIN night_runs r ON r.id = c.run_id WHERE cw.wake_id = w.id AND r.state != 'finished') LIMIT 1",
+            (principal, night.local_date),
+        ).fetchone()
+        is not None
+    )
 
 
 def hold_wakes_in_transaction(conn: sqlite3.Connection, now: float, principal: str | None = None) -> None:

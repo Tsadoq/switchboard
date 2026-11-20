@@ -1,7 +1,9 @@
+import re
 from collections.abc import Mapping
 from typing import Any
 from uuid import UUID
 
+from agent_board.night.controller import AdmittedRun
 from agent_board.night.sync import (
     ABORT_FIELDS,
     AbortReply,
@@ -15,6 +17,7 @@ from agent_board.night.sync import (
 from agent_board.night_authority import AuthorityRefused, GrantUnavailable, NightAuthorityClient, ServerGrant
 
 SERVER_STOPPING = "stopping"
+_FENCE = re.compile(r"[A-Za-z0-9_-]{32,128}")
 CAPTURE_FIELDS = frozenset(
     ("journal_id", "counter", "capture_id", "run_id", "principal", "deadline", "wakes")
 )
@@ -83,6 +86,25 @@ class SignedBoard:
         except BoardRefused:
             raise CaptureRefused("invalid_capture_abort_ack") from None
         return AbortReply(ack, data)
+
+    def admitted(self) -> list[AdmittedRun]:
+        data = self._request("night.admitted", "self", {})
+        if set(data) != {"box", "runs"} or data["box"] != self._box or not isinstance(data["runs"], list):
+            raise BoardRefused("invalid_admitted")
+        runs: list[AdmittedRun] = []
+        for run in data["runs"]:
+            if (
+                not isinstance(run, dict)
+                or set(run) != {"run_id", "fence", "principal"}
+                or not _uuid(run["run_id"])
+                or not isinstance(run["fence"], str)
+                or _FENCE.fullmatch(run["fence"]) is None
+                or not isinstance(run["principal"], str)
+                or run["principal"].partition("@")[2] != self._box
+            ):
+                raise BoardRefused("invalid_admitted")
+            runs.append(AdmittedRun(run["run_id"], run["fence"], run["principal"]))
+        return runs
 
     def thread_read(self, run_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         return self._request("night.thread_read", run_id, payload)

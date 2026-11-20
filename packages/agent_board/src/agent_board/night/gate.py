@@ -4,7 +4,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
-from agent_board.night.ledger import Ledger
+from agent_board.night.ledger import CapturedAssignment, Ledger
 from agent_board.night.systemd import GATE_TIMEOUT_SECONDS
 from agent_board.night_state import LocalJournal
 
@@ -59,6 +59,13 @@ def _ready(
     if binding is None or binding.invocation_id != own or binding.boot_id != boot_id:
         return False
     if not guard.active or _INVOCATION.fullmatch(guard.invocation_id) is None:
+        return False
+    captured = ledger.captured(run_id)
+    if (
+        not isinstance(captured, CapturedAssignment)
+        or captured.aborted_after_apply
+        or captured.assignment is None
+    ):
         return False
     return ledger.ready(
         run_id,

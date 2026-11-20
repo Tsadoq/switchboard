@@ -8,8 +8,9 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-from agent_board.night.assignment import Assignment
+from agent_board.night.assignment import Assignment, encode, seal
 from agent_board.night.environment import (
+    ASSIGNMENT_FD_ENV,
     DAY_UID_ENV,
     DEADLINE_UTC_ENV,
     HAPPIER_BIN_ENV,
@@ -27,6 +28,7 @@ from agent_board.night.launch import (
     EXIT_SESSION,
     EXIT_USAGE,
     LaunchRefused,
+    SealedAssignments,
     Settings,
     TrackedSession,
     launch,
@@ -865,3 +867,37 @@ def test_running_as_the_requesting_uid_is_refused(rig: Rig) -> None:
 
     assert rig.run() == EXIT_PREFLIGHT
     assert rig.host.calls == []
+
+
+def _sealed_assignment() -> tuple[Assignment, int]:
+    assignment = Assignment(
+        str(uuid4()), "pi@huginn", "switchboard", "a" * 40, "do the work", "pi", None, "auto", 600, 1_600.0
+    )
+    return assignment, seal(encode(assignment))
+
+
+def test_sealed_assignments_read_and_close_the_named_memfd() -> None:
+    assignment, fd = _sealed_assignment()
+
+    assert (
+        SealedAssignments({ASSIGNMENT_FD_ENV: str(fd)}).fetch(assignment.run_id, assignment.principal)
+        == assignment
+    )
+    with pytest.raises(OSError):
+        os.fstat(fd)
+
+
+@pytest.mark.parametrize("value", [None, "0", "-1", "abc"])
+def test_sealed_assignments_refuse_a_missing_fd(value: str | None) -> None:
+    environ = {} if value is None else {ASSIGNMENT_FD_ENV: value}
+    with pytest.raises(LaunchRefused, match="assignment_fd_missing"):
+        SealedAssignments(environ).fetch(str(uuid4()), "pi@huginn")
+
+
+def test_sealed_assignments_refuse_an_unsealed_fd(tmp_path: Path) -> None:
+    path = tmp_path / "plain"
+    path.write_bytes(b"{}")
+    fd = os.open(path, os.O_RDONLY)
+
+    with pytest.raises(LaunchRefused, match="assignment_unreadable"):
+        SealedAssignments({ASSIGNMENT_FD_ENV: str(fd)}).fetch(str(uuid4()), "pi@huginn")
