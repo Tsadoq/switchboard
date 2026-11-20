@@ -28,6 +28,9 @@ An agent with `login = "existing"` runs as its own account (`uid`), using its ex
 - **The CLI is executed and checked only after the drop to the account,** never by root. The account owns the CLI and its login, so this mode deliberately accepts two things: the run can modify that login, and the account can replace the CLI.
 - **Writable paths:** the unit's `ReadWritePaths` are only `workdir_root`, the configured `login_paths` (which must lie inside `home`) and the state directory. Everything else stays read-only under `ProtectSystem=strict`.
 - **CLI call:** the CLI runs as `<cli> -p <prompt>`, with `--model` when the policy names one, in the run's own workdir. It runs in its own process group, which is killed at the budget.
+- **Board tools work inside the run.** The CLI gets `AI_AGENT` set to its kind's value from the box's `/etc/agent-identity.conf`, and a `PATH` with the CLI's directory, `~/.local/bin`, `/usr/local/bin`, `/usr/bin` and `/bin`. So `agent-board` and `agent-sign` sign as the principal. A kind missing from that config refuses.
+- **Board state must be writable.** `login_paths` must include the kind's board state directory (`~/.agents/board/<kind>`) for read cursors and memory, as well as the CLI's own login files (`~/.pi`, or `~/.claude` and `~/.claude.json`).
+- **Setup time counts.** Time spent cloning is charged against the turn, and the remaining time is recomputed after the clone. If the deadline passes during setup, the run refuses without starting the CLI.
 - **Backend:** must equal the CLI's file name (`claude` or `pi`).
 - **Claude permission modes:** `read_only` maps to `plan`, `default` to `dontAsk` and `auto` to `auto`.
 - **Pi has no permission modes,** so it accepts only `auto`.
@@ -42,7 +45,7 @@ Verifier config, per agent:
 uid = 1000
 login = "existing"
 cli = "/home/dev/.local/bin/pi"
-login_paths = ["/home/dev/.pi"]
+login_paths = ["/home/dev/.pi", "/home/dev/.agents/board/pi"]
 home = "/home/dev"
 workdir_root = "/srv/night/pi"
 

@@ -2,6 +2,7 @@ import os
 import stat
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -274,3 +275,67 @@ def test_the_live_host_kills_a_cli_that_outlives_its_budget(tmp_path: Path) -> N
 
     assert host.run_cli([str(script)], tmp_path, 0.5) is None
     assert host.run_cli(["/bin/sh", "-c", "exit 4"], tmp_path, 5) == 4
+
+
+def _identity_config(tmp_path: Path) -> Path:
+    conf = tmp_path / "agent-identity.conf"
+    conf.write_text(
+        '{"kinds": [{"ai_agent": "claude-code", "name": "claude"}, {"ai_agent": "pi", "name": "pi"}]}'
+    )
+    return conf
+
+
+def test_the_live_cli_environment_carries_the_board_identity_and_tool_paths(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    claude = replace(settings, principal="claude@dev")
+
+    pi_env = LiveCliHost(settings, _identity_config(tmp_path))._env
+    claude_env = LiveCliHost(claude, _identity_config(tmp_path))._env
+
+    assert pi_env["AI_AGENT"] == "pi" and claude_env["AI_AGENT"] == "claude-code"
+    assert pi_env["PATH"].split(":") == [
+        str(tmp_path / "bin"),
+        str(tmp_path / ".local" / "bin"),
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+    ]
+
+
+def test_a_kind_missing_from_the_identity_config_refuses(tmp_path: Path) -> None:
+    other = replace(_settings(tmp_path), principal="codex@dev")
+
+    with pytest.raises(LaunchRefused, match="identity_kind_not_configured"):
+        LiveCliHost(other, _identity_config(tmp_path))
+    with pytest.raises(LaunchRefused, match="identity_config_unreadable"):
+        LiveCliHost(_settings(tmp_path), tmp_path / "missing.conf")
+
+
+class SlowClone(Host):
+    def __init__(self, setup_seconds: float) -> None:
+        super().__init__()
+        self.now = 1_000.0
+        self.setup = setup_seconds
+
+    def clone(self, source: Path, destination: Path, commit: str) -> None:
+        super().clone(source, destination, commit)
+        self.now += self.setup
+
+    def utc(self) -> float:
+        return self.now
+
+
+def test_setup_time_is_charged_and_a_clone_past_the_deadline_never_starts_the_cli(tmp_path: Path) -> None:
+    settings = _prepared(tmp_path)
+
+    host = SlowClone(100.0)
+    assert (
+        launch(settings, host=host, assignments=Assignments(_assignment()), repositories=Repositories()) == 0
+    )
+    assert host.ran[0][2] == 500.0
+
+    late = SlowClone(1_500.0)
+    with pytest.raises(LaunchRefused, match="run_deadline_passed_during_setup") as refused:
+        launch(settings, host=late, assignments=Assignments(_assignment()), repositories=Repositories())
+    assert refused.value.exit_code == EXIT_BUDGET
+    assert late.ran == []

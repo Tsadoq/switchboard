@@ -832,3 +832,12 @@ def test_a_failed_capture_leaves_the_run_running_with_its_gate_shut(rig: Rig) ->
     rig.binder.capture_failure = SyncError("not_bound")
 
     assert rig.ask("start", str(uuid4()))["status"] == "running"
+
+
+def test_a_frozen_sweep_does_not_ask_the_board_to_admit_runs(rig: Rig) -> None:
+    admissions = _admitting(rig, [AdmittedRun(str(uuid4()), FENCE, "pi@dev")])
+    rig.binder.frozen = "counter_mismatch"
+
+    rig.controller.sweep()
+
+    assert admissions.calls == 0, "a frozen verifier asked the board to admit runs it cannot start"

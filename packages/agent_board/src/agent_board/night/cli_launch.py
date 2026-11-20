@@ -1,3 +1,4 @@
+import json
 import logging
 import math
 import os
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from agent_board.identity import identity_conf
 from agent_board.night.assignment import Assignment
 from agent_board.night.environment import (
     CLI_ENV,
@@ -44,6 +46,7 @@ from agent_board.night.launch import (
 
 EXISTING_LOGIN = "existing"
 EXIT_CLI_FAILED = 8
+AGENT_ENV = "AI_AGENT"
 CLAUDE_PERMISSION_MODES = {"read_only": "plan", "default": "dontAsk", "auto": "auto"}
 logger = logging.getLogger(__name__)
 
@@ -145,24 +148,50 @@ def launch(
         raise LaunchRefused(EXIT_ASSIGNMENT, "assignment_mismatch")
     argv = cli_argv(settings, assignment)
     source = repositories.resolve(assignment.repository_key, settings.principal)
-    budget = min(
-        float(assignment.turn_seconds), min(settings.deadline_utc, assignment.deadline_utc) - host.utc()
-    )
-    if budget <= 0:
+    deadline = min(settings.deadline_utc, assignment.deadline_utc)
+    started = host.utc()
+    if deadline - started <= 0:
         raise LaunchRefused(EXIT_BUDGET, "run_deadline_passed")
     host.clone(source, settings.workdir, assignment.base_commit)
+    now = host.utc()
+    budget = min(float(assignment.turn_seconds) - (now - started), deadline - now)
+    if budget <= 0:
+        raise LaunchRefused(EXIT_BUDGET, "run_deadline_passed_during_setup")
     code = host.run_cli(argv, settings.workdir, budget)
     if code is None:
         return EXIT_BUDGET
     return EXIT_DONE if code == 0 else EXIT_CLI_FAILED
 
 
+def ai_agent_for(principal: str, conf: Path) -> str:
+    """The AI_AGENT value the box's identity config gives the principal's kind, so board tools sign as it."""
+    kind = principal.partition("@")[0]
+    try:
+        configured = json.loads(conf.read_text())["kinds"]
+        values = [entry["ai_agent"] for entry in configured if entry["name"] == kind]
+    except (OSError, ValueError, KeyError, TypeError):
+        raise LaunchRefused(EXIT_PREFLIGHT, "identity_config_unreadable") from None
+    if len(values) != 1 or not isinstance(values[0], str) or not values[0]:
+        raise LaunchRefused(EXIT_PREFLIGHT, "identity_kind_not_configured")
+    return values[0]
+
+
 class LiveCliHost:
-    def __init__(self, settings: CliSettings) -> None:
+    def __init__(self, settings: CliSettings, identity_config: Path | None = None) -> None:
+        tools = dict.fromkeys(
+            (
+                str(settings.cli.parent),
+                str(settings.home / ".local" / "bin"),
+                "/usr/local/bin",
+                "/usr/bin",
+                "/bin",
+            )
+        )
         self._env = {
             "HOME": str(settings.home),
-            "PATH": f"{settings.cli.parent}:/usr/bin:/bin",
+            "PATH": ":".join(tools),
             "LANG": "C.UTF-8",
+            AGENT_ENV: ai_agent_for(settings.principal, identity_config or identity_conf()),
         }
 
     def uid(self) -> int:

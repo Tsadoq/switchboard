@@ -261,7 +261,7 @@ class Controller:
 
     def _start_admitted(self) -> None:
         """Starts each run the board admitted for this box, through the same path as a requested start."""
-        if self._admissions is None:
+        if self._admissions is None or self._binder.frozen is not None:
             return
         try:
             admitted = self._admissions.admitted()
