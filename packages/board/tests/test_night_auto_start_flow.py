@@ -314,3 +314,21 @@ def _prepare_account(state: Path) -> None:
     cli = state / "bin" / "pi"
     cli.write_text("#!/bin/sh\n")
     cli.chmod(0o700)
+
+
+def test_an_enrolled_agent_with_no_posts_still_gets_its_nightly_start(flow: Flow) -> None:
+    assert flow.client.portal is not None
+    flow.client.portal.call(flow.admission.set_enabled, True)
+    flow.client.portal.call(flow.admission.enroll, PRINCIPAL, True)
+    app: Any = flow.client.app
+    slot = window_on(date(2026, 11, 21)).slot(PRINCIPAL)
+    app.state.night_verifier._clock = lambda: slot + 5
+
+    flow.controller.sweep()
+
+    assert len(flow.runs.launched) == 1, "no run started without a pre-existing wake"
+    captured = flow.ledger.captured(flow.runs.launched[0].run_id)
+    assert isinstance(captured, CapturedAssignment) and captured.assignment is not None
+    prompt = decode(captured.assignment).prompt
+    assert '"reason": "night_initial"' in prompt
+    assert "agent-board tickets list --mine" in prompt and "doing column" in prompt

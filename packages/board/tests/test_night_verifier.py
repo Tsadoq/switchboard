@@ -870,3 +870,32 @@ def test_real_signed_client_lists_admitted_runs(case: Case) -> None:
 
     assert len(runs) == 1 and runs[0].principal == "pi@dev"
     assert board.fetch_grant(runs[0].run_id, runs[0].fence).state == "admitted"
+
+
+def test_admitted_starts_an_enrolled_principals_night_at_its_slot_without_any_posts(case: Case) -> None:
+    _enroll(case)
+    slot = window_on(date(2026, 11, 11)).slot("pi@dev")
+    case.app.state.night_verifier._clock = lambda: slot - 1
+    assert case.send("night.admitted", "self", {}).json()["runs"] == [], "admitted before the slot"
+
+    case.app.state.night_verifier._clock = lambda: slot + 5
+    first = case.send("night.admitted", "self", {}).json()["runs"]
+    case.app.state.night_verifier._clock = lambda: slot + 40
+    again = case.send("night.admitted", "self", {}).json()["runs"]
+
+    assert [run["principal"] for run in first] == ["pi@dev"] and again == first
+    with sqlite3.connect(case.path) as conn:
+        wakes = conn.execute("SELECT reason, source_ref, origin_kind FROM wakes").fetchall()
+        held = conn.execute("SELECT COUNT(*) FROM night_held_wakes").fetchone()[0]
+    assert wakes == [("night_initial", "night:2026-11-11", "budgeted")]
+    assert held == 1
+
+
+def test_a_missed_slot_is_skipped_rather_than_caught_up(case: Case) -> None:
+    _enroll(case)
+    slot = window_on(date(2026, 11, 11)).slot("pi@dev")
+    case.app.state.night_verifier._clock = lambda: slot + 120
+
+    assert case.send("night.admitted", "self", {}).json()["runs"] == []
+    with sqlite3.connect(case.path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM wakes").fetchone()[0] == 0

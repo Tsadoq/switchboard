@@ -7,6 +7,7 @@ import time as clock
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
+from functools import partial
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -15,6 +16,8 @@ from board.db import Database
 ROME = ZoneInfo("Europe/Rome")
 BUDGET_SECONDS = 1200
 FLEET_CAPACITY = 2
+INITIAL_REASON = "night_initial"
+INITIAL_SUMMARY = "the nightly start"
 
 
 class AdmissionDenied(ValueError):
@@ -124,29 +127,49 @@ class NightAdmission:
         *,
         emit: Callable[[sqlite3.Connection, NightWindow], None] | None = None,
     ) -> bool:
-        def write(conn: sqlite3.Connection) -> bool:
-            try:
-                _eligible(conn, principal)
-            except AdmissionDenied:
-                return False
-            night = window_for(now)
-            if night is None:
-                return False
-            slot = night.slot(principal)
-            if now < slot:
-                return False
-            status = "fired" if now < slot + 60 else "skipped"
-            cursor = conn.execute(
-                "INSERT INTO night_initial_slots (principal, local_date, slot_at, status) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(principal, local_date) DO NOTHING",
-                (principal, night.local_date, slot, status),
-            )
-            fired = cursor.rowcount == 1 and status == "fired"
-            if fired and emit is not None:
-                emit(conn, night)
-            return fired
+        return await self._db.transact(
+            lambda conn: claim_initial_in_transaction(conn, principal, now, emit=emit)
+        )
 
-        return await self._db.transact(write)
+
+def claim_initial_in_transaction(
+    conn: sqlite3.Connection,
+    principal: str,
+    now: float,
+    *,
+    emit: Callable[[sqlite3.Connection, NightWindow], None] | None = None,
+) -> bool:
+    try:
+        _eligible(conn, principal)
+    except AdmissionDenied:
+        return False
+    night = window_for(now)
+    if night is None:
+        return False
+    slot = night.slot(principal)
+    if now < slot:
+        return False
+    status = "fired" if now < slot + 60 else "skipped"
+    cursor = conn.execute(
+        "INSERT INTO night_initial_slots (principal, local_date, slot_at, status) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(principal, local_date) DO NOTHING",
+        (principal, night.local_date, slot, status),
+    )
+    fired = cursor.rowcount == 1 and status == "fired"
+    if fired and emit is not None:
+        emit(conn, night)
+    return fired
+
+
+def initial_wake_in_transaction(
+    conn: sqlite3.Connection, night: NightWindow, *, principal: str, now: float
+) -> None:
+    """The board's own start for one principal's night, held like any budgeted wake for the night run."""
+    conn.execute(
+        "INSERT INTO wakes (principal, reason, source_ref, summary, created_at, origin_kind) "
+        "VALUES (?, ?, ?, ?, ?, 'budgeted')",
+        (principal, INITIAL_REASON, f"night:{night.local_date}", INITIAL_SUMMARY, now),
+    )
 
 
 def admit_in_transaction(conn: sqlite3.Connection, principal: str, now: float) -> Run:
@@ -212,6 +235,9 @@ def admitted_for_box_in_transaction(conn: sqlite3.Connection, box: str, now: flo
         try:
             if _box(principal) != box.casefold():
                 continue
+            claim_initial_in_transaction(
+                conn, principal, now, emit=partial(initial_wake_in_transaction, principal=principal, now=now)
+            )
             hold_wakes_in_transaction(conn, now, principal)
             if not _open_run(conn, principal) and not _held_work(conn, principal, night):
                 continue
