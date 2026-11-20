@@ -1,5 +1,6 @@
 import os
 import stat
+import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import replace
@@ -354,3 +355,69 @@ def test_the_mirror_root_lies_outside_the_private_state_directory() -> None:
 def test_a_state_directory_overlapping_the_mirror_root_is_refused(state_path: str) -> None:
     with pytest.raises(VerifierConfigError, match="overlap the mirror root"):
         parse({**_table(dict(EXISTING)), "state_path": state_path})
+
+
+def _toy_mirror(root: Path) -> tuple[Path, str]:
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+    mirror, source = root / "mirror.git", root / "src"
+    subprocess.run(["git", "init", "-q", "--bare", str(mirror)], check=True, env=env)
+    subprocess.run(["git", "init", "-q", str(source)], check=True, env=env)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "-c",
+            "user.email=a@b",
+            "-c",
+            "user.name=a",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x",
+        ],
+        check=True,
+        env=env,
+    )
+    subprocess.run(
+        ["git", "-C", str(source), "push", "-q", str(mirror), "HEAD:refs/heads/main"], check=True, env=env
+    )
+    head = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "HEAD"], check=True, env=env, capture_output=True, text=True
+    )
+    return mirror, head.stdout.strip()
+
+
+def test_a_foreign_owned_mirror_clones_with_trust_for_exactly_that_mirror(tmp_path: Path) -> None:
+    mirror, commit = _toy_mirror(tmp_path)
+    settings = _prepared(tmp_path)
+    host = LiveCliHost(settings, _identity_config(tmp_path))
+    host._env["GIT_TEST_ASSUME_DIFFERENT_OWNER"] = "1"
+
+    host.clone(mirror, settings.workdir, commit)
+
+    assert (settings.workdir / ".git").is_dir()
+    assert list(settings.workdir_root.iterdir()) == [settings.workdir], (
+        "the per-clone trust file was left behind"
+    )
+
+
+def test_without_the_per_clone_trust_git_refuses_the_foreign_mirror(tmp_path: Path) -> None:
+    mirror, _ = _toy_mirror(tmp_path)
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1",
+    }
+
+    refused = subprocess.run(
+        ["git", "clone", "--quiet", "--no-hardlinks", "--", str(mirror), str(tmp_path / "plain")],
+        check=False,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert refused.returncode != 0 and "dubious ownership" in refused.stderr

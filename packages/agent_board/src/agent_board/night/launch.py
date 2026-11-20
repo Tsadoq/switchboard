@@ -500,17 +500,34 @@ def clone_mirror(
     source: Path,
     destination: Path,
     commit: str,
-    git: Callable[[Sequence[str]], subprocess.CompletedProcess[str]],
+    git: Callable[[Sequence[str], Mapping[str, str]], subprocess.CompletedProcess[str]],
 ) -> None:
-    """A local, hook-free clone of a reviewed mirror, detached at exactly `commit`."""
+    """A local, hook-free clone of a reviewed mirror, detached at exactly `commit`.
+
+    The mirror is root-owned and the clone runs as the dropped account, so git's ownership check needs an
+    exception. It is granted for this exact mirror and the account's own new clone only, through a private
+    config file that lives just for this clone; nothing global or wildcarded is trusted.
+    """
     local_only = ("-c", "protocol.allow=never", "-c", "protocol.file.allow=always")
     hooks_off = ("-c", "core.hooksPath=/dev/null", *local_only)
-    git(
-        [GIT, *hooks_off, "clone", "--quiet", "--no-hardlinks", "--no-checkout", "--template="]
-        + ["--", str(source), str(destination)]
-    )
-    git([GIT, *hooks_off, "-C", str(destination), "checkout", "--quiet", "--detach", commit])
-    head = git([GIT, "-C", str(destination), "rev-parse", "HEAD"]).stdout.strip()
+    trust = destination.parent / f".{destination.name}.gitconfig"
+    try:
+        fd = os.open(trust, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except OSError as error:
+        raise LaunchRefused(EXIT_PREFLIGHT, f"mirror_trust_unwritable:{type(error).__name__}") from None
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(f"[safe]\n\tdirectory = {source}\n\tdirectory = {destination}\n")
+        env = {"GIT_CONFIG_GLOBAL": str(trust)}
+        git(
+            [GIT, *hooks_off, "clone", "--quiet", "--no-hardlinks", "--no-checkout", "--template="]
+            + ["--", str(source), str(destination)],
+            env,
+        )
+        git([GIT, *hooks_off, "-C", str(destination), "checkout", "--quiet", "--detach", commit], env)
+        head = git([GIT, "-C", str(destination), "rev-parse", "HEAD"], env).stdout.strip()
+    finally:
+        trust.unlink(missing_ok=True)
     if head != commit:
         raise LaunchRefused(EXIT_ASSIGNMENT, "checkout_mismatch")
 
@@ -614,8 +631,8 @@ class LiveHost:
         except (OSError, subprocess.TimeoutExpired) as error:
             raise LaunchRefused(EXIT_PREFLIGHT, f"command_failed:{type(error).__name__}") from None
 
-    def _git(self, argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
-        completed = self._run(argv, self._git_env)
+    def _git(self, argv: Sequence[str], extra: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
+        completed = self._run(argv, {**self._git_env, **extra})
         if completed.returncode != 0:
             raise LaunchRefused(EXIT_ASSIGNMENT, f"git_exit_{completed.returncode}")
         return completed

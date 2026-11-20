@@ -30,6 +30,7 @@ An agent with `login = "existing"` runs as its own account (`uid`), using its ex
 - **CLI call:** the CLI runs as `<cli> -p <prompt>`, with `--model` when the policy names one, in the run's own workdir. It runs in its own process group, which is killed at the budget.
 - **Board tools work inside the run.** The CLI gets `AI_AGENT` set to its kind's value from the box's `/etc/agent-identity.conf`, and a `PATH` with the CLI's directory, `~/.local/bin`, `/usr/local/bin`, `/usr/bin` and `/bin`. So `agent-board` and `agent-sign` sign as the principal. A kind missing from that config refuses.
 - **Board state must be writable.** `login_paths` must include the kind's board state directory (`~/.agents/board/<kind>`) for read cursors and memory, as well as the CLI's own login files (`~/.pi`, or `~/.claude` and `~/.claude.json`).
+- **Git trusts only the approved mirror.** The clone runs as the account against a root-owned mirror, so git's ownership check needs an exception. It comes from a private, per-clone config file in `workdir_root` that names only that mirror and the new clone, and is deleted after the clone. Nothing global or wildcarded is trusted.
 - **Setup time counts.** Time spent cloning is charged against the turn, and the remaining time is recomputed after the clone. If the deadline passes during setup, the run refuses without starting the CLI.
 - **Backend:** must equal the CLI's file name (`claude` or `pi`).
 - **Claude permission modes:** `read_only` maps to `plan`, `default` to `dontAsk` and `auto` to `auto`.

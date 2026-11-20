@@ -221,11 +221,11 @@ class LiveCliHost:
     def utc(self) -> float:
         return time.time()
 
-    def _git(self, argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    def _git(self, argv: Sequence[str], extra: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
         try:
             completed = subprocess.run(
                 list(argv),
-                env={**self._env, **GIT_SAFETY_ENV},
+                env={**self._env, **GIT_SAFETY_ENV, **extra},
                 capture_output=True,
                 text=True,
                 timeout=COMMAND_SECONDS,
