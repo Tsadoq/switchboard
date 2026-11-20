@@ -1,3 +1,4 @@
+import argparse
 import json
 import logging
 import math
@@ -48,6 +49,8 @@ from agent_board.night.launch import (
 
 EXISTING_LOGIN = "existing"
 EXIT_CLI_FAILED = 8
+CHECK_AUTH = "--check-auth"
+_CHECK_RUN = "00000000-0000-4000-8000-000000000000"
 TOKEN_VARIABLE = "CLAUDE_CODE_OAUTH_TOKEN"
 MAX_TOKEN_FILE_BYTES = 4096
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -158,8 +161,13 @@ def existing_token(settings: CliSettings, assignment: Assignment, uid: int) -> d
         return {}
     if assignment.backend != "claude":
         raise LaunchRefused(EXIT_PREFLIGHT, "token_file_unsupported_backend")
+    return {TOKEN_VARIABLE: read_token_file(settings.token_file, uid)}
+
+
+def read_token_file(path: Path, uid: int) -> str:
+    """CLAUDE_CODE_OAUTH_TOKEN from the account's own environment file, parsed as KEY=VALUE lines, never sourced."""
     try:
-        fd = os.open(settings.token_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except OSError:
         raise LaunchRefused(EXIT_PREFLIGHT, "existing_token_unavailable") from None
     try:
@@ -187,7 +195,7 @@ def existing_token(settings: CliSettings, assignment: Assignment, uid: int) -> d
             values.append(_unquoted(value.strip()))
     if len(values) != 1 or _TOKEN.fullmatch(values[0]) is None:
         raise LaunchRefused(EXIT_PREFLIGHT, "existing_token_malformed")
-    return {TOKEN_VARIABLE: values[0]}
+    return values[0]
 
 
 def _unquoted(value: str) -> str:
@@ -290,6 +298,22 @@ class LiveCliHost:
     def utc(self) -> float:
         return time.time()
 
+    def run_status(self, argv: Sequence[str], extra_env: Mapping[str, str]) -> int:
+        """A CLI status command with its output discarded, so no credential detail can be printed."""
+        try:
+            completed = subprocess.run(
+                list(argv),
+                env={**self._env, **extra_env},
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=COMMAND_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return EXIT_PREFLIGHT
+        return completed.returncode
+
     def _git(self, argv: Sequence[str], extra: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
         try:
             completed = subprocess.run(
@@ -315,6 +339,8 @@ def main(
     repositories: Callable[[CliSettings], RepositoryPolicy] = lambda settings: _mirror_policy(),
 ) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    if argv[:1] == [CHECK_AUTH]:
+        return check_auth(argv[1:])
     if len(argv) != 1:
         return EXIT_USAGE
     try:
@@ -328,6 +354,50 @@ def main(
     except LaunchRefused as refused:
         logger.error("night launch refused: %s", refused)
         return refused.exit_code
+
+
+def check_auth(argv: Sequence[str], identity_config: Path | None = None) -> int:
+    """A read-only login check, run as the account: the launcher's environment and token parser, no model call.
+
+    It prints only "login ready" or "refused: <reason>", never a credential. The exit status is the CLI's own
+    status check, or EXIT_PREFLIGHT when the launcher itself would refuse.
+    """
+    parser = argparse.ArgumentParser(prog="cli_launch --check-auth")
+    parser.add_argument("--principal", required=True)
+    parser.add_argument("--home", required=True)
+    parser.add_argument("--cli", required=True)
+    parser.add_argument("--token-file")
+    parser.add_argument("--provider")
+    args = parser.parse_args(list(argv))
+    home, cli = _absolute(args.home), _absolute(args.cli)
+    token_file = None if args.token_file is None else _absolute(args.token_file)
+    try:
+        if home is None or cli is None or (args.token_file is not None and token_file is None):
+            raise LaunchRefused(EXIT_PREFLIGHT, "unsafe_path_in_arguments")
+        if cli.name not in ("claude", "pi"):
+            raise LaunchRefused(EXIT_PREFLIGHT, "unsupported_cli")
+        if token_file is not None and cli.name != "claude":
+            raise LaunchRefused(EXIT_PREFLIGHT, "token_file_unsupported_backend")
+        uid = os.getuid()
+        settings = CliSettings(_CHECK_RUN, args.principal, uid, home, home, cli, math.inf, token_file)
+        host = LiveCliHost(settings, identity_config)
+        extra = {} if token_file is None else {TOKEN_VARIABLE: read_token_file(token_file, uid)}
+    except LaunchRefused as refused:
+        print(f"refused: {refused}")
+        return EXIT_PREFLIGHT
+    if cli.name == "claude":
+        status = [str(cli), "auth", "status"]
+    else:
+        status = [
+            str(cli),
+            "auth",
+            "check",
+            "--no-refresh",
+            *(["--provider", args.provider] if args.provider else []),
+        ]
+    code = host.run_status(status, extra)
+    print("login ready" if code == 0 else f"refused: status exit {code}")
+    return code
 
 
 if __name__ == "__main__":

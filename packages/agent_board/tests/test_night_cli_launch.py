@@ -1,3 +1,4 @@
+import json
 import os
 import stat
 import subprocess
@@ -14,6 +15,7 @@ from agent_board.night.cli_launch import (
     EXIT_CLI_FAILED,
     CliSettings,
     LiveCliHost,
+    check_auth,
     cli_argv,
     cli_settings_from,
     existing_token,
@@ -22,7 +24,7 @@ from agent_board.night.cli_launch import (
 from agent_board.night.config import VerifierConfigError, parse
 from agent_board.night.controller import RunSpec, unit_name
 from agent_board.night.environment import MIRROR_ROOT
-from agent_board.night.launch import EXIT_BUDGET, EXIT_DONE, LaunchRefused
+from agent_board.night.launch import EXIT_BUDGET, EXIT_DONE, EXIT_PREFLIGHT, LaunchRefused
 from agent_board.night.systemd import run_argv
 
 UID = os.getuid()
@@ -593,3 +595,81 @@ def test_settings_carry_the_token_file_path_from_the_environment(tmp_path: Path)
     assert cli_settings_from(RUN, environ, UID).token_file == tmp_path / "t.env"
     with pytest.raises(LaunchRefused, match="unsafe_path"):
         cli_settings_from(RUN, _environ(tmp_path, SWITCHBOARD_NIGHT_TOKEN_FILE="relative"), UID)
+
+
+def _fake_cli(tmp_path: Path, name: str) -> tuple[Path, Path]:
+    record = tmp_path / f"{name}.record"
+    cli = tmp_path / "bin" / name
+    cli.parent.mkdir(exist_ok=True)
+    cli.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        f"open({str(record)!r}, 'w').write(json.dumps([sys.argv[1:], sorted(os.environ)]))\n"
+        "sys.exit(0 if os.environ.get('AI_AGENT') else 7)\n"
+    )
+    cli.chmod(0o700)
+    return cli, record
+
+
+def test_check_auth_reads_the_token_with_the_launcher_parser_and_prints_no_secret(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli, record = _fake_cli(tmp_path, "claude")
+    token = tmp_path / "oauth-token.env"
+    token.write_text(f"# day login\n#\nCLAUDE_CODE_OAUTH_TOKEN={TOKEN}\n")
+    token.chmod(0o600)
+    args = [
+        "--principal",
+        "claude@dev",
+        "--home",
+        str(tmp_path),
+        "--cli",
+        str(cli),
+        "--token-file",
+        str(token),
+    ]
+
+    code = check_auth(args, _identity_config(tmp_path))
+
+    assert code == 0
+    assert capsys.readouterr().out == "login ready\n"
+    argv, names = json.loads(record.read_text())
+    assert argv == ["auth", "status"]
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in names and "AI_AGENT" in names
+    assert TOKEN not in record.read_text()
+
+
+def test_check_auth_refuses_a_bad_token_file_without_running_the_cli(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli, record = _fake_cli(tmp_path, "claude")
+    args = [
+        "--principal",
+        "claude@dev",
+        "--home",
+        str(tmp_path),
+        "--cli",
+        str(cli),
+        "--token-file",
+        str(tmp_path / "absent.env"),
+    ]
+
+    assert check_auth(args, _identity_config(tmp_path)) == EXIT_PREFLIGHT
+    assert capsys.readouterr().out == "refused: existing_token_unavailable\n"
+    assert not record.exists()
+
+
+def test_check_auth_for_pi_uses_its_status_check_and_refuses_a_token_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli, record = _fake_cli(tmp_path, "pi")
+    base = ["--principal", "pi@dev", "--home", str(tmp_path), "--cli", str(cli)]
+
+    assert check_auth([*base, "--provider", "openai"], _identity_config(tmp_path)) == 0
+    assert json.loads(record.read_text())[0] == ["auth", "check", "--no-refresh", "--provider", "openai"]
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in json.loads(record.read_text())[1]
+    assert (
+        check_auth([*base, "--token-file", str(tmp_path / "t.env")], _identity_config(tmp_path))
+        == EXIT_PREFLIGHT
+    )
+    assert capsys.readouterr().out.splitlines()[-1] == "refused: token_file_unsupported_backend"

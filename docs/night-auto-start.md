@@ -37,6 +37,7 @@ An agent with `login = "existing"` runs as its own account (`uid`), using its ex
   - The dropped launcher opens the file as the account (`O_NOFOLLOW`; it must be the account's own regular file, not group or other writable) and parses it as `KEY=VALUE` lines, never as shell. It passes only `CLAUDE_CODE_OAUTH_TOKEN` to the CLI and ignores every other key.
   - The file is never written, copied or shown.
   - A missing, foreign, malformed or empty token refuses before cloning or starting the model.
+- **Login check before activation.** Run `python -I -m agent_board.night.cli_launch --check-auth --principal <p> --home <home> --cli <cli> [--token-file <file>] [--provider <pi provider>]` as the account. It uses the launcher's own environment and token parser and runs the CLI's own status command (`claude auth status`, or `pi auth check --no-refresh`) with its output discarded. It prints only `login ready` or `refused: <reason>`, never a credential, and makes no model call.
 - **Backend:** must equal the CLI's file name (`claude` or `pi`).
 - **Claude permission modes:** `read_only` maps to `plan`, `default` to `dontAsk` and `auto` to `auto`.
 - **Pi has no permission modes,** so it accepts only `auto`.
