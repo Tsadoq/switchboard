@@ -235,6 +235,9 @@ def admitted_for_box_in_transaction(conn: sqlite3.Connection, box: str, now: flo
         try:
             if _box(principal) != box.casefold():
                 continue
+            if not _open_run(conn, principal) and _budget_left(conn, principal, night.local_date) <= 0:
+                hold_wakes_in_transaction(conn, now, principal)
+                continue
             claim_initial_in_transaction(
                 conn, principal, now, emit=partial(initial_wake_in_transaction, principal=principal, now=now)
             )
@@ -273,16 +276,23 @@ def _held_work(conn: sqlite3.Connection, principal: str, night: NightWindow) -> 
 
 
 def hold_wakes_in_transaction(conn: sqlite3.Connection, now: float, principal: str | None = None) -> None:
+    """Holds an enrolled principal's budgeted wakes for its night, after giving back what ended nights still hold.
+
+    Only night control on and enrollment can open a principal's routing day. Once open, that day keeps holding
+    its principal's budgeted wakes until its window ends, whatever control or enrollment do in the meantime.
+    """
+    release_held_wakes_in_transaction(conn, now, principal)
     night = window_for(now)
     if night is None:
         return
-    conn.execute(
-        "INSERT INTO night_routing_days (principal, local_date, starts_at, ends_at) "
-        "SELECT principal, ?, ?, ? FROM night_enrollment "
-        "WHERE enabled = 1 AND (? IS NULL OR principal = ?) "
-        "ON CONFLICT (principal, local_date) DO NOTHING",
-        (night.local_date, night.start, night.end, principal, principal),
-    )
+    if _control_on(conn):
+        conn.execute(
+            "INSERT INTO night_routing_days (principal, local_date, starts_at, ends_at) "
+            "SELECT principal, ?, ?, ? FROM night_enrollment "
+            "WHERE enabled = 1 AND (? IS NULL OR principal = ?) "
+            "ON CONFLICT (principal, local_date) DO NOTHING",
+            (night.local_date, night.start, night.end, principal, principal),
+        )
     conn.execute(
         "INSERT INTO night_held_wakes (wake_id, local_date, held_at) "
         "SELECT w.id, ?, ? FROM wakes w JOIN night_routing_days d ON d.principal = w.principal "
@@ -290,6 +300,40 @@ def hold_wakes_in_transaction(conn: sqlite3.Connection, now: float, principal: s
         "AND (? IS NULL OR w.principal = ?) ON CONFLICT (wake_id) DO NOTHING",
         (night.local_date, now, night.local_date, principal, principal),
     )
+
+
+def release_held_wakes_in_transaction(
+    conn: sqlite3.Connection, now: float, principal: str | None = None
+) -> None:
+    """Gives back never-captured wakes once their night has ended and no unfinished run could still own them.
+
+    A never-captured ordinary wake becomes day work again. The board's own never-captured night_initial start is
+    retired by acknowledging it. A captured wake is never released or acknowledged here, even when its run
+    finished: a finished run is not proof the wake was handled, so captured wakes stay held as recorded debt.
+    """
+    rows = conn.execute(
+        "SELECT h.wake_id, w.reason FROM night_held_wakes h JOIN wakes w ON w.id = h.wake_id "
+        "JOIN night_routing_days d ON d.principal = w.principal AND d.local_date = h.local_date "
+        "WHERE d.ends_at <= ? AND (? IS NULL OR w.principal = ?) "
+        "AND NOT EXISTS (SELECT 1 FROM night_captured_wakes cw WHERE cw.wake_id = h.wake_id) "
+        "AND NOT EXISTS (SELECT 1 FROM night_runs r WHERE r.principal = w.principal AND r.state != 'finished')",
+        (now, principal, principal),
+    ).fetchall()
+    retired = [(now, row[0]) for row in rows if row[1] == INITIAL_REASON]
+    conn.executemany("UPDATE wakes SET acked_at = ? WHERE id = ? AND acked_at IS NULL", retired)
+    conn.executemany("DELETE FROM night_held_wakes WHERE wake_id = ?", [(row[0],) for row in rows])
+
+
+def _control_on(conn: sqlite3.Connection) -> bool:
+    return bool(conn.execute("SELECT enabled FROM night_control WHERE singleton = 1").fetchone()[0])
+
+
+def _budget_left(conn: sqlite3.Connection, principal: str, local_date: str) -> float:
+    row = conn.execute(
+        "SELECT spent + reserved FROM night_budget WHERE principal = ? AND local_date = ?",
+        (principal, local_date),
+    ).fetchone()
+    return BUDGET_SECONDS - (row[0] if row is not None else 0)
 
 
 def start_in_transaction(

@@ -229,6 +229,14 @@ def launch(
     if budget <= 0:
         raise LaunchRefused(EXIT_BUDGET, "run_deadline_passed_during_setup")
     code = host.run_cli(argv, settings.workdir, budget, extra_env)
+    outcome = "budget expired, cli killed" if code is None else f"native exit {code}"
+    logger.info(
+        "night run %s for %s, configured backend %s: %s",
+        settings.run_id,
+        settings.principal,
+        assignment.backend,
+        outcome,
+    )
     if code is None:
         return EXIT_BUDGET
     return EXIT_DONE if code == 0 else EXIT_CLI_FAILED

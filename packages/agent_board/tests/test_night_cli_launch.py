@@ -673,3 +673,30 @@ def test_check_auth_for_pi_uses_its_status_check_and_refuses_a_token_file(
         == EXIT_PREFLIGHT
     )
     assert capsys.readouterr().out.splitlines()[-1] == "refused: token_file_unsupported_backend"
+
+
+@pytest.mark.parametrize(
+    ("code", "outcome"), [(0, "native exit 0"), (3, "native exit 3"), (None, "budget expired, cli killed")]
+)
+def test_the_native_outcome_is_logged_without_any_content(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, code: int | None, outcome: str
+) -> None:
+    settings, host = _prepared(tmp_path), Host(code)
+    with caplog.at_level("INFO", logger="agent_board.night.cli_launch"):
+        launch(settings, host=host, assignments=Assignments(_assignment()), repositories=Repositories())
+
+    lines = [
+        record.getMessage() for record in caplog.records if record.name == "agent_board.night.cli_launch"
+    ]
+    assert lines == [f"night run {RUN} for pi@dev, configured backend pi: {outcome}"]
+    text = caplog.text
+    assert "work the held wakes" not in text and str(settings.cli) not in text and str(tmp_path) not in text
+
+
+def test_a_refused_launch_logs_no_native_outcome(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    settings = _prepared(tmp_path)
+    settings.workdir.mkdir()
+    with caplog.at_level("INFO", logger="agent_board.night.cli_launch"), pytest.raises(LaunchRefused):
+        launch(settings, host=Host(), assignments=Assignments(_assignment()), repositories=Repositories())
+
+    assert "native exit" not in caplog.text and "budget expired" not in caplog.text
