@@ -50,10 +50,13 @@ Migration 0019 and the verifier-only `night.capture` action add durable fenced
 capture snapshots, described in `night-wake-capture.md`. Capture is not an execution
 acknowledgement, launch authority or slot release; no client/producer is wired yet.
 
-Held wakes currently remain held until the unfinished fenced autonomous-delivery or
-completion-tracked morning-drain path consumes them. There is deliberately no automatic
-06:00 flush. Do not enroll a principal until these paths and the local stop consumer
-are implemented and independently accepted. The default database has no enrollments.
+Held wakes have a bounded morning delivery, which is not a blanket 06:00 flush:
+
+- **When a night opens.** Only night control on and enrollment can open a principal's routing day for a window. Once open, that day keeps holding the principal's budgeted wakes until the window ends, even if control is switched off or the principal is unenrolled during it.
+- **After the window.** Once a routing day's `ends_at` has passed and the principal has no unfinished run (admitted, running, stopping or quarantined), each **never-captured** ordinary held wake is released and becomes ordinary day work. A never-captured `night_initial` wake, the board's own nightly start, is retired by acknowledging it.
+- **Captured wakes are kept.** A wake any night run captured stays held, even after that run finished. A finished run is not proof the wake was handled, and there is no completion tracking. So captured wakes are neither replayed by day nor acknowledged implicitly; they remain recorded completion debt for a separately designed completion path.
+- **Budget.** Budget exhaustion is an admission and initial-wake condition only. It neither stops holding nor releases held wakes inside a window. A principal whose night budget is already spent gets no new initial wake.
+- **When the release runs.** It happens inside the same transaction that holds wakes, which every wake emit, lease, ack and `night.admitted` call already runs. There is no separate timer.
 
 ## Trust boundary and unfinished integration
 

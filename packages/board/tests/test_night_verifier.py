@@ -899,3 +899,20 @@ def test_a_missed_slot_is_skipped_rather_than_caught_up(case: Case) -> None:
     assert case.send("night.admitted", "self", {}).json()["runs"] == []
     with sqlite3.connect(case.path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM wakes").fetchone()[0] == 0
+
+
+def test_no_nightly_start_fires_once_the_principals_budget_is_spent(case: Case) -> None:
+    _enroll(case)
+    night = window_on(date(2026, 11, 11))
+    with sqlite3.connect(case.path) as conn:
+        conn.execute(
+            "INSERT INTO night_budget (principal, local_date, starts_at, ends_at, spent, reserved) "
+            "VALUES ('pi@dev', ?, ?, ?, 1200, 0)",
+            (night.local_date, night.start, night.end),
+        )
+    case.app.state.night_verifier._clock = lambda: night.slot("pi@dev") + 5
+
+    assert case.send("night.admitted", "self", {}).json()["runs"] == []
+    with sqlite3.connect(case.path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM wakes").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM night_initial_slots").fetchone()[0] == 0

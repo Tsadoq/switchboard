@@ -51,11 +51,13 @@ async def test_default_unenrolled_delivery_is_unchanged(routing: Routing) -> Non
     assert conn.execute("SELECT COUNT(*) FROM night_held_wakes").fetchone()[0] == 0
 
 
-async def test_mixed_batch_holds_budgeted_rows_before_sql_lease_even_with_switch_off(
+async def test_mixed_batch_holds_budgeted_rows_before_sql_lease_once_control_opens_the_night(
     routing: Routing,
 ) -> None:
     conn, bus, admission = routing
     await admission.enroll("pi@dev", True, now=NOW)
+    await admission.set_enabled(True, now=NOW)
+    await admission.set_enabled(False, now=NOW)
     await mixed(bus)
     assert [wake.id for wake in await bus.lease("pi@dev")] == [2]
     assert await bus.lease("pi@dev") == []
@@ -63,6 +65,15 @@ async def test_mixed_batch_holds_budgeted_rows_before_sql_lease_even_with_switch
     rows = conn.execute("SELECT id, leased_until, acked_at FROM wakes ORDER BY id").fetchall()
     assert [(row[0], row[1], row[2]) for row in (rows[0], rows[2])] == [(1, None, None), (3, None, None)]
     assert conn.execute("SELECT enabled FROM night_control").fetchone()[0] == 0
+
+
+async def test_with_control_off_an_enrolled_principals_night_never_opens(routing: Routing) -> None:
+    conn, bus, admission = routing
+    await admission.enroll("pi@dev", True, now=NOW)
+    await mixed(bus)
+
+    assert [wake.id for wake in await bus.lease("pi@dev")] == [1, 2, 3]
+    assert conn.execute("SELECT COUNT(*) FROM night_routing_days").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize("operation", ["off", "unenroll"])
@@ -84,6 +95,7 @@ async def test_control_change_never_flushes_held_or_future_night_wakes(
 
 async def test_queued_before_enrollment_is_held_atomically_on_enrollment(routing: Routing) -> None:
     _, bus, admission = routing
+    await admission.set_enabled(True, now=NOW - 7200)
     await mixed(bus)
     await admission.enroll("pi@dev", True, now=NOW)
     await admission.enroll("pi@dev", False, now=NOW + 1)
@@ -104,14 +116,15 @@ async def test_human_work_requests_stop_and_waits_for_trusted_settlement(routing
     assert [wake.id for wake in await bus.lease("pi@dev")] == [2]
 
 
-async def test_restart_window_expiry_and_lease_expiry_do_not_release_holds(
+async def test_restart_and_lease_expiry_inside_the_window_do_not_release_holds(
     routing: Routing, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     conn, bus, admission = routing
     await admission.enroll("pi@dev", True, now=NOW)
+    await admission.set_enabled(True, now=NOW)
     await mixed(bus)
     assert [wake.id for wake in await bus.lease("pi@dev")] == [2]
-    monkeypatch.setattr("board.wakes.bus.time.time", lambda: NOW + 24 * 3600)
+    monkeypatch.setattr("board.wakes.bus.time.time", lambda: NOW + 1800)
     path = Path(conn.execute("PRAGMA database_list").fetchone()[2])
     restarted = WakeBus(Database(path), lease_seconds=300)
     assert [wake.id for wake in await restarted.lease("pi@dev")] == [2]
@@ -156,6 +169,7 @@ async def test_ack_materializes_holds_at_window_boundary(
     start = datetime.fromisoformat("2026-11-12T00:00:00+00:00").timestamp()
     monkeypatch.setattr("board.wakes.bus.time.time", lambda: start - 1)
     await admission.enroll("pi@dev", True, now=start - 1)
+    await admission.set_enabled(True, now=start - 1)
     await bus.emit(WakeRequest("pi@dev", "timer", "profile:pi@dev", "timer"))
     if lease_before_boundary:
         assert [wake.id for wake in await bus.lease("pi@dev")] == [1]
@@ -172,3 +186,112 @@ async def test_hold_does_not_block_another_unenrolled_principal(routing: Routing
     await mixed(bus)
     await mixed(bus, "pi@huginn")
     assert [wake.id for wake in await bus.lease("pi@huginn")] == [4, 5, 6]
+
+
+AFTER = NOW + 5 * 3600
+
+
+async def _night_with_run(routing: Routing, *, finish: bool = True) -> Run:
+    conn, bus, admission = routing
+    await admission.enroll("pi@dev", True, now=NOW)
+    await admission.set_enabled(True, now=NOW)
+    await bus.emit(WakeRequest("pi@dev", "timer", "profile:pi@dev", "captured timer"))
+    run = await admission.admit("pi@dev", NOW)
+    conn.execute(
+        "INSERT INTO night_verifier_receipts (receipt_id, box, journal_id, digest, response, created_at) "
+        "VALUES ('r1', 'dev', 'j', 'd', '{}', ?)",
+        (NOW,),
+    )
+    conn.execute(
+        "INSERT INTO night_wake_captures (receipt_id, run_id, captured_at) VALUES ('r1', ?, ?)", (run.id, NOW)
+    )
+    conn.execute("INSERT INTO night_captured_wakes (capture_id, wake_id) VALUES ('r1', 1)")
+    conn.commit()
+    await bus.emit(WakeRequest("pi@dev", "timer", "profile:pi@dev", "late timer"))
+    conn.execute(
+        "INSERT INTO wakes (principal, reason, source_ref, summary, created_at, origin_kind) "
+        "VALUES ('pi@dev', 'night_initial', 'night:2026-11-12', 'the nightly start', ?, 'budgeted')",
+        (NOW,),
+    )
+    conn.commit()
+    await bus.emit(WakeRequest("pi@dev", "timer", "profile:pi@dev", "held via emit"))
+    if finish:
+        await admission.settle("pi@dev", run.id, run.fence, elapsed=10, stopped=True)
+    return run
+
+
+def _held(conn: sqlite3.Connection) -> list[int]:
+    return [row[0] for row in conn.execute("SELECT wake_id FROM night_held_wakes ORDER BY wake_id")]
+
+
+async def test_after_the_window_only_never_captured_holds_return_and_the_nightly_start_retires(
+    routing: Routing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn, bus, _ = routing
+    await _night_with_run(routing)
+    assert _held(conn) == [1, 2, 3, 4]
+
+    monkeypatch.setattr("board.wakes.bus.time.time", lambda: AFTER)
+    leased = [wake.id for wake in await bus.lease("pi@dev")]
+
+    assert leased == [2, 4], "only the never-captured ordinary wakes come back for the day"
+    assert _held(conn) == [1], "a captured wake stays held after its run finished"
+    rows = dict(conn.execute("SELECT id, acked_at FROM wakes").fetchall())
+    assert rows[1] is None, "a captured wake was silently acknowledged"
+    assert rows[3] == AFTER, "the expired nightly start was not retired"
+
+
+async def test_inside_the_window_a_finished_run_and_spent_budget_release_nothing(routing: Routing) -> None:
+    conn, bus, _ = routing
+    await _night_with_run(routing)
+
+    assert await bus.lease("pi@dev") == []
+    assert _held(conn) == [1, 2, 3, 4]
+
+
+@pytest.mark.parametrize("state", ["stopping", "quarantined"])
+async def test_an_unfinished_run_keeps_every_hold_after_the_window(
+    routing: Routing, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    conn, bus, _ = routing
+    run = await _night_with_run(routing, finish=False)
+    conn.execute("UPDATE night_runs SET state = ? WHERE id = ?", (state, run.id))
+    conn.commit()
+
+    monkeypatch.setattr("board.wakes.bus.time.time", lambda: AFTER)
+
+    assert await bus.lease("pi@dev") == []
+    assert _held(conn) == [1, 2, 3, 4]
+
+
+@pytest.mark.parametrize("operation", ["off", "unenroll"])
+async def test_off_or_unenroll_keeps_the_open_night_then_releases_after_it_ends(
+    routing: Routing, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    conn, bus, admission = routing
+    await _night_with_run(routing)
+    if operation == "off":
+        await admission.set_enabled(False, now=NOW + 60)
+    else:
+        await admission.enroll("pi@dev", False, now=NOW + 60)
+    await bus.emit(WakeRequest("pi@dev", "timer", "profile:pi@dev", "after off"))
+    assert 5 in _held(conn), "off or unenroll dissolved the open night's protection"
+
+    monkeypatch.setattr("board.wakes.bus.time.time", lambda: AFTER)
+
+    assert [wake.id for wake in await bus.lease("pi@dev")] == [2, 4, 5]
+    assert _held(conn) == [1]
+
+
+async def test_another_principals_ended_night_releases_nothing_of_this_one(
+    routing: Routing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn, bus, admission = routing
+    await _night_with_run(routing)
+    await admission.enroll("claude@dev", True, now=NOW)
+    await bus.emit(WakeRequest("claude@dev", "timer", "profile:claude@dev", "other"))
+
+    monkeypatch.setattr("board.wakes.bus.time.time", lambda: AFTER)
+    assert [wake.id for wake in await bus.lease("claude@dev")] == [5]
+
+    assert _held(conn) == [1, 2, 3, 4], "releasing claude@dev's night touched pi@dev's holds"
