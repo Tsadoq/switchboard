@@ -29,10 +29,13 @@ type Status = Literal["starting", "running", "stopping", "stopped", "quarantined
 
 
 class RunManagerError(RuntimeError):
-    pass
+    def __init__(self, message: str, returncode: int | None = None) -> None:
+        super().__init__(message)
+        self.returncode = returncode
 
 
-_MANAGER_FAILURES = (RunManagerError, OSError, subprocess.SubprocessError)
+MANAGER_FAILURES = (RunManagerError, OSError, subprocess.SubprocessError)
+_MANAGER_FAILURES = MANAGER_FAILURES
 
 
 class GrantSource(Protocol):

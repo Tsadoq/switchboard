@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable, Mapping
 from typing import NoReturn, Protocol
 
-from agent_board.night.controller import unit_name
+from agent_board.night.controller import MANAGER_FAILURES, unit_name
 from agent_board.night.ledger import Arm, Ledger
 from agent_board.night_state import LocalJournal, Record, StateError
 
@@ -106,9 +106,13 @@ class Guard:
                 "could not record the stop of %s; killing anyway and retrying: %s", record.run_id, error
             )
             latched = False
+        try:
+            self._runs.stop(unit_name(record.run_id))
+        except MANAGER_FAILURES as error:
+            logger.error("stopping night run %s failed; retrying next tick: %s", record.run_id, error)
+            return
         if latched:
             self._stopped.add(record.run_id)
-        self._runs.stop(unit_name(record.run_id))
 
 
 def serve(guard: Guard, timer: Timer, notify: Callable[[str], None]) -> NoReturn:

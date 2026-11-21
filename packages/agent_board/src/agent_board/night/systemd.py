@@ -21,6 +21,7 @@ GATE_TIMEOUT_SECONDS = 30
 DROP_CAPABILITIES = ("CAP_SETUID", "CAP_SETGID", "CAP_SETPCAP")
 SYSTEMD_RUN = "/usr/bin/systemd-run"
 SYSTEMCTL = "/usr/bin/systemctl"
+UNIT_NOT_LOADED = 5
 _ENVIRONMENT = {"PATH": "/usr/bin:/bin", "LANG": "C"}
 _COMMAND_TIMEOUT_SECONDS = 15
 logger = logging.getLogger(__name__)
@@ -53,7 +54,8 @@ class LiveCommands:
             raise RunManagerError(f"{argv[0]} timed out") from None
         if completed.returncode != 0:
             raise RunManagerError(
-                f"{argv[0]} exited {completed.returncode}: {completed.stderr.strip()[:200]}"
+                f"{argv[0]} exited {completed.returncode}: {completed.stderr.strip()[:200]}",
+                completed.returncode,
             )
         return completed.stdout
 
@@ -166,6 +168,8 @@ class SystemdRuns:
     def stop(self, unit: str) -> None:
         """Freezes and kills through the kernel first, so neither a slow manager nor a pending start beats the deadline.
 
+        A unit the manager no longer has loaded (systemctl exit 5) was already collected, so it counts as stopped.
+
         A frozen cgroup stays frozen and freezes anything that later joins it, so a pending ExecStart cannot run
         while the manager is asked to stop the unit (which cancels that start job); the final kill then removes
         whatever joined meanwhile. A manager failure still raises, so the caller treats the stop as unproven.
@@ -175,6 +179,10 @@ class SystemdRuns:
         self._kill(cgroup, unit)
         try:
             self._commands.run((SYSTEMCTL, "--system", "stop", "--no-block", unit))
+        except RunManagerError as error:
+            if error.returncode != UNIT_NOT_LOADED:
+                raise
+            logger.info("%s is no longer loaded, so it is already stopped", unit)
         finally:
             self._kill(cgroup, unit)
 

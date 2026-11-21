@@ -10,7 +10,7 @@ from agent_board.night.config import PRODUCTION_GUARD_UNIT, VerifierConfigError,
 from agent_board.night.controller import RunManagerError, RunSpec, unit_name
 from agent_board.night.gate import GuardState, open_gate
 from agent_board.night.ledger import Arm, Ledger, Pending
-from agent_board.night.systemd import SystemdRuns, run_argv
+from agent_board.night.systemd import LiveCommands, SystemdRuns, run_argv
 from agent_board.night_inspection import ROOT_EXEC, Binding, EmptyObservation, InspectionError
 from agent_board.night_state import ClockReading, Grant, LocalJournal
 
@@ -372,3 +372,39 @@ def test_the_configured_launcher_never_appears_in_the_root_unit() -> None:
     argv = run_argv(config, CONFIG_PATH, _spec(config, str(uuid4())), SERVICE_PYTHON)
 
     assert not any("/srv/night/pi/venv" in part or "agent_board.night.launch" in part for part in argv), argv
+
+
+class ExitingManager(Commands):
+    def __init__(self, returncode: int) -> None:
+        super().__init__()
+        self.returncode = returncode
+
+    def run(self, argv: Sequence[str]) -> str:
+        super().run(argv)
+        raise RunManagerError(f"systemctl exited {self.returncode}: Unit not loaded.", self.returncode)
+
+
+def test_stopping_a_unit_the_manager_already_collected_counts_as_stopped(ledger: Ledger) -> None:
+    commands = ExitingManager(5)
+    unit = unit_name(str(uuid4()))
+
+    _runs(ledger, Inspector(), commands).stop(unit)
+
+    assert [event for event, _ in commands.events] == ["freeze", "kill", "run", "kill"], commands.events
+
+
+@pytest.mark.parametrize("returncode", [1, 4, 6])
+def test_other_stop_failures_still_raise_after_the_final_kill(ledger: Ledger, returncode: int) -> None:
+    commands = ExitingManager(returncode)
+
+    with pytest.raises(RunManagerError):
+        _runs(ledger, Inspector(), commands).stop(unit_name(str(uuid4())))
+
+    assert commands.events[-1][0] == "kill"
+
+
+def test_live_commands_carry_the_exit_code() -> None:
+    with pytest.raises(RunManagerError) as raised:
+        LiveCommands().run(["/bin/sh", "-c", "exit 5"])
+
+    assert raised.value.returncode == 5

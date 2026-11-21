@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 from agent_board import night_state
-from agent_board.night.controller import unit_name
+from agent_board.night.controller import RunManagerError, unit_name
 from agent_board.night.guard import BoottimeTimer, Guard, serve, systemd_notify
 from agent_board.night.ledger import Arm, Ledger, Pending
 from agent_board.night_state import ClockReading, Grant, LocalJournal, Record, StateError
@@ -36,8 +36,11 @@ class Stopper:
         self.stopped: list[str] = []
         self.journal: LocalJournal | None = None
         self.states_seen: list[str] = []
+        self.failures: list[Exception] = []
 
     def stop(self, unit: str) -> None:
+        if self.failures:
+            raise self.failures.pop(0)
         if self.journal is not None:
             self.states_seen.extend(record.state for record in self.journal.active())
         self.stopped.append(unit)
@@ -300,3 +303,19 @@ def test_a_failed_stop_latch_still_kills_and_is_retried_until_it_commits(rig: Ri
         "the guard did not kill despite the failed latch, or kept killing after it"
     )
     assert rig.journal.active()[0].state == "stopping", "the stop was never latched after the retry"
+
+
+def test_a_failed_stop_neither_exits_the_guard_nor_stops_other_runs_and_is_retried(rig: Rig) -> None:
+    run_id = rig.launched_run()
+    rig.boottime = 900.0
+    rig.stopper.failures.append(RunManagerError("systemctl exited 1: busy", 1))
+    guard = rig.guard()
+
+    guard.tick()
+    assert rig.stopper.stopped == [], "a failed stop was counted"
+    assert rig.journal.active()[0].stop_requested, "the latch came after the kill"
+
+    guard.tick()
+    assert rig.stopper.stopped == [unit_name(run_id)], "the failed stop was not retried"
+    guard.tick()
+    assert rig.stopper.stopped == [unit_name(run_id)], "a completed stop was repeated"
