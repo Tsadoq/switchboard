@@ -168,7 +168,9 @@ class SystemdRuns:
     def stop(self, unit: str) -> None:
         """Freezes and kills through the kernel first, so neither a slow manager nor a pending start beats the deadline.
 
-        A unit the manager no longer has loaded (systemctl exit 5) was already collected, so it counts as stopped.
+        If the manager no longer has the unit loaded (systemctl exit 5), its stop request is a no-op and is not
+        an error. That is not physical closure or a stopped acknowledgement: only the independent inspection
+        can establish that, and escaped descendants are not ruled out by a missing unit or cgroup.
 
         A frozen cgroup stays frozen and freezes anything that later joins it, so a pending ExecStart cannot run
         while the manager is asked to stop the unit (which cancels that start job); the final kill then removes
@@ -182,7 +184,7 @@ class SystemdRuns:
         except RunManagerError as error:
             if error.returncode != UNIT_NOT_LOADED:
                 raise
-            logger.info("%s is no longer loaded, so it is already stopped", unit)
+            logger.info("%s is no longer loaded, so the manager stop request was a no-op", unit)
         finally:
             self._kill(cgroup, unit)
 

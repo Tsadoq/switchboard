@@ -34,8 +34,7 @@ class RunManagerError(RuntimeError):
         self.returncode = returncode
 
 
-MANAGER_FAILURES = (RunManagerError, OSError, subprocess.SubprocessError)
-_MANAGER_FAILURES = MANAGER_FAILURES
+_MANAGER_FAILURES = (RunManagerError, OSError, subprocess.SubprocessError)
 
 
 class GrantSource(Protocol):

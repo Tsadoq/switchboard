@@ -11,7 +11,7 @@ from agent_board.night.controller import RunManagerError, RunSpec, unit_name
 from agent_board.night.gate import GuardState, open_gate
 from agent_board.night.ledger import Arm, Ledger, Pending
 from agent_board.night.systemd import LiveCommands, SystemdRuns, run_argv
-from agent_board.night_inspection import ROOT_EXEC, Binding, EmptyObservation, InspectionError
+from agent_board.night_inspection import ROOT_EXEC, Binding, EmptyObservation, InspectionError, unit_cgroup
 from agent_board.night_state import ClockReading, Grant, LocalJournal
 
 if TYPE_CHECKING:
@@ -384,7 +384,7 @@ class ExitingManager(Commands):
         raise RunManagerError(f"systemctl exited {self.returncode}: Unit not loaded.", self.returncode)
 
 
-def test_stopping_a_unit_the_manager_already_collected_counts_as_stopped(ledger: Ledger) -> None:
+def test_stopping_a_unit_the_manager_no_longer_loads_is_a_no_op_not_an_error(ledger: Ledger) -> None:
     commands = ExitingManager(5)
     unit = unit_name(str(uuid4()))
 
@@ -408,3 +408,22 @@ def test_live_commands_carry_the_exit_code() -> None:
         LiveCommands().run(["/bin/sh", "-c", "exit 5"])
 
     assert raised.value.returncode == 5
+
+
+@pytest.mark.parametrize(("inspection", "expected"), [("fails", (True, None)), ("empty", (False, False))])
+def test_after_a_no_op_stop_only_the_independent_inspection_can_report_stopped(
+    ledger: Ledger, inspection: str, expected: tuple[bool, bool | None]
+) -> None:
+    run_id = str(uuid4())
+    unit = unit_name(run_id)
+    ledger.record_binding(run_id, uid=UID, boot_id=BOOT, invocation_id=OWN, cgroup=unit_cgroup(unit))
+    inspector = Inspector()
+    if inspection == "fails":
+        inspector.failure = InspectionError("unit_not_stopped")
+    runs = _runs(ledger, inspector, ExitingManager(5))
+
+    runs.stop(unit)
+    seen = runs.inspect(unit)
+
+    assert len(inspector.checked) == 1, "the stop's no-op exit replaced the inspection"
+    assert (seen.unit_active, seen.cgroup_populated) == expected
