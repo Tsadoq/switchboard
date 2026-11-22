@@ -723,7 +723,7 @@ def test_capture_retry_after_off_is_only_a_snapshot_not_fresh_authority(case: Ca
     )
 
 
-def test_unacknowledged_capture_can_only_be_recaptured_after_finished_run(case: Case) -> None:
+def test_an_unacknowledged_capture_is_never_recaptured_even_after_its_run_finished(case: Case) -> None:
     run, payload = _capture_setup(case, 1)
     first = case.send("night.capture", run.id, payload).json()
     empty = case.send("night.capture", run.id, payload | {"receipt_id": str(uuid4()), "counter": 2}).json()
@@ -741,7 +741,7 @@ def test_unacknowledged_capture_can_only_be_recaptured_after_finished_run(case: 
     assert case.send("night.binding", replacement.id, binding).status_code == 200
     next_payload = binding | {"receipt_id": str(uuid4()), "counter": 5}
     recaptured = case.send("night.capture", replacement.id, next_payload).json()
-    assert recaptured["wakes"] == first["wakes"]
+    assert first["wakes"] and recaptured["wakes"] == []
     with sqlite3.connect(case.path) as conn:
         assert conn.execute("SELECT acked_at FROM wakes").fetchone()[0] is None
 

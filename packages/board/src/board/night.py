@@ -266,9 +266,8 @@ def _held_work(conn: sqlite3.Connection, principal: str, night: NightWindow) -> 
         conn.execute(
             "SELECT 1 FROM wakes w JOIN night_held_wakes h ON h.wake_id = w.id "
             "WHERE w.principal = ? AND w.acked_at IS NULL AND w.origin_kind = 'budgeted' "
-            "AND h.local_date = ? AND NOT EXISTS (SELECT 1 FROM night_captured_wakes cw "
-            "JOIN night_wake_captures c ON c.receipt_id = cw.capture_id "
-            "JOIN night_runs r ON r.id = c.run_id WHERE cw.wake_id = w.id AND r.state != 'finished') LIMIT 1",
+            "AND h.local_date = ? AND NOT EXISTS (SELECT 1 FROM night_captured_wakes cw WHERE cw.wake_id = w.id) "
+            "LIMIT 1",
             (principal, night.local_date),
         ).fetchone()
         is not None
