@@ -25,9 +25,7 @@ def capture_candidates(conn: sqlite3.Connection, run: Run, now: float) -> list[d
         "FROM wakes w JOIN night_held_wakes h ON h.wake_id = w.id "
         "WHERE w.principal = ? AND w.acked_at IS NULL AND w.origin_kind = 'budgeted' "
         "AND h.local_date = ? AND (w.leased_until IS NULL OR w.leased_until < ?) "
-        "AND NOT EXISTS (SELECT 1 FROM night_captured_wakes cw "
-        "JOIN night_wake_captures c ON c.receipt_id = cw.capture_id "
-        "JOIN night_runs r ON r.id = c.run_id WHERE cw.wake_id = w.id AND r.state != 'finished') "
+        "AND NOT EXISTS (SELECT 1 FROM night_captured_wakes cw WHERE cw.wake_id = w.id) "
         "ORDER BY w.id LIMIT ?",
         (run.principal, run.local_date, now, CAPTURE_BATCH),
     ).fetchall()
