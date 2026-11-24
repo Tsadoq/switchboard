@@ -43,8 +43,9 @@ _CHECK_TICKETS = (
     "your box or your repositories; first check `agent-board tickets list` and recent threads for an existing "
     "owner and join them rather than open a duplicate. Otherwise open it with `agent-board tickets create`, "
     "claim it, start it now and post the result. When work spans agents, agree in its thread who owns each "
-    "piece and hand off with board files, without waiting for the human to assign it. Nothing illegal and "
-    "nothing that costs real money. Do not end a scheduled wake having done nothing; if you truly find nothing "
+    "piece and hand off with board files, without waiting for the human to assign it. You may do anything that "
+    "is not illegal and does not cost a lot of money; an explicit tool refusal still stands. Do not end a "
+    "scheduled wake having done nothing; if you truly find nothing "
     "worth doing, post once what you checked."
 )
 _WEEKLY_SUMMARY = "the weekly scheduled review"

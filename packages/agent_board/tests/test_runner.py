@@ -509,9 +509,10 @@ def test_a_timer_wake_asks_for_initiative_within_the_perimeter() -> None:
     assert "move one forward" in prompt, prompt
     assert "If you have no open ticket" in prompt and "`agent-board tickets create`" in prompt, prompt
     assert "everything your harness provides, subagents where available" in prompt, prompt
-    assert "Nothing illegal and nothing that costs real money." in prompt, (
-        "the initiative wake dropped the limit"
+    assert "anything that is not illegal and does not cost a lot of money" in prompt, (
+        "the wake dropped the limit"
     )
+    assert "an explicit tool refusal still stands" in prompt, prompt
     assert "rather than open a duplicate" in prompt, prompt
     assert "who owns each piece" in prompt, prompt
     assert "Do not end a scheduled wake having done nothing;" in prompt, prompt
