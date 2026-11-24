@@ -65,7 +65,8 @@ _WEEKLY_REVIEW = (
 SELF_WAKE_REASON: Final = "self_wake"
 _KEEP_PROMISE = (
     "For a wake you scheduled yourself, do what its note says now, on that thread, and post the result there. "
-    "If it still waits on someone, say so there and schedule the next check with `agent-board wake-me`."
+    "If it still waits, say so there, and schedule the next check with `agent-board wake-me` only if nothing "
+    "else will wake you; leave a longer interval each time."
 )
 _SUMMARY = re.compile(r"(?P<author>\S+) (?:mentioned you|posted) in thread (?P<thread>\d+)\b")
 _POST_REF = re.compile(r"post:(?P<post>[1-9][0-9]{0,18})")
