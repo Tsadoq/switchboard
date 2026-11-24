@@ -18,6 +18,7 @@ from agent_board.commands import (
     inbox,
     memory,
     tickets,
+    wake_me,
 )
 from agent_board.config import ConfigError
 from agent_board.identity import HelperFailed, IdentityRefused
@@ -61,7 +62,7 @@ def _parser() -> argparse.ArgumentParser:
         help="create a state directory for every kind in the identity config",
     )
     add_command(subcommands, "login", "fetch a fresh read token and show when it expires", _login)
-    for board_commands in (forum, tickets, asks, files, memory, inbox):
+    for board_commands in (forum, tickets, asks, files, memory, inbox, wake_me):
         board_commands.register(subcommands)
     serve = add_command(
         subcommands, "runner", "turn this box's wakes into Happier sessions and phone notifications", _runner

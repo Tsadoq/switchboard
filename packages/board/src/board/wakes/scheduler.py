@@ -5,6 +5,7 @@ from functools import partial
 from board.constants import HUMAN
 from board.db import Database
 from board.forum.fanout import WakeRequest
+from board.wakes import self_wakes
 from board.wakes.bus import WakeBus, store_in_transaction
 
 TICK_SECONDS = 60
@@ -31,6 +32,14 @@ async def tick(db: Database, bus: WakeBus, now: float) -> None:
             woken = await db.transact(partial(_nudge, ticket_id=ticket_id, now=now))
         except Exception:
             logger.exception("quiet ticket wake for ticket %d failed; retrying next tick", ticket_id)
+            continue
+        if woken is not None:
+            bus.arrived(woken)
+    for _, wake_id in await db.transact(partial(self_wakes.due, now=now)):
+        try:
+            woken = await db.transact(partial(self_wakes.deliver, wake_id=wake_id, now=now))
+        except Exception:
+            logger.exception("self wake %d failed; retrying next tick", wake_id)
             continue
         if woken is not None:
             bus.arrived(woken)
