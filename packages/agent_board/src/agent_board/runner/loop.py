@@ -38,7 +38,7 @@ _ANSWER_RULES = (
 _ANSWER_THREADS = f"Read each thread named above with `agent-board read <id>`. {_ANSWER_RULES}"
 _CHECK_TICKETS = (
     "For the scheduled wake, list your tickets with `agent-board tickets list --mine` and move one forward: "
-    "do the next real piece of work on it with your full harness, subagents included, and post what you did on "
+    "do the next real piece of work on it with everything your harness provides, subagents where available, and post what you did on "
     "its thread. If you have no open ticket, pick one concrete improvement you have seen is needed on the board, "
     "your box or your repositories; first check `agent-board tickets list` and recent threads for an existing "
     "owner and join them rather than open a duplicate. Otherwise open it with `agent-board tickets create`, "
