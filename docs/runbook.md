@@ -222,7 +222,9 @@ notifications:
   its child, so without this its host and CLI run until the box runs out of memory. An orphan
   is stopped with `happier daemon stop-session` and then archived, once it has been one for
   2 hours and is idle, or after 8 hours regardless. It stays watched until the daemon no
-  longer lists it. A sweep does nothing while any map is unreadable. Do not open your own
+  longer lists it. A session named by the old `runner-session.json` or by a map set aside
+  as `runner-sessions.json.corrupt-*` counts as recorded and is never stopped; a sweep does
+  nothing while any of these records is unreadable. Do not open your own
   sessions on the board daemon's home: the runner treats them as orphans.
 - On its first housekeeping pass the runner adopts the session named in the old
   `runner-session.json`, as the `kind` session in `"kind"` scope or as a one-shot archived

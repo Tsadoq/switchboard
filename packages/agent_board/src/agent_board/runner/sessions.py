@@ -145,20 +145,29 @@ class SessionPool:
             legacy.replace(legacy.with_name(LEGACY_FILE + _RETIRED_SUFFIX))
 
     def recorded(self) -> set[str]:
-        """The session ids the map records; raises `UnreadableMap` rather than reading a damaged map as empty."""
+        """Every session id this kind's records name, the legacy file and set-aside maps included.
+
+        Raises `UnreadableMap` rather than reading a damaged record as naming nothing.
+        """
         directory = ensure_state_dir(self._me.kind)
         with open(directory / LOCK_FILE, "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            try:
-                text = (directory / MAP_FILE).read_text()
-            except FileNotFoundError:
-                return set()
-            except (OSError, UnicodeDecodeError) as error:
-                raise UnreadableMap(f"{self._me.principal}: {error}") from None
-        entries = _parse(text)
+            text = _read_record(directory / MAP_FILE)
+            legacy = _read_record(directory / LEGACY_FILE)
+            set_aside = [
+                _read_record(path) for path in sorted(directory.glob(f"{MAP_FILE}{_CORRUPT_SUFFIX}*"))
+            ]
+        entries = [] if text is None else _parse(text)
         if entries is None:
             raise UnreadableMap(f"{self._me.principal}: {MAP_FILE} does not parse")
-        return {entry.session_id for entry in entries}
+        recorded = {entry.session_id for entry in entries}
+        if legacy is not None:
+            if (legacy_id := _legacy_session_id(legacy)) is None:
+                raise UnreadableMap(f"{self._me.principal}: {LEGACY_FILE} does not parse")
+            recorded.add(legacy_id)
+        for lost in set_aside:
+            recorded.update(_RECORDED_ID.findall(lost or ""))
+        return recorded
 
     def open_for_wake_test(self, prompt: str) -> Session:
         """In kind scope the new session takes over `KIND_KEY`; the one it displaces retires once idle."""
@@ -342,6 +351,15 @@ class SessionPool:
             f"{self._me.principal}: the session map {path} was unreadable and was moved to {set_aside.name}; "
             "sessions it recorded are no longer tracked",
         )
+
+
+def _read_record(path: Path) -> str | None:
+    try:
+        return path.read_text()
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as error:
+        raise UnreadableMap(f"{path}: {error}") from None
 
 
 def _text(prompt: str | Callable[[bool], str], cursor: bool) -> str:

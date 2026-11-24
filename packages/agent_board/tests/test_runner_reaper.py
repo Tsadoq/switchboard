@@ -110,7 +110,9 @@ def test_an_orphan_is_stopped_and_archived_once_past_the_grace(
 
     assert _tracked(happier_state) == [], _entries(happier_state)
     assert orphan in _archived(happier_state)
-    assert any(f"stopped orphaned session {orphan}" in message for message in caplog.messages), caplog.messages
+    assert any(f"stopped orphaned session {orphan}" in message for message in caplog.messages), (
+        caplog.messages
+    )
 
 
 def test_sessions_any_served_kind_records_are_never_touched(happier_state: Path, clock: FakeClock) -> None:
@@ -169,7 +171,9 @@ def test_an_unreadable_daemon_list_stops_nothing(
         reaper.sweep()
 
     assert _tracked(happier_state) == [orphan]
-    assert any("could not list the daemon's sessions" in message for message in caplog.messages), caplog.messages
+    assert any("could not list the daemon's sessions" in message for message in caplog.messages), (
+        caplog.messages
+    )
 
 
 def test_the_grace_restarts_for_a_session_that_stopped_being_an_orphan(
@@ -244,3 +248,58 @@ def test_a_child_still_listed_after_a_stop_is_reported(
         reaper.sweep()
 
     assert any(f"{orphan} is still a daemon child after it was stopped" in m for m in caplog.messages)
+
+
+def test_a_session_named_only_by_the_legacy_file_is_protected(happier_state: Path, clock: FakeClock) -> None:
+    pool = _pool("claude", clock)
+    orphan = _orphan(happier_state, clock, pool, "topic:1")
+    legacy = Path.home() / ".agents/board/claude/runner-session.json"
+    legacy.write_text(json.dumps({"session_id": orphan}))
+    reaper = OrphanReaper(Happier(), [pool], clock)
+
+    reaper.sweep()
+    clock.advance(ORPHAN_HARD_LIMIT_SECONDS)
+    reaper.sweep()
+    assert _tracked(happier_state) == [orphan]
+
+    legacy.write_text("{damaged")
+    reaper.sweep()
+    assert _tracked(happier_state) == [orphan]
+
+
+def test_sessions_a_set_aside_map_named_are_protected(happier_state: Path, clock: FakeClock) -> None:
+    pool = _pool("claude", clock)
+    pool.deliver("topic:1", "wake", None, float("inf"))
+    lost = _tracked(happier_state)[0]
+    map_file = Path.home() / ".agents/board/claude/runner-sessions.json"
+    map_file.write_text(f'{{"damaged": [{{"session_id": "{lost}"')
+    pool.housekeep()
+    assert list(map_file.parent.glob("runner-sessions.json.corrupt-*")), "the pool did not set the map aside"
+    reaper = OrphanReaper(Happier(), [pool], clock)
+
+    reaper.sweep()
+    clock.advance(ORPHAN_HARD_LIMIT_SECONDS)
+    reaper.sweep()
+
+    assert _tracked(happier_state) == [lost]
+
+
+def test_a_session_recorded_while_its_grace_runs_is_never_stopped(
+    happier_state: Path, clock: FakeClock
+) -> None:
+    pool = _pool("claude", clock)
+    reaper = OrphanReaper(Happier(), [pool], clock)
+    pool.deliver("topic:1", "wake", None, float("inf"))
+    opening = _tracked(happier_state)[0]
+    map_file = Path.home() / ".agents/board/claude/runner-sessions.json"
+    persisted = map_file.read_text()
+    map_file.write_text(json.dumps({"v": 1, "sessions": []}))
+    reaper.sweep()
+    clock.advance(ORPHAN_GRACE_SECONDS - 1)
+    map_file.write_text(persisted)
+    reaper.sweep()
+    clock.advance(ORPHAN_HARD_LIMIT_SECONDS)
+
+    reaper.sweep()
+
+    assert _tracked(happier_state) == [opening]
