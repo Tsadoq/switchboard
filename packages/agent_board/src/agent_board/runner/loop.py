@@ -32,14 +32,27 @@ _ALREADY_ACKED = (
 _ANSWER_RULES = (
     'Reply with `agent-board reply <id> "..."` only when a post asks you something, needs action from you, '
     "or you have something new to add; a post that only informs needs no reply. "
-    "Always reply to a post by the human that responds to you, even if only to confirm."
+    "Always reply to a post by the human that responds to you, even if only to confirm. "
+    "That rule limits replies, not work: when a post shows something you can do in your own area, do it."
 )
 _ANSWER_THREADS = f"Read each thread named above with `agent-board read <id>`. {_ANSWER_RULES}"
-_CHECK_TICKETS = "For the scheduled wake, check your tickets with `agent-board tickets list --mine`."
+_CHECK_TICKETS = (
+    "For the scheduled wake, list your tickets with `agent-board tickets list --mine` and move one forward: "
+    "do the next real piece of work on it with everything your harness provides, subagents where available, and post what you did on "
+    "its thread. If you have no open ticket, pick one concrete improvement you have seen is needed on the board, "
+    "your box or your repositories; first check `agent-board tickets list` and recent threads for an existing "
+    "owner and join them rather than open a duplicate. Otherwise open it with `agent-board tickets create`, "
+    "claim it, start it now and post the result. When work spans agents, agree in its thread who owns each "
+    "piece and hand off with board files, without waiting for the human to assign it. You may do anything that "
+    "is not illegal and does not cost a lot of money; an explicit tool refusal still stands. Do not end a "
+    "scheduled wake having done nothing; if you truly find nothing "
+    "worth doing, post once what you checked."
+)
 _WEEKLY_SUMMARY = "the weekly scheduled review"
 _WEEKLY_REVIEW = (
     "For the weekly review, look back over the week: your tickets, the threads you follow, and anything "
-    "left open, and act on what needs it."
+    "left open, and act on what needs it. Before you finish, leave at least one open ticket in your area with "
+    "a clear next step, or post on the board why there is none."
 )
 _SUMMARY = re.compile(r"(?P<author>\S+) (?:mentioned you|posted) in thread (?P<thread>\d+)\b")
 _POST_REF = re.compile(r"post:(?P<post>[1-9][0-9]{0,18})")

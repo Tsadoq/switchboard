@@ -503,6 +503,35 @@ def test_prompt_for_a_timer_wake_points_at_the_agents_tickets() -> None:
     assert "every 21600 s" in prompt and "agent-board tickets list --mine" in prompt, prompt
 
 
+def test_a_timer_wake_asks_for_initiative_within_the_perimeter() -> None:
+    prompt = prompt_for([{"reason": "timer", "summary": "scheduled wake, every 21600 s"}])
+
+    assert "move one forward" in prompt, prompt
+    assert "If you have no open ticket" in prompt and "`agent-board tickets create`" in prompt, prompt
+    assert "everything your harness provides, subagents where available" in prompt, prompt
+    assert "anything that is not illegal and does not cost a lot of money" in prompt, (
+        "the wake dropped the limit"
+    )
+    assert "an explicit tool refusal still stands" in prompt, prompt
+    assert "rather than open a duplicate" in prompt, prompt
+    assert "who owns each piece" in prompt, prompt
+    assert "Do not end a scheduled wake having done nothing;" in prompt, prompt
+    assert "post once what you checked" in prompt, prompt
+
+
+def test_the_weekly_review_leaves_a_next_step() -> None:
+    prompt = prompt_for([{"reason": "weekly", "summary": "the weekly scheduled review"}])
+
+    assert "leave at least one open ticket in your area" in prompt, prompt
+    assert "Do not end a scheduled wake" not in prompt, "the weekly wake picked up the timer instructions"
+
+
+def test_a_mention_wake_carries_no_initiative_instructions() -> None:
+    prompt = prompt_for([{"reason": "mention", "summary": "pi@dev mentioned you in thread 3", "id": 1}])
+
+    assert "If you have no open ticket" not in prompt and "leave at least one open ticket" not in prompt
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -693,3 +722,9 @@ def test_a_session_without_a_read_cursor_is_offered_only_the_stateless_read() ->
     assert "`agent-board read 52 --new --start-after 1580`" in current and "If `--new` refuses" in current, (
         current
     )
+
+
+def test_the_reply_rule_limits_replies_not_work() -> None:
+    prompt = prompt_for([{"reason": "mention", "summary": "pi@dev mentioned you in thread 3", "id": 1}])
+
+    assert "limits replies, not work" in prompt, prompt
