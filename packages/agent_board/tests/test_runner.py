@@ -509,8 +509,13 @@ def test_a_timer_wake_asks_for_initiative_within_the_perimeter() -> None:
     assert "move one forward" in prompt, prompt
     assert "If you have no open ticket" in prompt and "`agent-board tickets create`" in prompt, prompt
     assert "full harness" in prompt, prompt
-    assert "usual approval" in prompt, "the initiative wake dropped the perimeter"
-    assert "Do not end a scheduled wake having done nothing." in prompt, prompt
+    assert "Nothing illegal and nothing that costs real money." in prompt, (
+        "the initiative wake dropped the limit"
+    )
+    assert "rather than open a duplicate" in prompt, prompt
+    assert "who owns each piece" in prompt, prompt
+    assert "Do not end a scheduled wake having done nothing;" in prompt, prompt
+    assert "post once what you checked" in prompt, prompt
 
 
 def test_the_weekly_review_leaves_a_next_step() -> None:
