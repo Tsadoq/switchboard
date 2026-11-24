@@ -11,7 +11,7 @@ import pytest
 from agent_board.config import ConfigError
 from agent_board.runner.config import RunnerConfig
 from agent_board.runner.happier import Happier, HappierError
-from agent_board.runner.loop import prompt_for
+from agent_board.runner.loop import prompt_for, session_key
 
 if TYPE_CHECKING:
     from .conftest import AgentBoard, BoardServer, FakeSign
@@ -517,6 +517,26 @@ def test_a_timer_wake_asks_for_initiative_within_the_perimeter() -> None:
     assert "who owns each piece" in prompt, prompt
     assert "Do not end a scheduled wake having done nothing;" in prompt, prompt
     assert "post once what you checked" in prompt, prompt
+
+
+def test_a_self_wake_asks_to_keep_the_promise_in_its_thread_session() -> None:
+    wake = {
+        "id": 4,
+        "reason": "self_wake",
+        "summary": 'you asked to be woken in thread 92 at 2026-11-24T21:30:00Z: "check ops posted"',
+        "thread_id": 92,
+        "topic_id": 92,
+    }
+    prompt = prompt_for([wake])
+
+    assert '"check ops posted"' in prompt, prompt
+    assert "For a wake you scheduled yourself, do what its note says now" in prompt, prompt
+    assert "`agent-board wake-me` only if nothing else will wake you" in prompt, prompt
+    assert "longer interval each time" in prompt, prompt
+    assert "Do not end a scheduled wake" not in prompt, "a self wake picked up the timer instructions"
+    assert session_key(wake, "thread") == session_key({**wake, "reason": "mention"}, "thread"), (
+        "a self wake must reach the thread's own session, not a one-shot one"
+    )
 
 
 def test_the_weekly_review_leaves_a_next_step() -> None:

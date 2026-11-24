@@ -4,7 +4,7 @@ from board.db import Database
 from board.events import EventHub
 from board.forum.fanout import WakeRequested
 from board.settings import Settings
-from board.wakes import routes
+from board.wakes import routes, self_wakes
 from board.wakes.bus import WakeBus
 
 
@@ -20,4 +20,6 @@ def connect(app: FastAPI) -> None:
 
     events.subscribe(store_requested_wake)
     routes.install(app, bus, db)
+    app.state.self_wakes = self_wakes.SelfWakes(db)
+    self_wakes.install(app, app.state.self_wakes)
     app.state.wakes = bus

@@ -3,7 +3,7 @@ import json
 import subprocess
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -758,3 +758,42 @@ def test_a_malformed_ask_on_reply_posts_nothing(
     assert refused.returncode == 1 and "1 to 200 characters" in refused.stderr, refused.stderr
     posts = _parsed(agent_board("read", str(thread_id), "--json"), "read")["posts"]
     assert [post["body"] for post in posts] == ["plan"]
+
+
+def test_wake_me_schedules_lists_and_cancels_my_own_wakes(
+    claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard"
+) -> None:
+    thread_id = _parsed(
+        agent_board("post", "general", "--title", "Rollout", "--json", "waiting on ops"), "post"
+    )["thread_id"]
+    before = datetime.now(UTC)
+
+    first = _parsed(
+        agent_board("wake-me", "--at", "+45m", "--thread", str(thread_id), "--json", "check ops posted"),
+        "wake-me",
+    )
+    second = _parsed(
+        agent_board("wake-me", "--at", "+2h", "--thread", str(thread_id), "--json", "second look"), "wake-me"
+    )
+    listed = _parsed(agent_board("wake-me", "--list", "--json"), "wake-me --list")
+    cancelled = _parsed(agent_board("wake-me", "--cancel", str(first["id"]), "--json"), "wake-me --cancel")
+    after = _parsed(agent_board("wake-me", "--list", "--json"), "wake-me --list")
+
+    due = datetime.fromisoformat(first["due_at"])
+    assert timedelta(minutes=44) < due - before < timedelta(minutes=46), first
+    assert (first["thread_id"], first["note"], first["principal"]) == (thread_id, "check ops posted", CLAUDE)
+    assert [wake["id"] for wake in listed] == [first["id"], second["id"]], listed
+    assert cancelled["cancelled"] is True, cancelled
+    assert [wake["id"] for wake in after] == [second["id"]], after
+
+
+def test_wake_me_refuses_an_unusable_request_before_signing(
+    claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard"
+) -> None:
+    missing_thread = agent_board("wake-me", "--at", "+10m", "note")
+    bad_time = agent_board("wake-me", "--at", "tomorrow", "--thread", "1", "note")
+    too_soon = agent_board("wake-me", "--at", "+5s", "--thread", "1", "note")
+
+    assert missing_thread.returncode != 0 and "--thread" in missing_thread.stderr, missing_thread.stderr
+    assert bad_time.returncode != 0 and "+30m" in bad_time.stderr, bad_time.stderr
+    assert too_soon.returncode != 0 and "too_soon" in too_soon.stderr, too_soon.stderr

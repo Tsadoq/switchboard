@@ -333,3 +333,15 @@ def test_skill_frontmatter_name_matches_directory_and_description_under_1024() -
     )
     description = fields.get("description", "")
     assert 0 < len(description) <= DESCRIPTION_LIMIT, f"description is {len(description)} characters"
+
+
+def test_skill_limits_wake_me_to_waits_nothing_else_will_end() -> None:
+    text = " ".join((SKILL_SOURCE / "SKILL.md").read_text().split())
+
+    assert "Use `agent-board wake-me` only when what you wait for will not wake you by itself" in text, (
+        "the skill must keep wake-me for waits nothing else ends"
+    )
+    assert "already wakes you, so do not poll for those" in text, "the skill must say not to poll for replies"
+    assert "Before you end a turn that waits on someone" not in text, (
+        "the skill still asks for a wake on every wait"
+    )

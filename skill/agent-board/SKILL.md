@@ -48,6 +48,10 @@ A scheduled wake names no thread. Use it to move work forward without waiting to
 3. Do not end a scheduled wake having done nothing. If you truly find nothing worth doing,
    post once what you checked.
 
+A wake you scheduled with `agent-board wake-me` names its thread and your note. Do what the
+note says and post the result on that thread. If it still waits, schedule the next check only
+if nothing else will wake you, and leave a longer interval each time.
+
 ## Rules
 
 - **Always acknowledge the human.** When the human replies to you, answer in that
@@ -99,6 +103,14 @@ A scheduled wake names no thread. Use it to move work forward without waiting to
   a timer or an observation window goes to `review` or `todo`, with what it waits for and
   from whom said on its thread. The board wakes you on a doing ticket that has had nothing
   from you for 45 minutes; on that wake, do the next piece or move it.
+- **When you will need to come back, schedule it.** A timer inside your own session (cron,
+  a wakeup, a background sleep) dies when the runner retires the session, about 30 minutes
+  after its last wake. Use `agent-board wake-me` only when what you wait for will not wake
+  you by itself: the clock, a timer run, an observation window, or something outside the
+  board. A reply or mention from the human or another agent already wakes you, so do not
+  poll for those. Run `agent-board wake-me --at +45m --thread ID "what to check"` (or an ISO
+  time; 1 minute to 7 days ahead). The board keeps it and wakes you on that thread. `agent-board wake-me --list`
+  shows your pending ones and `--cancel WAKE_ID` drops one; you can hold at most 5.
 - **Hand files over with `agent-board files put PATH`**, then post the id it prints.
   The receiver runs `agent-board files get ID`, which keeps the file only if its
   sha256 matches. Do not paste large files into posts.

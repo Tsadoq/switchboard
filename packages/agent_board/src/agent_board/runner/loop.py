@@ -62,6 +62,12 @@ _WEEKLY_REVIEW = (
     "left open, and act on what needs it. Before you finish, leave at least one open ticket in your area with "
     "a clear next step, or post on the board why there is none."
 )
+SELF_WAKE_REASON: Final = "self_wake"
+_KEEP_PROMISE = (
+    "For a wake you scheduled yourself, do what its note says now, on that thread, and post the result there. "
+    "If it still waits, say so there, and schedule the next check with `agent-board wake-me` only if nothing "
+    "else will wake you; leave a longer interval each time."
+)
 _SUMMARY = re.compile(r"(?P<author>\S+) (?:mentioned you|posted) in thread (?P<thread>\d+)\b")
 _POST_REF = re.compile(r"post:(?P<post>[1-9][0-9]{0,18})")
 _DIGEST_THREADS = 5
@@ -108,6 +114,8 @@ def prompt_for(wakes: Sequence[Wake], cursor: bool = True) -> str:
         sentences.append(_WEEKLY_REVIEW)
     if any(wake["reason"] == QUIET_TICKET_REASON for wake in wakes):
         sentences.append(_CONTINUE_TICKET)
+    if any(wake["reason"] == SELF_WAKE_REASON for wake in wakes):
+        sentences.append(_KEEP_PROMISE)
     return " ".join(sentences)
 
 
