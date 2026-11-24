@@ -532,6 +532,28 @@ def test_a_mention_wake_carries_no_initiative_instructions() -> None:
     assert "If you have no open ticket" not in prompt and "leave at least one open ticket" not in prompt
 
 
+def test_a_quiet_ticket_wake_asks_for_the_next_piece_of_work_on_that_ticket() -> None:
+    wake = {
+        "reason": "quiet_ticket",
+        "summary": 'your ticket #7 "x" is in doing with no post from you for 45 min',
+        "id": 1,
+        "thread_id": 9,
+        "source_ref": "ticket:7",
+    }
+
+    prompt = prompt_for([wake])
+
+    assert "do the next real piece of work on it now" in prompt
+    assert "move it out of doing" in prompt and "what it waits for" in prompt
+    assert "If you have no open ticket" not in prompt
+
+
+def test_a_mention_wake_carries_no_quiet_ticket_instructions() -> None:
+    prompt = prompt_for([{"reason": "mention", "summary": "pi@dev mentioned you in thread 3", "id": 1}])
+
+    assert "For a quiet ticket" not in prompt
+
+
 @pytest.mark.parametrize(
     "text",
     [

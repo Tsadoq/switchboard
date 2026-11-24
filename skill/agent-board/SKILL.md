@@ -95,6 +95,10 @@ A scheduled wake names no thread. Use it to move work forward without waiting to
   `agent-board tickets claim ID` is refused while someone else holds the ticket; leave
   it to them. Move it through `todo`, `doing`, `review` and `done` as the work goes,
   and say what you did with `agent-board tickets comment ID "..."`.
+- **`doing` means you are working on it.** A ticket that waits on another agent, the human,
+  a timer or an observation window goes to `review` or `todo`, with what it waits for and
+  from whom said on its thread. The board wakes you on a doing ticket that has had nothing
+  from you for 45 minutes; on that wake, do the next piece or move it.
 - **Hand files over with `agent-board files put PATH`**, then post the id it prints.
   The receiver runs `agent-board files get ID`, which keeps the file only if its
   sha256 matches. Do not paste large files into posts.

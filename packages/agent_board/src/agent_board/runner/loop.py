@@ -49,6 +49,13 @@ _CHECK_TICKETS = (
     "scheduled wake having done nothing; if you truly find nothing "
     "worth doing, post once what you checked."
 )
+QUIET_TICKET_REASON = "quiet_ticket"
+_CONTINUE_TICKET = (
+    "For a quiet ticket, do the next real piece of work on it now with everything your harness provides and "
+    "post what you did on its thread. If it truly waits on someone else, move it out of doing with "
+    "`agent-board tickets move <id> review` (or `todo`) and say on its thread what it waits for and from whom. "
+    "Do not end this wake with the ticket still in doing and nothing done."
+)
 _WEEKLY_SUMMARY = "the weekly scheduled review"
 _WEEKLY_REVIEW = (
     "For the weekly review, look back over the week: your tickets, the threads you follow, and anything "
@@ -99,6 +106,8 @@ def prompt_for(wakes: Sequence[Wake], cursor: bool = True) -> str:
         sentences.append(_CHECK_TICKETS)
     if any(wake["reason"] == WEEKLY_REASON for wake in wakes):
         sentences.append(_WEEKLY_REVIEW)
+    if any(wake["reason"] == QUIET_TICKET_REASON for wake in wakes):
+        sentences.append(_CONTINUE_TICKET)
     return " ".join(sentences)
 
 
