@@ -13,8 +13,9 @@ from agent_board.runner.reaper import (
     ORPHAN_BUSY_ALERT_SECONDS,
     ORPHAN_GRACE_SECONDS,
     PRESENT_AT_START,
-    STILL_LISTED,
     STOP_REFUSED,
+    STOP_REPORTED,
+    STOP_UNCONFIRMED,
     OrphanReaper,
 )
 from agent_board.runner.sessions import SessionPool
@@ -162,7 +163,7 @@ def test_the_first_sweep_protects_every_orphan_already_present(
     later = _orphan(happier_state, pool, "topic:2")
     _past_grace(reaper, clock, _LONG_AFTER)
 
-    assert _protected(ledger) == {existing: PRESENT_AT_START}
+    assert _protected(ledger) == {existing: PRESENT_AT_START, later: STOP_REPORTED}
     assert _tracked(happier_state) == [existing] and later in _archived(happier_state)
     assert existing not in _stops(happier_state)
 
@@ -246,7 +247,7 @@ def test_a_refused_stop_is_protected_and_never_retried(
     assert _protected(ledger) == {orphan: STOP_REFUSED}
 
 
-def test_an_unreachable_daemon_is_retried(
+def test_an_unconfirmed_stop_is_entered_and_never_retried(
     happier_state: Path, ledger: Path, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pool = _pool("claude", clock)
@@ -255,15 +256,16 @@ def test_an_unreachable_daemon_is_retried(
     monkeypatch.setenv("FAKE_HAPPIER_FAIL", "daemon-stop-session:no_daemon")
 
     _past_grace(reaper, clock)
-    assert orphan in _tracked(happier_state) and _protected(ledger) == {}
-
     monkeypatch.delenv("FAKE_HAPPIER_FAIL")
+    clock.advance(_LONG_AFTER)
     reaper.sweep()
-    assert _tracked(happier_state) == []
+
+    assert _stops(happier_state) == [] and _tracked(happier_state) == [orphan]
+    assert _protected(ledger) == {orphan: STOP_UNCONFIRMED}
 
 
-def test_a_child_still_listed_after_a_reported_stop_is_protected(
-    happier_state: Path, ledger: Path, clock: FakeClock
+def test_a_child_still_listed_after_a_reported_stop_is_never_stopped_again(
+    happier_state: Path, ledger: Path, clock: FakeClock, caplog: pytest.LogCaptureFixture
 ) -> None:
     pool = _pool("claude", clock)
     orphan = _orphan(happier_state, pool)
@@ -271,12 +273,70 @@ def test_a_child_still_listed_after_a_reported_stop_is_protected(
     _past_grace(reaper, clock)
     _update(happier_state, orphan, lambda entry: entry.update(tracked=True))
 
-    reaper.sweep()
-    clock.advance(_LONG_AFTER)
-    reaper.sweep()
+    with caplog.at_level(logging.WARNING):
+        reaper.sweep()
+        clock.advance(_LONG_AFTER)
+        reaper.sweep()
 
     assert _stops(happier_state) == [orphan]
-    assert _protected(ledger) == {orphan: STILL_LISTED}
+    assert _protected(ledger) == {orphan: STOP_REPORTED}
+    assert any(f"{orphan} is still listed" in message for message in caplog.messages)
+
+
+def test_a_stop_is_entered_before_it_is_sent_and_a_failed_write_prevents_it(
+    happier_state: Path, ledger: Path, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pool = _pool("claude", clock)
+    orphan = _orphan(happier_state, pool)
+    reaper = _reaper([pool], ledger, clock)
+    reaper.sweep()
+    clock.advance(ORPHAN_GRACE_SECONDS)
+    ledger.parent.chmod(0o500)
+    try:
+        with pytest.raises(OSError):
+            reaper.sweep()
+    finally:
+        ledger.parent.chmod(0o700)
+
+    assert _stops(happier_state) == [] and _tracked(happier_state) == [orphan]
+
+
+class _InterruptedStop(Happier):
+    def stop_child(self, session_id: str) -> Any:
+        raise KeyboardInterrupt
+
+
+def test_an_interrupted_stop_stays_entered_and_is_not_repeated_after_a_restart(
+    happier_state: Path, ledger: Path, clock: FakeClock
+) -> None:
+    pool = _pool("claude", clock)
+    orphan = _orphan(happier_state, pool)
+    interrupted = OrphanReaper(_InterruptedStop(), [pool], ledger, clock)
+    interrupted.sweep()
+    clock.advance(ORPHAN_GRACE_SECONDS)
+    with pytest.raises(KeyboardInterrupt):
+        interrupted.sweep()
+
+    _past_grace(_reaper([pool], ledger, clock), clock, _LONG_AFTER)
+
+    assert _stops(happier_state) == [] and _tracked(happier_state) == [orphan]
+    assert _protected(ledger) == {orphan: "stop sent, outcome not recorded"}
+
+
+def test_ledger_entries_survive_a_sweep_where_the_daemon_does_not_list_them(
+    happier_state: Path, ledger: Path, clock: FakeClock
+) -> None:
+    pool = _pool("claude", clock)
+    orphan = _orphan(happier_state, pool)
+    ledger.write_text(json.dumps({"v": 1, "protected": {orphan: "explicitly refused"}}))
+    reaper = _reaper([pool], ledger, clock)
+    _update(happier_state, orphan, lambda entry: entry.update(tracked=False))
+    reaper.sweep()
+    _update(happier_state, orphan, lambda entry: entry.update(tracked=True))
+
+    _past_grace(reaper, clock, _LONG_AFTER)
+
+    assert _stops(happier_state) == [] and _protected(ledger) == {orphan: "explicitly refused"}
 
 
 def test_an_unreadable_ledger_stops_nothing_and_is_kept(

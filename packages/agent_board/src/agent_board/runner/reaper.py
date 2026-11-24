@@ -17,9 +17,16 @@ ORPHAN_BUSY_ALERT_SECONDS = 4 * MAX_RUN_SECONDS
 REAP_INTERVAL_SECONDS = 300
 LEDGER_FILE = "runner-reaper.json"
 PRESENT_AT_START = "present before the reaper first ran"
-STOP_REFUSED = "the daemon refused to stop it"
-STILL_LISTED = "still listed after the daemon reported it stopped"
 NOT_BOARD = "not opened by the board runner"
+STOP_DISPATCHED = "stop sent, outcome not recorded"
+STOP_REPORTED = "the daemon reported it stopped"
+STOP_REFUSED = "the daemon refused to stop it"
+STOP_UNCONFIRMED = "the daemon did not confirm the stop"
+_OUTCOMES = {
+    StopOutcome.STOPPED: STOP_REPORTED,
+    StopOutcome.REFUSED: STOP_REFUSED,
+    StopOutcome.UNCONFIRMED: STOP_UNCONFIRMED,
+}
 _DAEMON_STARTED = "daemon"
 _LEDGER_VERSION = 1
 logger = logging.getLogger(__name__)
@@ -36,16 +43,18 @@ class OrphanReaper:
     daemon's child, so its host and CLI would run until the box runs out of memory.
 
     An orphan is a child the daemon started that no served kind records, that the relay tags and places
-    as a session one of the pools would open, that is not in the protected ledger, and that has stayed
-    so for `ORPHAN_GRACE_SECONDS`. It is stopped only when the relay explicitly reports it idle, and only
+    as a session one of the pools would open, that is not in the ledger, and that has stayed so for
+    `ORPHAN_GRACE_SECONDS`. It is stopped only when the relay explicitly reports it idle, and only
     while every served kind's map lock is held and the maps, read again, still do not name it. A busy
     orphan, or one the relay no longer knows, is never stopped; a busy one is reported once past
     `ORPHAN_BUSY_ALERT_SECONDS`.
 
-    The ledger fails closed. The first sweep with no ledger protects every orphan already present and
-    stops nothing. A refused stop, or a child still listed after a reported stop, is protected rather
-    than retried. A sweep does nothing while the ledger or any session record is unreadable. Only the
-    human or the session's owner clears a protected entry, by editing the ledger.
+    The ledger is the durable record of every session the reaper must not stop, and it is never pruned.
+    The first sweep with no ledger enters every orphan already present and stops nothing. Each decision
+    is written before the next is made. A stop is entered before it is sent, so a failed write prevents
+    it and an interrupted one is never repeated; every session gets at most one stop, whatever its
+    outcome. A sweep does nothing while the ledger or any session record is unreadable. Only the
+    session's owner or the human removes an entry, by editing the ledger.
     """
 
     def __init__(
@@ -61,7 +70,7 @@ class OrphanReaper:
         self._clock = clock
         self._first_seen: dict[str, float] = {}
         self._stopped: set[str] = set()
-        self._busy_reported: set[str] = set()
+        self._reported: set[str] = set()
         self._lock = threading.Lock()
 
     def serve(self) -> NoReturn:
@@ -75,7 +84,7 @@ class OrphanReaper:
     def sweep(self) -> None:
         with self._lock:
             try:
-                protected = self._read_ledger()
+                entered = self._read_ledger()
                 children = self._happier.children()
                 recorded = self._recorded_now()
             except UnreadableLedger as error:
@@ -93,33 +102,35 @@ class OrphanReaper:
                 for child in children
                 if child.started_by == _DAEMON_STARTED and child.session_id not in recorded
             }
-            for gone in sorted(self._stopped - listed):
-                logger.info("orphaned session %s is no longer listed by the daemon", gone)
-            if protected is None:
+            if entered is None:
                 self._write_ledger(dict.fromkeys(sorted(unrecorded), PRESENT_AT_START))
-                logger.info("reaper ledger created; %d existing orphans protected", len(unrecorded))
+                logger.info("reaper ledger created; %d existing orphans entered", len(unrecorded))
                 return
-            pruned = {session_id: why for session_id, why in protected.items() if session_id in listed}
-            for still in sorted(self._stopped & listed):
-                logger.warning("orphaned session %s is %s; protected", still, STILL_LISTED)
-                pruned[still] = STILL_LISTED
-            self._stopped.clear()
-            orphans = unrecorded - set(pruned)
+            self._report_inventory(entered, listed)
+            orphans = unrecorded - set(entered)
             now = self._clock()
             self._first_seen = {orphan: self._first_seen.get(orphan, now) for orphan in orphans}
-            self._busy_reported &= orphans
             for orphan, since in sorted(self._first_seen.items()):
                 if now - since >= ORPHAN_GRACE_SECONDS:
-                    self._consider(orphan, now - since, pruned)
-            if pruned != protected:
-                self._write_ledger(pruned)
+                    self._consider(orphan, now - since, entered)
+
+    def _report_inventory(self, entered: dict[str, str], listed: set[str]) -> None:
+        for gone in sorted(self._stopped - listed):
+            logger.info("orphaned session %s is no longer listed by the daemon", gone)
+        self._stopped &= listed
+        for session_id in sorted(listed & set(entered)):
+            if entered[session_id] != PRESENT_AT_START and session_id not in self._reported:
+                self._reported.add(session_id)
+                logger.warning(
+                    "daemon session %s is still listed; ledger: %s", session_id, entered[session_id]
+                )
 
     def _recorded_now(self) -> set[str]:
         with ExitStack() as stack:
             readers = [stack.enter_context(pool.held()) for pool in self._pools]
             return set().union(*(read() for read in readers))
 
-    def _consider(self, session_id: str, age: float, protected: dict[str, str]) -> None:
+    def _consider(self, session_id: str, age: float, entered: dict[str, str]) -> None:
         try:
             labels = self._happier.labels(session_id)
             idle = self._happier.confirmed_idle(session_id)
@@ -127,12 +138,12 @@ class OrphanReaper:
             logger.warning("could not inspect orphaned session %s: %s", session_id, error)
             return
         if labels is None or not any(pool.opened(*labels) for pool in self._pools):
-            logger.warning("daemon session %s is %s; protected", session_id, NOT_BOARD)
-            protected[session_id] = NOT_BOARD
+            self._enter(entered, session_id, NOT_BOARD)
+            logger.warning("daemon session %s is %s; entered in the ledger", session_id, NOT_BOARD)
             return
         if not idle:
-            if age >= ORPHAN_BUSY_ALERT_SECONDS and session_id not in self._busy_reported:
-                self._busy_reported.add(session_id)
+            if age >= ORPHAN_BUSY_ALERT_SECONDS and session_id not in self._reported:
+                self._reported.add(session_id)
                 logger.warning("orphaned session %s has been busy for %ds; left running", session_id, age)
             return
         with ExitStack() as stack:
@@ -146,21 +157,23 @@ class OrphanReaper:
                 logger.info("session %s was recorded again before its stop; left running", session_id)
                 del self._first_seen[session_id]
                 return
+            self._enter(entered, session_id, STOP_DISPATCHED)
+            del self._first_seen[session_id]
             outcome = self._happier.stop_child(session_id)
-        if outcome is StopOutcome.REFUSED:
-            logger.warning("orphaned session %s: %s; protected", session_id, STOP_REFUSED)
-            protected[session_id] = STOP_REFUSED
-            return
-        if outcome is StopOutcome.UNAVAILABLE:
-            logger.warning("could not reach the daemon to stop orphaned session %s; will retry", session_id)
+        self._enter(entered, session_id, _OUTCOMES[outcome])
+        if outcome is not StopOutcome.STOPPED:
+            logger.warning("orphaned session %s: %s; entered in the ledger", session_id, _OUTCOMES[outcome])
             return
         self._stopped.add(session_id)
-        del self._first_seen[session_id]
         try:
             self._happier.archive(session_id)
         except HappierError as error:
             logger.warning("could not archive stopped orphaned session %s: %s", session_id, error)
         logger.info("the daemon reported orphaned session %s stopped after %ds unrecorded", session_id, age)
+
+    def _enter(self, entered: dict[str, str], session_id: str, why: str) -> None:
+        self._write_ledger({**entered, session_id: why})
+        entered[session_id] = why
 
     def _read_ledger(self) -> dict[str, str] | None:
         try:
@@ -171,16 +184,17 @@ class OrphanReaper:
             raise UnreadableLedger(f"{self._ledger}: {error}") from None
         if not isinstance(recorded, dict) or recorded.get("v") != _LEDGER_VERSION:
             raise UnreadableLedger(f"{self._ledger}: unexpected shape")
-        protected = recorded.get("protected")
-        if not isinstance(protected, dict):
+        entered = recorded.get("protected")
+        if not isinstance(entered, dict):
             raise UnreadableLedger(f"{self._ledger}: unexpected shape")
-        if not all(isinstance(key, str) and isinstance(value, str) for key, value in protected.items()):
+        if not all(isinstance(key, str) and isinstance(value, str) for key, value in entered.items()):
             raise UnreadableLedger(f"{self._ledger}: unexpected entry")
-        return dict(protected)
+        return dict(entered)
 
-    def _write_ledger(self, protected: dict[str, str]) -> None:
+    def _write_ledger(self, entered: dict[str, str]) -> None:
         staged = self._ledger.with_name(f"{self._ledger.name}.tmp")
-        staged.write_text(
-            json.dumps({"v": _LEDGER_VERSION, "protected": protected}, indent=1, sort_keys=True)
-        )
+        with open(staged, "w") as file:
+            file.write(json.dumps({"v": _LEDGER_VERSION, "protected": entered}, indent=1, sort_keys=True))
+            file.flush()
+            os.fsync(file.fileno())
         os.replace(staged, self._ledger)

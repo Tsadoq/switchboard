@@ -48,7 +48,7 @@ class SessionState:
 class StopOutcome(Enum):
     STOPPED = "stopped"
     REFUSED = "refused"
-    UNAVAILABLE = "unavailable"
+    UNCONFIRMED = "unconfirmed"
 
 
 @dataclass(frozen=True)
@@ -187,7 +187,7 @@ class Happier:
             return StopOutcome.STOPPED
         if completed.returncode == 0 and answer == _NOT_STOPPED:
             return StopOutcome.REFUSED
-        return StopOutcome.UNAVAILABLE
+        return StopOutcome.UNCONFIRMED
 
     def confirmed_idle(self, session_id: str, timeout: int = 3) -> bool:
         """Like `idle`, but a session the relay no longer knows or has archived is not proof of idleness."""

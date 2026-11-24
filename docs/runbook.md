@@ -227,11 +227,13 @@ notifications:
     every kind's map lock is held, still do not name it.
   - A busy orphan is never stopped; one busy for over 8 hours is reported once in the log. An
     orphan the relay no longer knows, or has archived, is not taken as idle.
-  - The ledger `~/.agents/board/runner-reaper.json` lists protected sessions with the reason.
-    The first sweep that finds no ledger protects every orphan already present and stops
-    nothing. A refused stop, a child still listed after a reported stop, and a child the relay
-    does not show as a board session are protected, not retried. Only the session's owner or
-    the human removes an entry, by editing the ledger.
+  - The ledger `~/.agents/board/runner-reaper.json` lists every session the reaper must not
+    stop, with the reason, and is never pruned. The first sweep that finds no ledger enters
+    every orphan already present and stops nothing. A child the relay does not show as a board
+    session is entered. A stop is entered before it is sent, so a failed write prevents it,
+    and its outcome replaces the entry afterwards: each session gets at most one stop. A
+    refused, unconfirmed or interrupted stop is never retried. Only the session's owner or the
+    human removes an entry, by editing the ledger.
   - A sweep does nothing while the ledger, a map or the old `runner-session.json` is
     unreadable, or while a set-aside `runner-sessions.json.corrupt-*` exists. Reconcile and
     remove the set-aside map to let sweeps resume.
@@ -538,10 +540,11 @@ Lines read `LEVEL logger: message`. The ones that matter:
 | `INFO ... <principal>: session <id> is busy; wakes left leased for redelivery` | see above |
 | `INFO ... <principal>: N sessions live and none idle; wakes left leased for redelivery` | `max_sessions` is reached and no session could be evicted |
 | `INFO ... <principal>: archived session <id> for <key> (<why>)` | housekeeping or eviction ended a session: `retire when idle`, `idle ttl` or `evicted at cap` |
-| `INFO ... reaper ledger created; N existing orphans protected` | the first sweep wrote the ledger; nothing was stopped |
+| `INFO ... reaper ledger created; N existing orphans entered` | the first sweep wrote the ledger; nothing was stopped |
 | `INFO ... the daemon reported orphaned session <id> stopped after Ns unrecorded` | the reaper stopped and archived an idle orphan |
 | `INFO ... orphaned session <id> is no longer listed by the daemon` | a stopped orphan left the daemon's inventory |
-| `WARNING ... orphaned session <id>: the daemon refused to stop it; protected` and other `...; protected` lines | the session was added to the ledger and will not be tried again |
+| `WARNING ... orphaned session <id>: <outcome>; entered in the ledger` / `... is <reason>; entered in the ledger` | the session is in the ledger and will not be tried again |
+| `WARNING ... daemon session <id> is still listed; ledger: <reason>` | a ledger entry other than the first sweep's is still a daemon child; reported once per runner start |
 | `WARNING ... orphaned session <id> has been busy for Ns; left running` | a busy orphan past 8 hours; decide whether to end it |
 | `WARNING ... no orphan sweep while ...` | the ledger, a map or a set-aside map blocks sweeps until resolved |
 | `WARNING ... happier ... exited N: <stderr>` | a Happier call failed; its stderr follows |
