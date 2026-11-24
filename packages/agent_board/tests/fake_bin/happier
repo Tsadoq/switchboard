@@ -5,7 +5,9 @@
 # `session` and `agentState` copy probes 13 and 15, and the JSON envelopes copy probes 21, 22
 # and 27. FAKE_HAPPIER_FAIL=<command>:<code> makes create, send, wait or archive fail with <code>.
 # An entry's "turnRunning" flag makes `wait` time out; like the real CLI (probe 5), `status`
-# does not see it.
+# does not see it. A created session is a tracked child of the daemon (`daemon list`) until
+# `daemon stop-session` or an archive of a still-active session ends it; archiving a session the
+# relay already shows inactive leaves its child running, as the real daemon does.
 
 import argparse
 import fcntl
@@ -61,6 +63,7 @@ def cmd_create(args: argparse.Namespace) -> int:
     session = {
         "id": "cm" + secrets.token_hex(12),
         "title": args.title,
+        "tag": args.tag,
         "path": args.path,
         "host": socket.gethostname(),
         "machineId": MACHINE_ID,
@@ -79,6 +82,8 @@ def cmd_create(args: argparse.Namespace) -> int:
                 "homes": [os.environ.get("HAPPIER_HOME_DIR")],
                 "models": [args.model],
                 "env": dict(item.split("=", 1) for item in args.env),
+                "tracked": True,
+                "pid": 40000 + len(current["sessions"]),
             }
         )
     return reply("session_create", {"session": session, "created": True})
@@ -117,6 +122,8 @@ def cmd_archive(args: argparse.Namespace) -> int:
             return refuse("session_archive", "session_not_found")
         if entry["session"].get("archivedAt"):
             return refuse("session_archive", "session_archived")
+        if entry["session"].get("active"):
+            entry["tracked"] = False
         entry["session"]["archivedAt"] = int(time.time() * 1000)
         entry["session"]["active"] = False
     return reply("session_archive", {"sessionId": args.session_id, "archived": True})
@@ -134,6 +141,41 @@ def cmd_wait(args: argparse.Namespace) -> int:
     if entry.get("turnRunning"):
         return refuse("session_wait", "timeout")
     return reply("session_wait", {"sessionId": args.session_id, "idle": True})
+
+
+def cmd_daemon_list(args: argparse.Namespace) -> int:
+    if code := injected_failure("daemon-list"):
+        print(f"Error: {code}", file=sys.stderr)
+        return 1
+    with state() as current:
+        children = [
+            {"startedBy": entry.get("startedBy", "daemon"), "happySessionId": entry["session"]["id"],
+             "pid": entry["pid"], "status": "runner_alive"}
+            for entry in current["sessions"]
+            if entry.get("tracked")
+        ]
+    if not children:
+        print("This daemon has no tracked active sessions. Use `happier session list --active` to list "
+              "active sessions on the relay.")
+        return 0
+    print("Active sessions:")
+    print(json.dumps(children, indent=2))
+    return 0
+
+
+def cmd_daemon_stop_session(args: argparse.Namespace) -> int:
+    if injected_failure("daemon-stop-session") == "no_daemon":
+        print("No daemon running")
+        return 0
+    with state() as current:
+        entry = find(current, args.session_id)
+        stopped = entry is not None and entry.get("tracked") and not injected_failure("daemon-stop-session")
+        if stopped:
+            entry["tracked"] = False
+            entry["session"]["active"] = False
+        current.setdefault("stops", []).append(args.session_id)
+    print("Session stopped" if stopped else "Failed to stop session")
+    return 0
 
 
 def cmd_notify(args: argparse.Namespace) -> int:
@@ -181,6 +223,11 @@ def parse(argv: list[str]) -> argparse.Namespace:
     wait.add_argument("session_id")
     wait.add_argument("--timeout", type=int, required=True)
     wait.add_argument("--json", action="store_true", required=True)
+    daemon = commands.add_parser("daemon").add_subparsers(dest="action", required=True)
+    daemon.add_parser("list").set_defaults(run=cmd_daemon_list)
+    stop_session = daemon.add_parser("stop-session")
+    stop_session.set_defaults(run=cmd_daemon_stop_session)
+    stop_session.add_argument("session_id")
     notify = commands.add_parser("notify")
     notify.set_defaults(run=cmd_notify)
     notify.add_argument("-p", dest="message", required=True)

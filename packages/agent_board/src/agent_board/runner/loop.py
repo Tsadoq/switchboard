@@ -12,6 +12,7 @@ from agent_board.identity import Identity, ensure_state_dir
 from agent_board.runner.activity import ActivityReporter, threads_of
 from agent_board.runner.config import KindConfig, RunnerConfig
 from agent_board.runner.happier import TIMEOUT_SECONDS, Happier, HappierError
+from agent_board.runner.reaper import LEDGER_FILE, OrphanReaper
 from agent_board.runner.remote_control import RemoteControlError
 from agent_board.runner.sessions import KIND_KEY, NOTIFY_TITLE, SessionPool, topic_key, warn_human
 from agent_board.runner.weekly import WeeklyClock
@@ -158,10 +159,15 @@ def run_forever(cfg: RunnerConfig, clients: Mapping[Identity, Client], happier: 
             failures.put(failure)
 
     reporters: list[ActivityReporter] = []
-    for inbox in _inboxes(cfg, clients, happier, reporters):
+    pools: list[SessionPool] = []
+    for inbox in _inboxes(cfg, clients, happier, reporters, pools):
         threading.Thread(target=serve, args=(inbox,), name=inbox.label, daemon=True).start()
     for reporter in reporters:
         threading.Thread(target=reporter.serve, name="activity", daemon=True).start()
+    if pools:
+        ledger = pools[0].state_root() / LEDGER_FILE
+        reaper = OrphanReaper(happier, pools, ledger)
+        threading.Thread(target=reaper.serve, name="reaper", daemon=True).start()
     raise failures.get()
 
 
@@ -366,12 +372,16 @@ def _inboxes(
     clients: Mapping[Identity, Client],
     happier: Happier,
     reporters: list[ActivityReporter] | None = None,
+    pools: list[SessionPool] | None = None,
 ) -> list[_Inbox]:
-    """Passing `reporters` gives each agent an `ActivityReporter`, appended there for the caller to run."""
+    """Passing `reporters` gives each agent an `ActivityReporter`, appended there for the caller to run;
+    passing `pools` collects each agent's `SessionPool` there."""
     inboxes = []
     for me, client in clients.items():
         settings = cfg.kinds[me.kind]
         sessions = SessionPool(settings, me, happier)
+        if pools is not None:
+            pools.append(sessions)
         reporter = None
         if reporters is not None:
             reporter = ActivityReporter(client, happier)

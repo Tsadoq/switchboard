@@ -41,6 +41,10 @@ _RECORDED_ID = re.compile(r'"session_id"\s*:\s*"([^"]+)"')
 logger = logging.getLogger(__name__)
 
 
+class UnreadableMap(Exception):
+    pass
+
+
 @dataclass
 class _Entry:
     key: str | None
@@ -140,6 +144,42 @@ class SessionPool:
         if legacy.exists():
             legacy.replace(legacy.with_name(LEGACY_FILE + _RETIRED_SUFFIX))
 
+    @contextmanager
+    def held(self) -> Iterator[Callable[[], set[str]]]:
+        """Holds this kind's map lock, so no session is recorded or forgotten meanwhile, and yields a reader
+        of every session id its records name.
+
+        The reader raises `UnreadableMap` rather than reading a damaged record as naming nothing, and
+        while any set-aside map exists, since what a damaged map recorded cannot be fully recovered.
+        """
+        directory = ensure_state_dir(self._me.kind)
+        with open(directory / LOCK_FILE, "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield lambda: self._recorded(directory)
+
+    def _recorded(self, directory: Path) -> set[str]:
+        if quarantined := sorted(directory.glob(f"{MAP_FILE}{_CORRUPT_SUFFIX}*")):
+            raise UnreadableMap(f"{self._me.principal}: set-aside map {quarantined[0].name} is unresolved")
+        text = _read_record(directory / MAP_FILE)
+        entries = [] if text is None else _parse(text)
+        if entries is None:
+            raise UnreadableMap(f"{self._me.principal}: {MAP_FILE} does not parse")
+        recorded = {entry.session_id for entry in entries}
+        legacy = _read_record(directory / LEGACY_FILE)
+        if legacy is not None:
+            if (legacy_id := _legacy_session_id(legacy)) is None:
+                raise UnreadableMap(f"{self._me.principal}: {LEGACY_FILE} does not parse")
+            recorded.add(legacy_id)
+        return recorded
+
+    def state_root(self) -> Path:
+        """The directory that holds every kind's state directory."""
+        return ensure_state_dir(self._me.kind).parent
+
+    def opened(self, tag: str, path: str) -> bool:
+        """Whether a session with this tag and path is one this pool would open."""
+        return tag == _tag(self._me.kind) and Path(path) == self._settings.workdir
+
     def open_for_wake_test(self, prompt: str) -> Session:
         """In kind scope the new session takes over `KIND_KEY`; the one it displaces retires once idle."""
         with self._map() as entries:
@@ -177,7 +217,7 @@ class SessionPool:
         session = self._happier.create(
             backend=self._settings.backend,
             path=self._settings.workdir,
-            tag=f"board-{self._me.kind}",
+            tag=_tag(self._me.kind),
             title=f"agent board: {self._me.principal}",
             prompt=prompt,
             permission_mode=self._settings.permission_mode,
@@ -322,6 +362,19 @@ class SessionPool:
             f"{self._me.principal}: the session map {path} was unreadable and was moved to {set_aside.name}; "
             "sessions it recorded are no longer tracked",
         )
+
+
+def _tag(kind: str) -> str:
+    return f"board-{kind}"
+
+
+def _read_record(path: Path) -> str | None:
+    try:
+        return path.read_text()
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as error:
+        raise UnreadableMap(f"{path}: {error}") from None
 
 
 def _text(prompt: str | Callable[[bool], str], cursor: bool) -> str:

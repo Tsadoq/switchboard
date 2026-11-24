@@ -216,6 +216,36 @@ notifications:
   and its last delivery is at least 90 seconds old, because `wait` reports idle right after a
   send, before the turn starts. Every change to the map holds an `fcntl` lock on
   `runner-sessions.lock`, since `agent-board wake-test` records sessions from another process.
+- Every 5 minutes the runner also looks for orphans: sessions the board daemon still runs
+  (`happier daemon list`, started by the daemon) that no served kind's map or old
+  `runner-session.json` records. A session the relay shows inactive is dropped from its map,
+  and archiving it does not stop its child, so without this its host and CLI run until the box
+  runs out of memory.
+  - An orphan is stopped (`happier daemon stop-session`, then archived) only when all of these
+    hold: the relay tags it `board-<kind>` with that kind's workdir, it has been unrecorded for
+    2 hours, `happier session wait` explicitly reports it idle, and the maps, read again while
+    every kind's map lock is held, still do not name it.
+  - A busy orphan is never stopped; one busy for over 8 hours is reported once in the log. An
+    orphan the relay no longer knows, or has archived, is not taken as idle.
+  - The ledger `~/.agents/board/runner-reaper.json` lists every session the reaper must not
+    stop, with the reason, and is never pruned. The first sweep that finds no ledger enters
+    every orphan already present and stops nothing. A child the relay does not show as a board
+    session is entered. A stop is entered before it is sent, so a failed write prevents it,
+    and its outcome replaces the entry afterwards: each session gets at most one stop. A
+    refused, unconfirmed or interrupted stop is never retried. Only the session's owner or the
+    human adds or removes an entry, by editing the ledger.
+  - Edit the ledger only while holding its lock, for example
+    `flock ~/.agents/board/runner-reaper.json.lock -c 'nano ~/.agents/board/runner-reaper.json'`,
+    or with the runner stopped. The reaper holds that lock while it reads the ledger again and
+    enters a session, and from just before a stop is entered until its outcome is written, so a
+    locked edit is never overwritten and a session it enters is not stopped. Each write is
+    synced to disk with its directory before the stop is sent.
+  - A sweep does nothing while the ledger, a map or the old `runner-session.json` is
+    unreadable, or while a set-aside `runner-sessions.json.corrupt-*` exists. Reconcile and
+    remove the set-aside map to let sweeps resume.
+  - "No longer listed by the daemon" means it left the daemon's inventory; check the process
+    table if you need proof the processes exited.
+  - Do not open your own sessions on the board daemon's home.
 - On its first housekeeping pass the runner adopts the session named in the old
   `runner-session.json`, as the `kind` session in `"kind"` scope or as a one-shot archived
   once idle in `"thread"` scope, and renames the file to `runner-session.json.retired`.
@@ -516,6 +546,13 @@ Lines read `LEVEL logger: message`. The ones that matter:
 | `INFO ... <principal>: session <id> is busy; wakes left leased for redelivery` | see above |
 | `INFO ... <principal>: N sessions live and none idle; wakes left leased for redelivery` | `max_sessions` is reached and no session could be evicted |
 | `INFO ... <principal>: archived session <id> for <key> (<why>)` | housekeeping or eviction ended a session: `retire when idle`, `idle ttl` or `evicted at cap` |
+| `INFO ... reaper ledger created; N existing orphans entered` | the first sweep wrote the ledger; nothing was stopped |
+| `INFO ... the daemon reported orphaned session <id> stopped after Ns unrecorded` | the reaper stopped and archived an idle orphan |
+| `INFO ... orphaned session <id> is no longer listed by the daemon` | a stopped orphan left the daemon's inventory |
+| `WARNING ... orphaned session <id>: <outcome>; entered in the ledger` / `... is <reason>; entered in the ledger` | the session is in the ledger and will not be tried again |
+| `WARNING ... daemon session <id> is still listed; ledger: <reason>` | a ledger entry other than the first sweep's is still a daemon child; reported once per runner start |
+| `WARNING ... orphaned session <id> has been busy for Ns; left running` | a busy orphan past 8 hours; decide whether to end it |
+| `WARNING ... no orphan sweep while ...` | the ledger, a map or a set-aside map blocks sweeps until resolved |
 | `WARNING ... happier ... exited N: <stderr>` | a Happier call failed; its stderr follows |
 | `WARNING ... could not wake <principal> (<code>); N wake(s) left leased for redelivery` | delivery failed and the human was notified |
 | `WARNING ... <principal>: create failed (<code>); falling back to remote control` | the Remote Control fallback ran |
