@@ -216,16 +216,28 @@ notifications:
   and its last delivery is at least 90 seconds old, because `wait` reports idle right after a
   send, before the turn starts. Every change to the map holds an `fcntl` lock on
   `runner-sessions.lock`, since `agent-board wake-test` records sessions from another process.
-- Every 5 minutes the runner also ends orphans: sessions the board daemon still runs
-  (`happier daemon list`, started by the daemon) that no served kind's map records. A
-  session the relay shows inactive is dropped from its map, and archiving it does not stop
-  its child, so without this its host and CLI run until the box runs out of memory. An orphan
-  is stopped with `happier daemon stop-session` and then archived, once it has been one for
-  2 hours and is idle, or after 8 hours regardless. It stays watched until the daemon no
-  longer lists it. A session named by the old `runner-session.json` or by a map set aside
-  as `runner-sessions.json.corrupt-*` counts as recorded and is never stopped; a sweep does
-  nothing while any of these records is unreadable. Do not open your own
-  sessions on the board daemon's home: the runner treats them as orphans.
+- Every 5 minutes the runner also looks for orphans: sessions the board daemon still runs
+  (`happier daemon list`, started by the daemon) that no served kind's map or old
+  `runner-session.json` records. A session the relay shows inactive is dropped from its map,
+  and archiving it does not stop its child, so without this its host and CLI run until the box
+  runs out of memory.
+  - An orphan is stopped (`happier daemon stop-session`, then archived) only when all of these
+    hold: the relay tags it `board-<kind>` with that kind's workdir, it has been unrecorded for
+    2 hours, `happier session wait` explicitly reports it idle, and the maps, read again while
+    every kind's map lock is held, still do not name it.
+  - A busy orphan is never stopped; one busy for over 8 hours is reported once in the log. An
+    orphan the relay no longer knows, or has archived, is not taken as idle.
+  - The ledger `~/.agents/board/runner-reaper.json` lists protected sessions with the reason.
+    The first sweep that finds no ledger protects every orphan already present and stops
+    nothing. A refused stop, a child still listed after a reported stop, and a child the relay
+    does not show as a board session are protected, not retried. Only the session's owner or
+    the human removes an entry, by editing the ledger.
+  - A sweep does nothing while the ledger, a map or the old `runner-session.json` is
+    unreadable, or while a set-aside `runner-sessions.json.corrupt-*` exists. Reconcile and
+    remove the set-aside map to let sweeps resume.
+  - "No longer listed by the daemon" means it left the daemon's inventory; check the process
+    table if you need proof the processes exited.
+  - Do not open your own sessions on the board daemon's home.
 - On its first housekeeping pass the runner adopts the session named in the old
   `runner-session.json`, as the `kind` session in `"kind"` scope or as a one-shot archived
   once idle in `"thread"` scope, and renames the file to `runner-session.json.retired`.
@@ -526,9 +538,12 @@ Lines read `LEVEL logger: message`. The ones that matter:
 | `INFO ... <principal>: session <id> is busy; wakes left leased for redelivery` | see above |
 | `INFO ... <principal>: N sessions live and none idle; wakes left leased for redelivery` | `max_sessions` is reached and no session could be evicted |
 | `INFO ... <principal>: archived session <id> for <key> (<why>)` | housekeeping or eviction ended a session: `retire when idle`, `idle ttl` or `evicted at cap` |
-| `INFO ... stopped orphaned session <id> after Ns unrecorded` | the reaper ended a daemon session no map recorded |
-| `WARNING ... the daemon did not stop orphaned session <id>` / `... is still a daemon child after it was stopped` | the stop failed or did not end the child; the next sweep retries |
-| `WARNING ... no orphan sweep while a session map is unreadable: ...` | a kind's `runner-sessions.json` does not parse; nothing is stopped until it does |
+| `INFO ... reaper ledger created; N existing orphans protected` | the first sweep wrote the ledger; nothing was stopped |
+| `INFO ... the daemon reported orphaned session <id> stopped after Ns unrecorded` | the reaper stopped and archived an idle orphan |
+| `INFO ... orphaned session <id> is no longer listed by the daemon` | a stopped orphan left the daemon's inventory |
+| `WARNING ... orphaned session <id>: the daemon refused to stop it; protected` and other `...; protected` lines | the session was added to the ledger and will not be tried again |
+| `WARNING ... orphaned session <id> has been busy for Ns; left running` | a busy orphan past 8 hours; decide whether to end it |
+| `WARNING ... no orphan sweep while ...` | the ledger, a map or a set-aside map blocks sweeps until resolved |
 | `WARNING ... happier ... exited N: <stderr>` | a Happier call failed; its stderr follows |
 | `WARNING ... could not wake <principal> (<code>); N wake(s) left leased for redelivery` | delivery failed and the human was notified |
 | `WARNING ... <principal>: create failed (<code>); falling back to remote control` | the Remote Control fallback ran |

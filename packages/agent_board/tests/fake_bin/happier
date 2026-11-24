@@ -63,6 +63,7 @@ def cmd_create(args: argparse.Namespace) -> int:
     session = {
         "id": "cm" + secrets.token_hex(12),
         "title": args.title,
+        "tag": args.tag,
         "path": args.path,
         "host": socket.gethostname(),
         "machineId": MACHINE_ID,
@@ -163,12 +164,16 @@ def cmd_daemon_list(args: argparse.Namespace) -> int:
 
 
 def cmd_daemon_stop_session(args: argparse.Namespace) -> int:
+    if injected_failure("daemon-stop-session") == "no_daemon":
+        print("No daemon running")
+        return 0
     with state() as current:
         entry = find(current, args.session_id)
         stopped = entry is not None and entry.get("tracked") and not injected_failure("daemon-stop-session")
         if stopped:
             entry["tracked"] = False
             entry["session"]["active"] = False
+        current.setdefault("stops", []).append(args.session_id)
     print("Session stopped" if stopped else "Failed to stop session")
     return 0
 

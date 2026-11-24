@@ -5,6 +5,7 @@ import shlex
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ TIMEOUT_SECONDS = 60
 _NO_CHILDREN = "This daemon has no tracked active sessions"
 _CHILDREN_HEADER = "Active sessions:"
 _STOPPED = "Session stopped"
+_NOT_STOPPED = "Failed to stop session"
 _REDACTED = "<redacted>"
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,12 @@ class SessionState:
     @property
     def busy(self) -> bool:
         return self.pending_requests > 0 or self.controlled_by_user
+
+
+class StopOutcome(Enum):
+    STOPPED = "stopped"
+    REFUSED = "refused"
+    UNAVAILABLE = "unavailable"
 
 
 @dataclass(frozen=True)
@@ -158,10 +166,38 @@ class Happier:
             if isinstance(item, dict) and isinstance(item.get("happySessionId"), str)
         ]
 
-    def stop_child(self, session_id: str) -> bool:
-        """Stops the daemon's own child, which `archive` leaves running once the relay shows it inactive."""
+    def labels(self, session_id: str) -> tuple[str, str] | None:
+        """The session's tag and path as the relay records them; None when the relay does not know it."""
+        try:
+            data = self._envelope("session", "status", session_id, "--json")
+        except HappierError as error:
+            if error.code == SESSION_NOT_FOUND:
+                return None
+            raise
+        try:
+            return str(data["session"]["tag"]), str(data["session"]["path"])
+        except (KeyError, TypeError):
+            raise HappierError("bad_output") from None
+
+    def stop_child(self, session_id: str) -> StopOutcome:
+        """Asks the daemon to stop its own child, which `archive` leaves running once the relay shows it inactive."""
         completed = self._run("daemon", "stop-session", session_id, env=self._session_env)
-        return completed.returncode == 0 and completed.stdout.strip() == _STOPPED
+        answer = completed.stdout.strip()
+        if completed.returncode == 0 and answer == _STOPPED:
+            return StopOutcome.STOPPED
+        if completed.returncode == 0 and answer == _NOT_STOPPED:
+            return StopOutcome.REFUSED
+        return StopOutcome.UNAVAILABLE
+
+    def confirmed_idle(self, session_id: str, timeout: int = 3) -> bool:
+        """Like `idle`, but a session the relay no longer knows or has archived is not proof of idleness."""
+        try:
+            data = self._envelope("session", "wait", session_id, "--timeout", str(timeout), "--json")
+        except HappierError as error:
+            if error.code == "timeout" or error.code in _SESSION_GONE:
+                return False
+            raise
+        return isinstance(data, dict) and data.get("idle") is True
 
     def notify(self, title: str, message: str) -> None:
         completed = self._run("notify", "-p", _Body(message), "-t", title)

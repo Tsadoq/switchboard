@@ -12,7 +12,7 @@ from agent_board.identity import Identity, ensure_state_dir
 from agent_board.runner.activity import ActivityReporter, threads_of
 from agent_board.runner.config import KindConfig, RunnerConfig
 from agent_board.runner.happier import TIMEOUT_SECONDS, Happier, HappierError
-from agent_board.runner.reaper import OrphanReaper
+from agent_board.runner.reaper import LEDGER_FILE, OrphanReaper
 from agent_board.runner.remote_control import RemoteControlError
 from agent_board.runner.sessions import KIND_KEY, NOTIFY_TITLE, SessionPool, topic_key, warn_human
 from agent_board.runner.weekly import WeeklyClock
@@ -165,7 +165,9 @@ def run_forever(cfg: RunnerConfig, clients: Mapping[Identity, Client], happier: 
     for reporter in reporters:
         threading.Thread(target=reporter.serve, name="activity", daemon=True).start()
     if pools:
-        threading.Thread(target=OrphanReaper(happier, pools).serve, name="reaper", daemon=True).start()
+        ledger = pools[0].state_root() / LEDGER_FILE
+        reaper = OrphanReaper(happier, pools, ledger)
+        threading.Thread(target=reaper.serve, name="reaper", daemon=True).start()
     raise failures.get()
 
 
