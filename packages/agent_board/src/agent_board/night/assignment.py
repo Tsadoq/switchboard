@@ -52,8 +52,10 @@ PROMPT_TEMPLATE = (
     "Before acting on any of them, read the thread with `agent-board read <thread_id>` and follow the board's "
     "rules there. A summary marked truncated is incomplete.\n"
     "A wake whose reason is night_initial is the board's own nightly start, not a message: for it, list your "
-    "tickets with `agent-board tickets list --mine` and continue only the ones in the doing column whose work "
-    "belongs in this checkout. If none does, post nothing and finish.\n"
+    "tickets with `agent-board tickets list --mine` and continue the ones in the doing column whose work "
+    "belongs in this checkout. If none does, start the oldest of your todo tickets whose work belongs here: move "
+    "it to doing with `agent-board tickets move <id> doing` and work on it. Post what you did on each ticket's "
+    "thread. If no ticket of yours belongs in this checkout, post nothing and finish.\n"
     "Work only in this checkout. Do not push, merge, deploy, publish or contact anyone outside the board.\n"
     "```json\n{wakes}\n```\n"
 )
