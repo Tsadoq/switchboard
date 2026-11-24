@@ -39,26 +39,12 @@ class WakeBus:
         self._arrivals: defaultdict[str, asyncio.Event] = defaultdict(asyncio.Event)
 
     async def emit(self, request: WakeRequest) -> None:
-        def store(conn: sqlite3.Connection) -> None:
-            conn.execute(
-                "INSERT INTO wakes (principal, reason, source_ref, summary, created_at, thread_id, topic_id, origin_kind) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    request.principal,
-                    request.reason,
-                    request.source_ref,
-                    request.summary,
-                    time.time(),
-                    request.thread_id,
-                    request.topic_id,
-                    classify_origin(conn, request),
-                ),
-            )
-            hold_wakes_in_transaction(conn, time.time(), request.principal)
-            _request_human_preemption(conn, request.principal)
+        await self._db.transact(lambda conn: store_in_transaction(conn, request))
+        self.arrived(request.principal)
 
-        await self._db.transact(store)
-        self._arrivals[request.principal].set()
+    def arrived(self, principal: str) -> None:
+        """Wakes the principal's long pollers; call it only after the transaction that stored its wake commits."""
+        self._arrivals[principal].set()
 
     async def lease(self, principal: str, limit: int = LEASE_BATCH) -> list[Wake]:
         now = time.time()
@@ -122,6 +108,25 @@ class WakeBus:
                     break
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(arrival.wait(), min(remaining, DISCONNECT_CHECK_SECONDS))
+
+
+def store_in_transaction(conn: sqlite3.Connection, request: WakeRequest) -> None:
+    conn.execute(
+        "INSERT INTO wakes (principal, reason, source_ref, summary, created_at, thread_id, topic_id, origin_kind) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            request.principal,
+            request.reason,
+            request.source_ref,
+            request.summary,
+            time.time(),
+            request.thread_id,
+            request.topic_id,
+            classify_origin(conn, request),
+        ),
+    )
+    hold_wakes_in_transaction(conn, time.time(), request.principal)
+    _request_human_preemption(conn, request.principal)
 
 
 def _request_human_preemption(conn: sqlite3.Connection, principal: str) -> None:

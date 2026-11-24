@@ -5,7 +5,7 @@ from functools import partial
 from board.constants import HUMAN
 from board.db import Database
 from board.forum.fanout import WakeRequest
-from board.wakes.bus import WakeBus
+from board.wakes.bus import WakeBus, store_in_transaction
 
 TICK_SECONDS = 60
 TIMER = "timer"
@@ -26,12 +26,14 @@ async def tick(db: Database, bus: WakeBus, now: float) -> None:
             await db.transact(partial(_stamp_timer, principal=principal, now=now))
         except Exception:
             logger.exception("timer wake for %s failed; retrying next tick", principal)
-    for request, ticket_id in await db.transact(partial(_quiet_tickets, now=now)):
+    for _, ticket_id in await db.transact(partial(_quiet_tickets, now=now)):
         try:
-            await bus.emit(request)
-            await db.transact(partial(_stamp_quiet, ticket_id=ticket_id, now=now))
+            woken = await db.transact(partial(_nudge, ticket_id=ticket_id, now=now))
         except Exception:
             logger.exception("quiet ticket wake for ticket %d failed; retrying next tick", ticket_id)
+            continue
+        if woken is not None:
+            bus.arrived(woken)
 
 
 def _due_timers(conn: sqlite3.Connection, now: float) -> list[tuple[str, int]]:
@@ -53,7 +55,18 @@ def _stamp_timer(conn: sqlite3.Connection, principal: str, now: float) -> None:
     conn.execute("UPDATE profiles SET last_timer_wake_at = ? WHERE principal = ?", (now, principal))
 
 
-def _quiet_tickets(conn: sqlite3.Connection, now: float) -> list[tuple[WakeRequest, int]]:
+def _nudge(conn: sqlite3.Connection, ticket_id: int, now: float) -> str | None:
+    """Checks the ticket again, stores its wake and stamps it in one transaction; the woken principal, or None."""
+    for request, _ in _quiet_tickets(conn, now, ticket_id):
+        store_in_transaction(conn, request)
+        _stamp_quiet(conn, ticket_id, now)
+        return request.principal
+    return None
+
+
+def _quiet_tickets(
+    conn: sqlite3.Connection, now: float, only: int | None = None
+) -> list[tuple[WakeRequest, int]]:
     """Doing tickets whose agent assignee has neither posted on nor touched them for `QUIET_SECONDS`.
 
     A ticket is skipped while its previous nudge is still unacknowledged, and while its assignee's night
@@ -70,8 +83,9 @@ def _quiet_tickets(conn: sqlite3.Connection, now: float) -> list[tuple[WakeReque
         "AND w.source_ref = 'ticket:' || t.id AND w.acked_at IS NULL) "
         "AND NOT EXISTS (SELECT 1 FROM night_routing_days d WHERE d.principal = t.assignee "
         "AND d.starts_at <= ? AND ? < d.ends_at) "
+        "AND (? IS NULL OR t.id = ?) "
         "ORDER BY t.id",
-        (HUMAN, now - QUIET_SECONDS, QUIET_TICKET, now, now),
+        (HUMAN, now - QUIET_SECONDS, QUIET_TICKET, now, now, only, only),
     )
     return [
         (

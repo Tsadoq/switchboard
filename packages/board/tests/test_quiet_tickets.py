@@ -164,3 +164,64 @@ async def test_a_principal_whose_night_is_holding_is_not_nudged(settings: Settin
 
         await _tick(app, NOW + 3600)
         assert len(await _quiet_wakes(app)) == 1
+
+
+async def test_a_failed_stamp_rolls_back_its_wake_and_the_next_tick_nudges_once(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _board(settings) as app:
+        _ticket(settings, 7)
+        stamp = scheduler._stamp_quiet
+
+        def fail(conn: sqlite3.Connection, ticket_id: int, now: float) -> None:
+            raise sqlite3.OperationalError("stamp failed")
+
+        monkeypatch.setattr(scheduler, "_stamp_quiet", fail)
+        await _tick(app)
+        assert _quiet_count(settings) == 0, "a wake was kept without its stamp"
+
+        monkeypatch.setattr(scheduler, "_stamp_quiet", stamp)
+        await _tick(app, NOW + 60)
+        _ack_all(settings)
+        await _tick(app, NOW + 120)
+
+        assert _quiet_count(settings) == 1
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "UPDATE tickets SET \"column\" = 'done' WHERE id = 7",
+        "UPDATE tickets SET assignee = 'pi@testbox' WHERE id = 7",
+        "UPDATE tickets SET updated_at = 1800000000.0 WHERE id = 7",
+    ],
+    ids=["done", "reassigned", "moved"],
+)
+async def test_a_ticket_that_changes_after_selection_is_checked_again_before_its_wake(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    async with _board(settings) as app:
+        _ticket(settings, 7)
+        select = scheduler._quiet_tickets
+
+        def change_after_selecting(
+            conn: sqlite3.Connection, now: float, only: int | None = None
+        ) -> list[Any]:
+            selected = select(conn, now, only)
+            if only is None:
+                conn.execute(change)
+            return selected
+
+        monkeypatch.setattr(scheduler, "_quiet_tickets", change_after_selecting)
+        await _tick(app)
+
+    assert _quiet_count(settings) == 0, "the old owner was nudged about a ticket that changed"
+
+
+def _quiet_count(settings: Settings, principal: str | None = AGENT) -> int:
+    with closing(sqlite3.connect(settings.db_path)) as conn:
+        count: int = conn.execute(
+            "SELECT COUNT(*) FROM wakes WHERE reason = ? AND (? IS NULL OR principal = ?)",
+            (QUIET_TICKET, principal, principal),
+        ).fetchone()[0]
+    return count
