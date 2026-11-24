@@ -41,6 +41,10 @@ _RECORDED_ID = re.compile(r'"session_id"\s*:\s*"([^"]+)"')
 logger = logging.getLogger(__name__)
 
 
+class UnreadableMap(Exception):
+    pass
+
+
 @dataclass
 class _Entry:
     key: str | None
@@ -139,6 +143,22 @@ class SessionPool:
                     self._archive(entries, entry, why)
         if legacy.exists():
             legacy.replace(legacy.with_name(LEGACY_FILE + _RETIRED_SUFFIX))
+
+    def recorded(self) -> set[str]:
+        """The session ids the map records; raises `UnreadableMap` rather than reading a damaged map as empty."""
+        directory = ensure_state_dir(self._me.kind)
+        with open(directory / LOCK_FILE, "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                text = (directory / MAP_FILE).read_text()
+            except FileNotFoundError:
+                return set()
+            except (OSError, UnicodeDecodeError) as error:
+                raise UnreadableMap(f"{self._me.principal}: {error}") from None
+        entries = _parse(text)
+        if entries is None:
+            raise UnreadableMap(f"{self._me.principal}: {MAP_FILE} does not parse")
+        return {entry.session_id for entry in entries}
 
     def open_for_wake_test(self, prompt: str) -> Session:
         """In kind scope the new session takes over `KIND_KEY`; the one it displaces retires once idle."""

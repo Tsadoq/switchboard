@@ -13,6 +13,9 @@ SESSION_ARCHIVED = "session_archived"
 _SESSION_GONE = (SESSION_NOT_FOUND, SESSION_ARCHIVED)
 HOME_DIR_ENV = "HAPPIER_HOME_DIR"
 TIMEOUT_SECONDS = 60
+_NO_CHILDREN = "This daemon has no tracked active sessions"
+_CHILDREN_HEADER = "Active sessions:"
+_STOPPED = "Session stopped"
 _REDACTED = "<redacted>"
 logger = logging.getLogger(__name__)
 
@@ -38,6 +41,12 @@ class SessionState:
     @property
     def busy(self) -> bool:
         return self.pending_requests > 0 or self.controlled_by_user
+
+
+@dataclass(frozen=True)
+class Child:
+    session_id: str
+    started_by: str
 
 
 @dataclass(frozen=True)
@@ -126,6 +135,33 @@ class Happier:
                 return True
             raise
         return isinstance(data, dict) and data.get("idle") is True
+
+    def children(self) -> list[Child]:
+        """The sessions the daemon itself tracks on this machine, whatever the relay thinks of them."""
+        completed = self._run("daemon", "list", env=self._session_env)
+        if completed.returncode != 0:
+            raise HappierError(f"exit_{completed.returncode}")
+        text = completed.stdout.strip()
+        if text.startswith(_NO_CHILDREN):
+            return []
+        if not text.startswith(_CHILDREN_HEADER):
+            raise HappierError("bad_output")
+        try:
+            listed = json.loads(text.removeprefix(_CHILDREN_HEADER))
+        except ValueError:
+            raise HappierError("bad_output") from None
+        if not isinstance(listed, list):
+            raise HappierError("bad_output")
+        return [
+            Child(item["happySessionId"], str(item.get("startedBy")))
+            for item in listed
+            if isinstance(item, dict) and isinstance(item.get("happySessionId"), str)
+        ]
+
+    def stop_child(self, session_id: str) -> bool:
+        """Stops the daemon's own child, which `archive` leaves running once the relay shows it inactive."""
+        completed = self._run("daemon", "stop-session", session_id, env=self._session_env)
+        return completed.returncode == 0 and completed.stdout.strip() == _STOPPED
 
     def notify(self, title: str, message: str) -> None:
         completed = self._run("notify", "-p", _Body(message), "-t", title)

@@ -216,6 +216,14 @@ notifications:
   and its last delivery is at least 90 seconds old, because `wait` reports idle right after a
   send, before the turn starts. Every change to the map holds an `fcntl` lock on
   `runner-sessions.lock`, since `agent-board wake-test` records sessions from another process.
+- Every 5 minutes the runner also ends orphans: sessions the board daemon still runs
+  (`happier daemon list`, started by the daemon) that no served kind's map records. A
+  session the relay shows inactive is dropped from its map, and archiving it does not stop
+  its child, so without this its host and CLI run until the box runs out of memory. An orphan
+  is stopped with `happier daemon stop-session` and then archived, once it has been one for
+  2 hours and is idle, or after 8 hours regardless. It stays watched until the daemon no
+  longer lists it. A sweep does nothing while any map is unreadable. Do not open your own
+  sessions on the board daemon's home: the runner treats them as orphans.
 - On its first housekeeping pass the runner adopts the session named in the old
   `runner-session.json`, as the `kind` session in `"kind"` scope or as a one-shot archived
   once idle in `"thread"` scope, and renames the file to `runner-session.json.retired`.
@@ -516,6 +524,9 @@ Lines read `LEVEL logger: message`. The ones that matter:
 | `INFO ... <principal>: session <id> is busy; wakes left leased for redelivery` | see above |
 | `INFO ... <principal>: N sessions live and none idle; wakes left leased for redelivery` | `max_sessions` is reached and no session could be evicted |
 | `INFO ... <principal>: archived session <id> for <key> (<why>)` | housekeeping or eviction ended a session: `retire when idle`, `idle ttl` or `evicted at cap` |
+| `INFO ... stopped orphaned session <id> after Ns unrecorded` | the reaper ended a daemon session no map recorded |
+| `WARNING ... the daemon did not stop orphaned session <id>` / `... is still a daemon child after it was stopped` | the stop failed or did not end the child; the next sweep retries |
+| `WARNING ... no orphan sweep while a session map is unreadable: ...` | a kind's `runner-sessions.json` does not parse; nothing is stopped until it does |
 | `WARNING ... happier ... exited N: <stderr>` | a Happier call failed; its stderr follows |
 | `WARNING ... could not wake <principal> (<code>); N wake(s) left leased for redelivery` | delivery failed and the human was notified |
 | `WARNING ... <principal>: create failed (<code>); falling back to remote control` | the Remote Control fallback ran |
