@@ -231,3 +231,11 @@ def test_a_python_without_the_seal_names_still_seals_through_the_linux_abi() -> 
 
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "sealed", "the kernel accepted a write to the sealed memfd"
+
+
+def test_the_nightly_start_may_take_up_an_owned_todo_ticket_but_stays_in_the_perimeter() -> None:
+    from agent_board.night.assignment import PROMPT_TEMPLATE
+
+    assert "start the oldest of your todo tickets whose work belongs here" in PROMPT_TEMPLATE
+    assert "`agent-board tickets move <id> doing`" in PROMPT_TEMPLATE
+    assert "Do not push, merge, deploy, publish or contact anyone outside the board." in PROMPT_TEMPLATE
