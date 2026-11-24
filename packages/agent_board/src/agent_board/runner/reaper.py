@@ -1,10 +1,11 @@
+import fcntl
 import json
 import logging
 import os
 import threading
 import time
-from collections.abc import Callable, Sequence
-from contextlib import ExitStack
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import NoReturn
 
@@ -29,6 +30,7 @@ _OUTCOMES = {
 }
 _DAEMON_STARTED = "daemon"
 _LEDGER_VERSION = 1
+_LOCK_SUFFIX = ".lock"
 logger = logging.getLogger(__name__)
 
 
@@ -103,8 +105,10 @@ class OrphanReaper:
                 if child.started_by == _DAEMON_STARTED and child.session_id not in recorded
             }
             if entered is None:
-                self._write_ledger(dict.fromkeys(sorted(unrecorded), PRESENT_AT_START))
-                logger.info("reaper ledger created; %d existing orphans entered", len(unrecorded))
+                with self._ledger_held():
+                    if self._read_ledger() is None:
+                        self._write_ledger(dict.fromkeys(sorted(unrecorded), PRESENT_AT_START))
+                        logger.info("reaper ledger created; %d existing orphans entered", len(unrecorded))
                 return
             self._report_inventory(entered, listed)
             orphans = unrecorded - set(entered)
@@ -138,7 +142,8 @@ class OrphanReaper:
             logger.warning("could not inspect orphaned session %s: %s", session_id, error)
             return
         if labels is None or not any(pool.opened(*labels) for pool in self._pools):
-            self._enter(entered, session_id, NOT_BOARD)
+            with self._ledger_held():
+                self._enter(entered, session_id, NOT_BOARD)
             logger.warning("daemon session %s is %s; entered in the ledger", session_id, NOT_BOARD)
             return
         if not idle:
@@ -157,10 +162,15 @@ class OrphanReaper:
                 logger.info("session %s was recorded again before its stop; left running", session_id)
                 del self._first_seen[session_id]
                 return
-            self._enter(entered, session_id, STOP_DISPATCHED)
             del self._first_seen[session_id]
-            outcome = self._happier.stop_child(session_id)
-        self._enter(entered, session_id, _OUTCOMES[outcome])
+            with self._ledger_held():
+                if not self._enter(entered, session_id, STOP_DISPATCHED, unless_entered=True):
+                    logger.info(
+                        "session %s was entered in the ledger before its stop; left running", session_id
+                    )
+                    return
+                outcome = self._happier.stop_child(session_id)
+                self._enter(entered, session_id, _OUTCOMES[outcome])
         if outcome is not StopOutcome.STOPPED:
             logger.warning("orphaned session %s: %s; entered in the ledger", session_id, _OUTCOMES[outcome])
             return
@@ -171,9 +181,28 @@ class OrphanReaper:
             logger.warning("could not archive stopped orphaned session %s: %s", session_id, error)
         logger.info("the daemon reported orphaned session %s stopped after %ds unrecorded", session_id, age)
 
-    def _enter(self, entered: dict[str, str], session_id: str, why: str) -> None:
-        self._write_ledger({**entered, session_id: why})
+    @contextmanager
+    def _ledger_held(self) -> Iterator[None]:
+        """Whoever changes the ledger holds this lock and reads the ledger again under it."""
+        with open(self._ledger.with_name(f"{self._ledger.name}{_LOCK_SUFFIX}"), "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
+
+    def _enter(
+        self, entered: dict[str, str], session_id: str, why: str, unless_entered: bool = False
+    ) -> bool:
+        """Under `_ledger_held`, writes `why` for the session over the ledger as it is now; False, writing
+        nothing, if `unless_entered` and the ledger already names the session. Refreshes `entered`."""
+        current = self._read_ledger()
+        if current is None:
+            raise UnreadableLedger(f"{self._ledger}: removed during the sweep")
+        entered.clear()
+        entered.update(current)
+        if unless_entered and session_id in current:
+            return False
+        self._write_ledger({**current, session_id: why})
         entered[session_id] = why
+        return True
 
     def _read_ledger(self) -> dict[str, str] | None:
         try:
@@ -198,3 +227,8 @@ class OrphanReaper:
             file.flush()
             os.fsync(file.fileno())
         os.replace(staged, self._ledger)
+        directory = os.open(self._ledger.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)

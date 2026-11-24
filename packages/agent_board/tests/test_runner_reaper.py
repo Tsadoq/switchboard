@@ -1,5 +1,8 @@
+import fcntl
 import json
 import logging
+import os
+import stat
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -521,3 +524,58 @@ def test_an_orphan_the_relay_has_archived_is_not_taken_as_idle(
     _past_grace(_reaper([pool], ledger, clock), clock, _LONG_AFTER)
 
     assert _tracked(happier_state) == [orphan] and _stops(happier_state) == []
+
+
+class _OwnerHoldsDuringProbe(Happier):
+    def __init__(self, ledger: Path) -> None:
+        super().__init__()
+        self._ledger = ledger
+
+    def confirmed_idle(self, session_id: str, timeout: int = 3) -> bool:
+        with open(f"{self._ledger}.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            current = json.loads(self._ledger.read_text())
+            current["protected"][session_id] = "owner hold"
+            self._ledger.write_text(json.dumps(current))
+        return True
+
+
+def test_an_owner_hold_entered_during_the_probe_is_kept_and_honoured(
+    happier_state: Path, ledger: Path, clock: FakeClock
+) -> None:
+    pool = _pool("claude", clock)
+    orphan = _orphan(happier_state, pool)
+
+    _past_grace(OrphanReaper(_OwnerHoldsDuringProbe(ledger), [pool], ledger, clock), clock)
+
+    assert _stops(happier_state) == [] and _protected(ledger) == {orphan: "owner hold"}
+
+
+def test_the_ledger_directory_is_synced_after_the_entry_and_before_the_stop(
+    happier_state: Path, ledger: Path, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    real_fsync, real_replace, real_stop = os.fsync, os.replace, Happier.stop_child
+
+    def fsync(fd: int) -> None:
+        events.append("sync-dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "sync-file")
+        real_fsync(fd)
+
+    def replace(source: Any, target: Any) -> None:
+        real_replace(source, target)
+        events.append("replace")
+
+    def stop_child(self: Happier, session_id: str) -> Any:
+        events.append("stop")
+        return real_stop(self, session_id)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", replace)
+    monkeypatch.setattr(Happier, "stop_child", stop_child)
+    pool = _pool("claude", clock)
+    _orphan(happier_state, pool)
+
+    _past_grace(_reaper([pool], ledger, clock), clock)
+
+    stop = events.index("stop")
+    assert events[stop - 3 : stop] == ["sync-file", "replace", "sync-dir"], events

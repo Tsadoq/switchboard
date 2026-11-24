@@ -233,7 +233,13 @@ notifications:
     session is entered. A stop is entered before it is sent, so a failed write prevents it,
     and its outcome replaces the entry afterwards: each session gets at most one stop. A
     refused, unconfirmed or interrupted stop is never retried. Only the session's owner or the
-    human removes an entry, by editing the ledger.
+    human adds or removes an entry, by editing the ledger.
+  - Edit the ledger only while holding its lock, for example
+    `flock ~/.agents/board/runner-reaper.json.lock -c 'nano ~/.agents/board/runner-reaper.json'`,
+    or with the runner stopped. The reaper holds that lock while it reads the ledger again and
+    enters a session, and from just before a stop is entered until its outcome is written, so a
+    locked edit is never overwritten and a session it enters is not stopped. Each write is
+    synced to disk with its directory before the stop is sent.
   - A sweep does nothing while the ledger, a map or the old `runner-session.json` is
     unreadable, or while a set-aside `runner-sessions.json.corrupt-*` exists. Reconcile and
     remove the set-aside map to let sweeps resume.
