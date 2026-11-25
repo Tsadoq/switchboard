@@ -11,6 +11,7 @@ from agent_board.night_inspection import (
     CGROUP_ROOT,
     NIGHT_SLICE,
     ROOT_EXEC,
+    UNIT_NOT_STOPPED,
     Binding,
     EmptyObservation,
     InspectionError,
@@ -199,7 +200,10 @@ class SystemdRuns:
         try:
             self._inspector.stopped(binding)
         except InspectionError as error:
-            logger.warning("%s is not proven stopped: %s", unit, error)
+            if str(error) == UNIT_NOT_STOPPED:
+                logger.debug("%s is still running", unit)
+            else:
+                logger.warning("%s is not proven stopped: %s", unit, error)
             return Observation(unit_active=True, cgroup_populated=None)
         return Observation(unit_active=False, cgroup_populated=False)
 

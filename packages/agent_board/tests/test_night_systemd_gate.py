@@ -1,3 +1,4 @@
+import logging
 import os
 from collections.abc import Sequence
 from pathlib import Path
@@ -11,7 +12,14 @@ from agent_board.night.controller import RunManagerError, RunSpec, unit_name
 from agent_board.night.gate import GuardState, open_gate
 from agent_board.night.ledger import Arm, Ledger, Pending
 from agent_board.night.systemd import LiveCommands, SystemdRuns, run_argv
-from agent_board.night_inspection import ROOT_EXEC, Binding, EmptyObservation, InspectionError, unit_cgroup
+from agent_board.night_inspection import (
+    ROOT_EXEC,
+    UNIT_NOT_STOPPED,
+    Binding,
+    EmptyObservation,
+    InspectionError,
+    unit_cgroup,
+)
 from agent_board.night_state import ClockReading, Grant, LocalJournal
 
 if TYPE_CHECKING:
@@ -408,6 +416,25 @@ def test_live_commands_carry_the_exit_code() -> None:
         LiveCommands().run(["/bin/sh", "-c", "exit 5"])
 
     assert raised.value.returncode == 5
+
+
+def test_a_unit_that_is_still_running_is_not_logged_as_a_warning(
+    ledger: Ledger, caplog: pytest.LogCaptureFixture
+) -> None:
+    run_id = str(uuid4())
+    ledger.record_binding(run_id, uid=UID, boot_id=BOOT, invocation_id=OWN, cgroup="/x")
+    inspector = Inspector()
+    runs = _runs(ledger, inspector, Commands())
+
+    with caplog.at_level(logging.DEBUG):
+        inspector.failure = InspectionError(UNIT_NOT_STOPPED)
+        running = runs.inspect(unit_name(run_id))
+        inspector.failure = InspectionError("binding_conflict")
+        conflicting = runs.inspect(unit_name(run_id))
+
+    assert running.unit_active and conflicting.unit_active
+    warnings = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+    assert warnings == [f"{unit_name(run_id)} is not proven stopped: binding_conflict"], warnings
 
 
 @pytest.mark.parametrize(("inspection", "expected"), [("fails", (True, None)), ("empty", (False, False))])

@@ -29,6 +29,9 @@ ROOT_EXEC: Final = "root_exec"
 type Execution = Literal["agent_user", "root_exec"]
 
 
+UNIT_NOT_STOPPED = "unit_not_stopped"
+
+
 class InspectionError(ValueError):
     pass
 
@@ -163,7 +166,7 @@ class Inspector:
         elif before.get("LoadState") != "not-found" or before.get("InvocationID") not in ("", "0" * 32):
             raise InspectionError("unknown_unit")
         if before.get("ActiveState") not in ("inactive", "failed") or before.get("Job") not in ("", "0"):
-            raise InspectionError("unit_not_stopped")
+            raise InspectionError(UNIT_NOT_STOPPED)
         present = self._protected_cgroup(binding, required=False)
         if present:
             events = CGROUP_ROOT / binding.cgroup.lstrip("/") / "cgroup.events"
