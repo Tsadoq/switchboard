@@ -12,10 +12,13 @@ import pytest
 from board.db import Database
 from board.settings import Settings
 from board.wakes.self_wakes import MAX_PENDING, SelfWakeRefused, SelfWakes, deliver
-from test_self_wakes import _running_board, _thread
 
 if TYPE_CHECKING:
+    from packages.board.tests.test_self_wakes import _running_board, _thread
+
     from .conftest import SignerFactory
+else:
+    from test_self_wakes import _running_board, _thread
 
 pytestmark = pytest.mark.anyio
 
