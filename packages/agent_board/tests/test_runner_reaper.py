@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from agent_board.identity import Identity
 from agent_board.runner.config import KindConfig
-from agent_board.runner.happier import Happier
+from agent_board.runner.happier import Happier, HappierError
 from agent_board.runner.reaper import (
     NOT_BOARD,
     ORPHAN_BUSY_ALERT_SECONDS,
@@ -217,8 +217,9 @@ def test_children_the_daemon_did_not_start_are_left_alone(
     [
         lambda entry: entry["session"].update(tag="something-else"),
         lambda entry: entry["session"].update(path="/srv/elsewhere"),
+        lambda entry: (entry["session"].pop("tag"), entry["session"].update(path="/srv/elsewhere")),
     ],
-    ids=["tag", "path"],
+    ids=["tag", "path", "untagged-elsewhere"],
 )
 def test_a_daemon_child_the_runner_would_not_open_is_protected(
     happier_state: Path, ledger: Path, clock: FakeClock, change: Callable[[dict[str, Any]], None]
@@ -579,3 +580,49 @@ def test_the_ledger_directory_is_synced_after_the_entry_and_before_the_stop(
 
     stop = events.index("stop")
     assert events[stop - 3 : stop] == ["sync-file", "replace", "sync-dir"], events
+
+
+def test_an_untagged_orphan_in_a_board_workdir_is_reaped_like_a_tagged_one(
+    happier_state: Path, ledger: Path, clock: FakeClock
+) -> None:
+    """The muninn and huginn case: the relay returned a path but no tag, and the reaper could not act at all."""
+    pool = _pool("claude", clock)
+    orphan = _orphan(happier_state, pool)
+    _update(happier_state, orphan, lambda entry: entry["session"].pop("tag"))
+
+    _past_grace(_reaper([pool], ledger, clock), clock)
+
+    assert _stops(happier_state) == [orphan] and _tracked(happier_state) == []
+    assert _protected(ledger) == {orphan: STOP_REPORTED}
+
+
+@pytest.mark.parametrize(
+    ("session", "expected"),
+    [
+        ({"tag": "board-claude", "path": "/w"}, ("board-claude", "/w")),
+        ({"path": "/w"}, (None, "/w")),
+    ],
+    ids=["tagged", "untagged"],
+)
+def test_labels_read_the_tag_as_optional_and_the_path_as_required(
+    monkeypatch: pytest.MonkeyPatch, session: dict[str, Any], expected: tuple[str | None, str]
+) -> None:
+    happier = Happier()
+    monkeypatch.setattr(happier, "_envelope", lambda *args: {"session": session})
+
+    assert happier.labels("cmx") == expected
+
+
+@pytest.mark.parametrize(
+    "session",
+    [{"tag": "board-claude"}, {"tag": 7, "path": "/w"}, {"tag": "board-claude", "path": None}, None],
+    ids=["no-path", "bad-tag", "bad-path", "no-session"],
+)
+def test_labels_refuse_a_status_without_a_usable_path(
+    monkeypatch: pytest.MonkeyPatch, session: dict[str, Any] | None
+) -> None:
+    happier = Happier()
+    monkeypatch.setattr(happier, "_envelope", lambda *args: {"session": session})
+
+    with pytest.raises(HappierError, match="bad_output"):
+        happier.labels("cmx")

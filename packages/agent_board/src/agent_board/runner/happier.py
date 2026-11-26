@@ -166,8 +166,12 @@ class Happier:
             if isinstance(item, dict) and isinstance(item.get("happySessionId"), str)
         ]
 
-    def labels(self, session_id: str) -> tuple[str, str] | None:
-        """The session's tag and path as the relay records them; None when the relay does not know it."""
+    def labels(self, session_id: str) -> tuple[str | None, str] | None:
+        """The session's tag and path as the relay records them; None when the relay does not know it.
+
+        The tag comes from the session's own metadata, which some snapshots carry without it, so a missing
+        tag is None rather than an error; a missing path still is one.
+        """
         try:
             data = self._envelope("session", "status", session_id, "--json")
         except HappierError as error:
@@ -175,9 +179,13 @@ class Happier:
                 return None
             raise
         try:
-            return str(data["session"]["tag"]), str(data["session"]["path"])
-        except (KeyError, TypeError):
+            session = data["session"]
+            tag, path = session.get("tag"), session["path"]
+        except (AttributeError, KeyError, TypeError):
             raise HappierError("bad_output") from None
+        if not isinstance(path, str) or not (tag is None or isinstance(tag, str)):
+            raise HappierError("bad_output")
+        return tag, path
 
     def stop_child(self, session_id: str) -> StopOutcome:
         """Asks the daemon to stop its own child, which `archive` leaves running once the relay shows it inactive."""

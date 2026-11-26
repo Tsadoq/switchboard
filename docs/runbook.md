@@ -222,9 +222,12 @@ notifications:
   and archiving it does not stop its child, so without this its host and CLI run until the box
   runs out of memory.
   - An orphan is stopped (`happier daemon stop-session`, then archived) only when all of these
-    hold: the relay tags it `board-<kind>` with that kind's workdir, it has been unrecorded for
-    2 hours, `happier session wait` explicitly reports it idle, and the maps, read again while
-    every kind's map lock is held, still do not name it.
+    hold: the relay places it in a served kind's workdir and either tags it `board-<kind>` or
+    carries no tag at all, it has been unrecorded for 2 hours, `happier session wait` explicitly
+    reports it idle, and the maps, read again while every kind's map lock is held, still do not
+    name it. A session with any other tag is never stopped. An untagged one is accepted only by
+    its exact workdir, because Happier's session metadata does not always carry the tag the
+    runner set; this relies on nothing but the runner opening sessions on the board daemon's home.
   - A busy orphan is never stopped; one busy for over 8 hours is reported once in the log. An
     orphan the relay no longer knows, or has archived, is not taken as idle.
   - The ledger `~/.agents/board/runner-reaper.json` lists every session the reaper must not
