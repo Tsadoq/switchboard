@@ -29,6 +29,9 @@ _OUTCOMES = {
     StopOutcome.UNCONFIRMED: STOP_UNCONFIRMED,
 }
 _DAEMON_STARTED = "daemon"
+_SWEEP = ("sweep", "")
+_INSPECT = "inspect"
+_RECHECK = "recheck"
 _LEDGER_VERSION = 1
 _LOCK_SUFFIX = ".lock"
 logger = logging.getLogger(__name__)
@@ -73,6 +76,7 @@ class OrphanReaper:
         self._first_seen: dict[str, float] = {}
         self._stopped: set[str] = set()
         self._reported: set[str] = set()
+        self._failing: dict[tuple[str, str], str] = {}
         self._lock = threading.Lock()
 
     def serve(self) -> NoReturn:
@@ -90,14 +94,19 @@ class OrphanReaper:
                 children = self._happier.children()
                 recorded = self._recorded_now()
             except UnreadableLedger as error:
-                logger.warning("no orphan sweep while the reaper ledger is unreadable: %s", error)
+                self._warn_until_cleared(
+                    _SWEEP, "no orphan sweep while the reaper ledger is unreadable: %s", error
+                )
                 return
             except HappierError as error:
-                logger.warning("could not list the daemon's sessions: %s", error)
+                self._warn_until_cleared(_SWEEP, "could not list the daemon's sessions: %s", error)
                 return
             except UnreadableMap as error:
-                logger.warning("no orphan sweep while a session map is unreadable: %s", error)
+                self._warn_until_cleared(
+                    _SWEEP, "no orphan sweep while a session map is unreadable: %s", error
+                )
                 return
+            self._failing.pop(_SWEEP, None)
             listed = {child.session_id for child in children}
             unrecorded = {
                 child.session_id
@@ -114,9 +123,19 @@ class OrphanReaper:
             orphans = unrecorded - set(entered)
             now = self._clock()
             self._first_seen = {orphan: self._first_seen.get(orphan, now) for orphan in orphans}
+            self._failing = {key: text for key, text in self._failing.items() if key[1] in self._first_seen}
             for orphan, since in sorted(self._first_seen.items()):
                 if now - since >= ORPHAN_GRACE_SECONDS:
                     self._consider(orphan, now - since, entered)
+
+    def _warn_until_cleared(self, key: tuple[str, str], message: str, *args: object) -> None:
+        """A failure that repeats unchanged every sweep is a warning once, then debug until it clears."""
+        text = message % args
+        if self._failing.get(key) == text:
+            logger.debug("%s (unchanged)", text)
+            return
+        self._failing[key] = text
+        logger.warning("%s", text)
 
     def _report_inventory(self, entered: dict[str, str], listed: set[str]) -> None:
         for gone in sorted(self._stopped - listed):
@@ -139,8 +158,11 @@ class OrphanReaper:
             labels = self._happier.labels(session_id)
             idle = self._happier.confirmed_idle(session_id)
         except HappierError as error:
-            logger.warning("could not inspect orphaned session %s: %s", session_id, error)
+            self._warn_until_cleared(
+                (_INSPECT, session_id), "could not inspect orphaned session %s: %s", session_id, error
+            )
             return
+        self._failing.pop((_INSPECT, session_id), None)
         if labels is None or not any(pool.opened(*labels) for pool in self._pools):
             with self._ledger_held():
                 self._enter(entered, session_id, NOT_BOARD)
@@ -156,8 +178,11 @@ class OrphanReaper:
             try:
                 recorded = set().union(*(read() for read in readers))
             except UnreadableMap as error:
-                logger.warning("orphaned session %s not stopped: %s", session_id, error)
+                self._warn_until_cleared(
+                    (_RECHECK, session_id), "orphaned session %s not stopped: %s", session_id, error
+                )
                 return
+            self._failing.pop((_RECHECK, session_id), None)
             if session_id in recorded:
                 logger.info("session %s was recorded again before its stop; left running", session_id)
                 del self._first_seen[session_id]

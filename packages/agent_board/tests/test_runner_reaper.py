@@ -626,3 +626,59 @@ def test_labels_refuse_a_status_without_a_usable_path(
 
     with pytest.raises(HappierError, match="bad_output"):
         happier.labels("cmx")
+
+
+def _warnings(caplog: pytest.LogCaptureFixture, text: str) -> int:
+    return sum(
+        1 for record in caplog.records if record.levelno >= logging.WARNING and text in record.getMessage()
+    )
+
+
+def test_an_inspection_failure_that_repeats_every_sweep_warns_once_until_it_clears(
+    happier_state: Path,
+    ledger: Path,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    pool = _pool("claude", clock)
+    orphan = _orphan(happier_state, pool)
+    _update(happier_state, orphan, lambda entry: entry.update(turnRunning=True))
+    reaper = _reaper([pool], ledger, clock)
+    reaper.sweep()
+    clock.advance(ORPHAN_GRACE_SECONDS)
+    monkeypatch.setenv("FAKE_HAPPIER_FAIL", "wait:boom")
+
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(3):
+            reaper.sweep()
+        assert _warnings(caplog, f"could not inspect orphaned session {orphan}: boom") == 1
+
+        monkeypatch.delenv("FAKE_HAPPIER_FAIL")
+        reaper.sweep()
+        monkeypatch.setenv("FAKE_HAPPIER_FAIL", "wait:boom")
+        reaper.sweep()
+
+    assert _warnings(caplog, f"could not inspect orphaned session {orphan}: boom") == 2
+    assert _stops(happier_state) == []
+
+
+def test_a_daemon_list_failure_that_repeats_warns_once_until_it_clears(
+    happier_state: Path,
+    ledger: Path,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    reaper = _reaper([_pool("claude", clock)], ledger, clock)
+    monkeypatch.setenv("FAKE_HAPPIER_FAIL", "daemon-list:no_daemon")
+
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(3):
+            reaper.sweep()
+        monkeypatch.delenv("FAKE_HAPPIER_FAIL")
+        reaper.sweep()
+        monkeypatch.setenv("FAKE_HAPPIER_FAIL", "daemon-list:no_daemon")
+        reaper.sweep()
+
+    assert _warnings(caplog, "could not list the daemon's sessions") == 2
