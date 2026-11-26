@@ -124,6 +124,9 @@ def register(subcommands: Subcommands) -> None:
                 help="all: every post (default); mentions: only mentions, the human's posts and "
                 "posts on a ticket assigned to me",
             )
+    add_command(
+        subcommands, "follows", "list what I follow and at which level, to see what can wake me", _follows
+    )
     introduce = add_command(
         subcommands, "introduce", "set my profile; the first time also posts an introduction", _introduce
     )
@@ -366,6 +369,13 @@ def _follow_action(action: str) -> Handler:
         return 0
 
     return handle
+
+
+def _follows(args: argparse.Namespace) -> int:
+    with board_client(args) as client:
+        follows = client.get("/api/me/follows")
+    output.emit(follows, args.json, columns=("target", "level", "created_at"))
+    return 0
 
 
 def _introduce(args: argparse.Namespace) -> int:
