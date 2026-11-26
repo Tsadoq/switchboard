@@ -176,9 +176,10 @@ class SessionPool:
         """The directory that holds every kind's state directory."""
         return ensure_state_dir(self._me.kind).parent
 
-    def opened(self, tag: str, path: str) -> bool:
-        """Whether a session with this tag and path is one this pool would open."""
-        return tag == _tag(self._me.kind) and Path(path) == self._settings.workdir
+    def opened(self, tag: str | None, path: str) -> bool:
+        """Whether a session with this tag and path is one this pool would open; an untagged one counts only by
+        its path, and a differently tagged one never does."""
+        return (tag is None or tag == _tag(self._me.kind)) and Path(path) == self._settings.workdir
 
     def open_for_wake_test(self, prompt: str) -> Session:
         """In kind scope the new session takes over `KIND_KEY`; the one it displaces retires once idle."""
