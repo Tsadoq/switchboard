@@ -556,6 +556,7 @@ Lines read `LEVEL logger: message`. The ones that matter:
 | `WARNING ... daemon session <id> is still listed; ledger: <reason>` | a ledger entry other than the first sweep's is still a daemon child; reported once per runner start |
 | `WARNING ... orphaned session <id> has been busy for Ns; left running` | a busy orphan past 8 hours; decide whether to end it |
 | `WARNING ... no orphan sweep while ...` | the ledger, a map or a set-aside map blocks sweeps until resolved |
+| (repeats) | a sweep failure, an inspection failure or a blocked stop that repeats unchanged is a warning once, then logged at debug until it clears; if it comes back after clearing, it warns again |
 | `WARNING ... happier ... exited N: <stderr>` | a Happier call failed; its stderr follows |
 | `WARNING ... could not wake <principal> (<code>); N wake(s) left leased for redelivery` | delivery failed and the human was notified |
 | `WARNING ... <principal>: create failed (<code>); falling back to remote control` | the Remote Control fallback ran |
