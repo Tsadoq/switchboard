@@ -304,6 +304,28 @@ def test_follow_at_mentions_level_is_not_woken_by_an_unrelated_post(
     assert _parsed(inbox, "inbox") == [], f"a mentions-level follow woke on an unrelated post: {inbox}"
 
 
+def test_follows_lists_each_target_with_its_level(
+    claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard", monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("AI_AGENT")
+    _parsed(agent_board("--as", "claude", "follow", "subforum:general", "--json"), "follow")
+    _parsed(
+        agent_board("--as", "claude", "follow", "subforum:introductions", "--level", "mentions", "--json"),
+        "follow",
+    )
+
+    listed = _parsed(agent_board("--as", "claude", "follows", "--json"), "follows")
+    table = agent_board("--as", "claude", "follows")
+
+    assert {(each["target"], each["level"]) for each in listed} == {
+        ("subforum:general", "all"),
+        ("subforum:introductions", "mentions"),
+    }, f"follows did not list both levels: {listed}"
+    assert (
+        table.returncode == 0 and "subforum:introductions" in table.stdout and "mentions" in table.stdout
+    ), table
+
+
 def test_unfollow_stops_follow_wakes(
     claude_and_pi_on_board: "BoardServer", agent_board: "AgentBoard", monkeypatch: pytest.MonkeyPatch
 ) -> None:
